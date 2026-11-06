@@ -7,18 +7,24 @@ module Hud
   , wonCaption
   , hintBand
   , blockedPlate
+  , tooCostlyPlate
+  , pushBlockedPlate
   , pausedScreen
   , wonScreen
   , lostScreen
-  , clockText
+  , secondsText
+  , costText
+  , costColor
   ) where
 
 import Draw
 import Figures (cellIcon)
 import Font
+import Game.Fx
 import Game.Logic
 import Game.Types
 import Graphics.Gloss
+import qualified Data.Set as Set
 
 -- | Lettering that never changes, drawn once.
 data HudArt = HudArt
@@ -37,12 +43,12 @@ skin :: Era -> Skin
 skin Past    = Skin (hex 0xF3E2BE) (hex 0xB89E76) (hex 0x8A6A3F) (hex 0xE8B85C)
 skin Present = Skin (hex 0xD6E0E2) (hex 0x8A9AA0) (hex 0x4F5B60) (hex 0x9CC7D8)
 
-mkHudArt :: HudArt
-mkHudArt = HudArt (bake (staticPanel Past)) (bake (staticPanel Present))
+mkHudArt :: Rules -> HudArt
+mkHudArt rules = HudArt (bake (staticPanel rules Past)) (bake (staticPanel rules Present))
 
 -- | Backing plate, era plaque, section labels and controls.
-staticPanel :: Era -> Picture
-staticPanel era = Pictures
+staticPanel :: Rules -> Era -> Picture
+staticPanel rules era = Pictures
   [ Color (hexA 0x000000 0.5) (rect (panelLeft - 5) panelBottom (panelW + 10) (panelTop - panelBottom))
   , Color back (rect panelLeft panelBottom panelW (panelTop - panelBottom))
   , Color (skRule sk) (Pictures
@@ -59,7 +65,7 @@ staticPanel era = Pictures
       , Translate (panelX - 92) (-182) (textL 11 "Controls")
       ])
   , Color (skRule sk) (Pictures [ rect (panelX - 92) y 184 1 | y <- [200, 90, -20, -166] ])
-  , controls sk
+  , controls rules sk
   ]
   where
     sk = skin era
@@ -105,12 +111,15 @@ plaque era = Translate panelX 298 $ case era of
       , thin (hex 0x83929A) [(-4, 5), (1, 0), (-2, -4)]
       ]
 
-controls :: Skin -> Picture
-controls sk = Pictures
-  [ row (-214) "WASD" "Move"
-  , row (-250) "SPACE" "Shift era"
-  , row (-286) "P" "Pause"
-  , row (-322) "R" "Restart"
+-- | The prices are printed beside the keys, because they are the rules of the game.
+controls :: Rules -> Skin -> Picture
+controls rules sk = Pictures
+  [ row (-208) "WASD" ("Move  -" ++ show (ruStepCost rules) ++ " s")
+  , row (-238) "SPACE" ("Shift  -" ++ show (ruShiftCost rules) ++ " s")
+  , row (-268) "Z" ("Undo  +" ++ show (ruUndoRefundPercent rules) ++ " pct")
+  , row (-298) "TAB" "Look  free"
+  , row (-328) "R" "Restart  free"
+  , row (-358) "P" "Pause"
   ]
   where
     row y key what = Pictures
@@ -127,20 +136,20 @@ keyCap sk key = Pictures
   ]
   where w = max 26 (textW 11 key + 14)
 
-clockText :: Int -> String
-clockText ticks =
-  let total = (ticks + ticksPerSecond - 1) `div` ticksPerSecond
-      (m, s) = total `divMod` 60
-  in show m ++ ":" ++ (if s < 10 then "0" else "") ++ show s
+secondsText :: Int -> String
+secondsText s = show s ++ " s"
 
 -- | The panel, with its live readings.
-hud :: HudArt -> Game -> Float -> Picture
-hud art g clock = Pictures
+hud :: HudArt -> Level -> Game -> Fx -> Float -> Picture
+hud art level g fx clock = Pictures
   [ case era of { Past -> artPast art; Present -> artPresent art }
-    -- Countdown, with a tide line draining beneath it.
-  , Color timeColor (Translate (panelX - 92) 128 (weighted 42 5.2 (clockText remaining)))
+    -- Time left, with a tide line draining beneath it.
+  , Color timeColor (Translate (panelX - 92) 128 (weighted 42 5.2 (secondsText (ceiling shown))))
   , Color (fade 0.25 (skRule sk)) (rect (panelX - 92) 112 184 5)
   , Color timeColor (rect (panelX - 92) 112 (184 * share) 5)
+  , costNote
+    -- A push in the past changes a door you cannot see from there.
+  , doorNote
     -- The cell slot.
   , Translate (panelX - 66) 30 (Pictures
       [ Color (skRule sk) (rect (-28) (-26) 56 52)
@@ -161,19 +170,50 @@ hud art g clock = Pictures
       | gPhase g == Won = ("In the lamp", "Burning")
       | gHasCell g = ("Carried", "Travels with you")
       | otherwise = ("Not found", "Somewhere in time")
+    doorNote
+      | Set.null (lvDoors level) = Blank
+      | otherwise = Color (skInk sk) (Translate (panelX - 92) (-142)
+          (textL 13 (if doorsOpen level (gCrates g) then "The door is open" else "The door is shut")))
+    rules = lvRules level
+    budget = lvBudget level
     remaining = gRemaining g
-    share = fromIntegral remaining / fromIntegral levelTicks :: Float
-    low = remaining < 30 * ticksPerSecond
+    -- An action is charged when accepted, but the reading drains as it plays out,
+    -- so the cost is felt rather than just subtracted.
+    shown = fromIntegral remaining + stillDraining :: Float
+    stillDraining = case gMotion g of
+      Stepping _ left -> fromIntegral (ruStepCost rules * left) / fromIntegral stepTicks
+      Shifting left   -> fromIntegral (ruShiftCost rules * left) / fromIntegral shiftTicks
+      Settled         -> 0
+    share = shown / fromIntegral budget
+    low = gPhase g /= Won && remaining * 5 <= budget
+    costNote = case fxCost fx of
+      Just c ->
+        let t = fromIntegral (cfAge c) / fromIntegral costLife
+        in Color (fade (1 - t * t) (costColor (cfAmount c)))
+             (Translate (panelX + 92) (128 + 22 * t) (textR 20 (costText (cfAmount c))))
+      Nothing -> Blank
     timeColor
       | low = mix (0.5 + 0.5 * sin (clock * 0.18)) (hex 0xFF6B4A) (hex 0xFFB39E)
       | otherwise = skInk sk
 
+-- | How a change in time left is written.
+costText :: Int -> String
+costText n
+  | n > 0 = "+" ++ show n
+  | otherwise = show n
+
+-- | Spending is hot, a refund is cool.
+costColor :: Int -> Color
+costColor n
+  | n > 0 = hex 0x9CE0B0
+  | otherwise = hex 0xFF9A6B
+
 -- | Era name above the map, so it is always stated in words.
-mapCaption :: Era -> Picture
-mapCaption era = Pictures
+mapCaption :: String -> Era -> Picture
+mapCaption title era = Pictures
   [ Color (skAccent sk) (Translate mapLeft (mapTop + 23) (textL 16 name))
   , Color (skDim sk) (Translate (mapLeft + textW 16 name + 18) (mapTop + 23) (textL 12 note))
-  , Color (skDim sk) (Translate (mapRight - 4) (mapTop + 23) (textR 12 "Harrow Point Light Station"))
+  , Color (skDim sk) (Translate (mapRight - 4) (mapTop + 23) (textR 12 title))
   ]
   where
     sk = skin era
@@ -182,11 +222,11 @@ mapCaption era = Pictures
       Present -> ("PRESENT", "Roof gone, the sea coming in")
 
 -- | The same line, once the lamp is lit.
-wonCaption :: Picture
-wonCaption = bake $ Pictures
+wonCaption :: String -> Picture
+wonCaption title = bake $ Pictures
   [ Color (hex 0xFFE2A8) (Translate mapLeft (mapTop + 23) (textL 16 "PRESENT"))
   , Color (hex 0xD8BE90) (Translate (mapLeft + textW 16 "PRESENT" + 18) (mapTop + 23) (textL 12 "The lamp burns again"))
-  , Color (hex 0xD8BE90) (Translate (mapRight - 4) (mapTop + 23) (textR 12 "Harrow Point Light Station"))
+  , Color (hex 0xD8BE90) (Translate (mapRight - 4) (mapTop + 23) (textR 12 title))
   ]
 
 -- | One brief line under the map. The caller decides what, if anything.
@@ -198,14 +238,25 @@ hintBand era k str = Pictures
 
 -- | The refusal, pinned beside the cell it is about.
 blockedPlate :: Era -> Cell -> Float -> Picture
-blockedPlate era (x, y) k = Translate px py (Pictures
+blockedPlate era cell = refusalPlate cell blockedTitle (blockedDetail (otherEra era))
+
+-- | The same plate, when the only thing missing is time.
+tooCostlyPlate :: Rules -> Cell -> Float -> Picture
+tooCostlyPlate rules cell = refusalPlate cell tooCostlyTitle (tooCostlyDetail rules)
+
+-- | The same plate, pinned to where a crate cannot go.
+pushBlockedPlate :: Cell -> Float -> Picture
+pushBlockedPlate cell = refusalPlate cell pushBlockedTitle pushBlockedDetail
+
+refusalPlate :: Cell -> String -> String -> Float -> Picture
+refusalPlate (x, y) title detail k = Translate px py (Pictures
   [ Color (hexA 0x000000 (0.85 * k)) (rectC (w + 8) 62)
   , Color (fade k (hex 0xFF8A5C)) (Pictures [rect (-w / 2 - 4) 29 (w + 8) 2, rect (-w / 2 - 4) (-31) (w + 8) 2])
-  , Color (fade k (hex 0xFFD9C8)) (Translate 0 4 (textC 15 blockedTitle))
-  , Color (fade k (hex 0xF0E6DC)) (Translate 0 (-19) (textC 11 (blockedDetail (otherEra era))))
+  , Color (fade k (hex 0xFFD9C8)) (Translate 0 4 (textC 15 title))
+  , Color (fade k (hex 0xF0E6DC)) (Translate 0 (-19) (textC 11 detail))
   ])
   where
-    w = max (textW 15 blockedTitle) (textW 11 (blockedDetail (otherEra era))) + 22
+    w = max (textW 15 title) (textW 11 detail) + 22
     (cx, cy) = cellPos (x, y)
     px = max (mapLeft + w / 2 + 8) (min (mapRight - w / 2 - 8) cx)
     py = if y >= 3 then cy + 72 else cy - 72
@@ -228,22 +279,28 @@ pausedScreen era k = Pictures
   , Color (fade k (skDim (skin era))) (Translate centreOfMap (-30) (textC 14 "P resume   *   R restart"))
   ]
 
-wonScreen :: Float -> Int -> Picture
-wonScreen k remaining = Pictures
+-- | The plate over the map when a level is won, knowing whether another follows.
+wonScreen :: Bool -> Float -> Int -> Picture
+wonScreen hasNext k remaining = Pictures
   [ wide (-236) 150 k (hexA 0x1C1208 0.86) (hex 0xE8B85C)
   , Color (fade k (hex 0xFFEFC4)) (Translate centreOfMap (-224) (weightedC 30 3.7 victoryText))
-  , Color (fade k (hex 0xD8BE90)) (Translate centreOfMap (-254) (textC 13 ("Time left " ++ clockText remaining)))
-  , Color (fade k (hex 0xFFEFC4)) (Translate centreOfMap (-287) (textC 13 "Press Enter to play again"))
+  , Color (fade k (hex 0xD8BE90)) (Translate centreOfMap (-254) (textC 13 ("Time left " ++ secondsText remaining)))
+  , Color (fade k (hex 0xFFEFC4)) (Translate centreOfMap (-287) (textC 13 next))
   ]
+  where
+    next
+      | hasNext = "Enter next level   *   R play again"
+      | otherwise = "Every lamp is lit   *   Enter returns to the title"
 
 lostScreen :: Float -> Picture
 lostScreen k = Pictures
   [ Color (hexA 0x05080A (0.5 * k)) (rect mapLeft mapBottom (mapRight - mapLeft) (mapTop - mapBottom))
   , wide 10 150 k (hexA 0x0B1014 0.95) (hex 0xFF8A5C)
   , Color (fade k (hex 0xE6EDEE)) (Translate centreOfMap 22 (weightedC 32 4 failureText))
-  , Color (fade k (hex 0x9AA9AE)) (Translate centreOfMap (-10) (textC 13 "Time ran out. The station stays dark."))
-  , Color (fade k (hex 0xE6EDEE)) (Translate centreOfMap (-40) (textC 13 "Press Enter to try again"))
+  , Color (fade k (hex 0x9AA9AE)) (Translate centreOfMap (-10) (textC 13 "Out of time. The station stays dark."))
+  , Color (fade k (hex 0xE6EDEE)) (Translate centreOfMap (-40) (textC 13 "Z rewinds   *   Enter or R starts over"))
   ]
+
 
 weightedC :: Float -> Float -> String -> Picture
 weightedC size w s = Translate (negate (textW size s) / 2) 0 (weighted size w s)

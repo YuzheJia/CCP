@@ -6,15 +6,17 @@ module Game.Solution
   , actionInputs
   , routeInputs
   , applyAction
-  , StateKey
+  , StateKey (..)
   , stateKey
   , startPlaying
   , SearchResult (..)
   , search
+  , deadStates
   , allActions
   , actionLabel
   ) where
 
+import Data.List (foldl')
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Game.Logic
@@ -55,13 +57,14 @@ intendedRoute = concat
     left n  = replicate n (Go DirLeft)
     right n = replicate n (Go DirRight)
 
--- | Key states for one action: a press on the first tick, then idle. The player
--- is free again on the tick after the last one listed, which is when the next
--- action's press lands.
+-- | Key states for one action: a press on the first tick, then idle, so the next
+-- action's press lands when the player can take it. A direction pressed on the tick
+-- a step lands is taken at once. Space pressed on a wave's last tick is dropped by
+-- the lock, so a shift waits one tick longer, or two shifts in a row would be one.
 actionInputs :: Action -> [TickInput]
 actionInputs action = case action of
   Go dir   -> noInput { tiDir = Just dir } : replicate (stepTicks - 1) noInput
-  ShiftEra -> noInput { tiShift = True }   : replicate (shiftTicks - 1) noInput
+  ShiftEra -> noInput { tiShift = True }   : replicate shiftTicks noInput
 
 -- | The whole route, plus the one idle tick on which its last action completes.
 routeInputs :: [Action] -> [TickInput]
@@ -82,56 +85,103 @@ applyAction level action g = settle (stepGame level press g)
       | gPhase s == Playing && gMotion s /= Settled = settle (stepGame level noInput s)
       | otherwise = s
 
--- | Everything the rules can tell apart once the player has settled.
-type StateKey = (Era, Cell, Bool, Phase)
+-- | Everything the rules can tell apart once the player has settled. Crates and
+-- filled pits belong here: leave them out and different boards would be merged.
+data StateKey = StateKey
+  { skEra     :: !Era
+  , skCell    :: !Cell
+  , skHasCell :: !Bool
+  , skPhase   :: !Phase
+  , skCrates  :: !(Set.Set Cell)
+  , skFilled  :: !(Set.Set Cell)
+  } deriving (Eq, Ord, Show)
 
 stateKey :: Game -> StateKey
-stateKey g = (gEra g, gCell g, gHasCell g, gPhase g)
+stateKey g = StateKey (gEra g) (gCell g) (gHasCell g) (gPhase g) (gCrates g) (gFilled g)
 
 data SearchResult = SearchResult
-  { srStates   :: !(Map.Map StateKey (Int, [Action])) -- ^ distance and one shortest route
-  , srGoal     :: !(Maybe (Int, [Action]))
-  , srDeadEnds :: ![StateKey]                         -- ^ reachable, but cannot then win
+  { srStates   :: !(Map.Map StateKey Int)    -- ^ cheapest cost to reach each state
+  , srGoal     :: !(Maybe (Int, [Action]))   -- ^ cheapest cost to win, and a route
+  , srDeadEnds :: ![StateKey]                -- ^ reachable, but cannot then win
   }
 
--- | Breadth-first over the real rules, with the countdown refilled before each
--- action so it cannot end the search. @allowed@ limits what the player may do
--- from a given state, which is how "never shift" is asked.
+-- | Every state of a level that can be reached but can no longer be won, whatever
+-- the time left. A level's own rules can tell the player when they have walked into
+-- one, by looking it up.
+deadStates :: Level -> Set.Set StateKey
+deadStates level = Set.fromList (srDeadEnds (search level (\_ _ -> True) (startPlaying level)))
+
+data Explored = Explored
+  { exQueue   :: !(Set.Set (Int, StateKey))
+  , exCosts   :: !(Map.Map StateKey Int)
+  , exGames   :: !(Map.Map StateKey Game)
+  , exParents :: !(Map.Map StateKey (StateKey, Action))
+  , exEdges   :: ![(StateKey, StateKey)]
+  }
+
+-- | Cheapest-first over the real rules. The budget is refilled before each action
+-- so it cannot end the search, and an action's cost is read from how much time the
+-- real 'stepGame' took, so there is no second price list to keep in step. @allowed@
+-- limits what the player may do from a given state, which is how "never shift" is
+-- asked.
 search :: Level -> (Game -> Action -> Bool) -> Game -> SearchResult
 search level allowed start = SearchResult
-  { srStates = visited
-  , srGoal   = case [v | (k, v) <- Map.toList visited, isWon k] of
+  { srStates = costs
+  , srGoal   = case [(c, k) | (k, c) <- Map.toList costs, isWon k] of
       []   -> Nothing
-      wins -> Just (minimum' wins)
-  , srDeadEnds = [k | k <- Map.keys visited, not (k `Set.member` canWin)]
+      wins -> let (c, k) = minimum wins in Just (c, routeTo k)
+  , srDeadEnds = [k | k <- Map.keys costs, not (k `Set.member` canWin)]
   }
   where
-    (visited, edges) = bfs [(start, 0, [])] (Map.singleton (stateKey start) (0, [])) []
-    isWon (_, _, _, phase) = phase == Won
-    minimum' = foldr1 (\a b -> if fst a <= fst b then a else b)
+    startKey = stateKey start
+    explored = explore Explored
+      { exQueue = Set.singleton (0, startKey)
+      , exCosts = Map.singleton startKey 0
+      , exGames = Map.singleton startKey start
+      , exParents = Map.empty
+      , exEdges = []
+      }
+    costs = exCosts explored
+    edges = exEdges explored
+    isWon k = skPhase k == Won
 
-    bfs [] seen es = (seen, es)
-    bfs frontier seen es =
-      let moves = [ (next, d + 1, route ++ [a], stateKey g, stateKey next)
-                  | (g, d, route) <- frontier
-                  , gPhase g == Playing
-                  , a <- allActions
-                  , allowed g a
-                  , let next = refill (applyAction level a (refill g)) ]
-          es' = [(from, to) | (_, _, _, from, to) <- moves] ++ es
-          (seen', frontier') = foldl visit (seen, []) moves
-      in bfs (reverse frontier') seen' es'
+    explore ex = case Set.minView (exQueue ex) of
+      Nothing -> ex
+      Just ((cost, key), queue)
+        | cost > Map.findWithDefault cost key (exCosts ex) || skPhase key /= Playing ->
+            explore ex { exQueue = queue }
+        | otherwise ->
+            explore (foldl' (relax cost key (exGames ex Map.! key)) ex { exQueue = queue } allActions)
 
-    visit (seen, out) (next, d, route, _, key)
-      | key `Map.member` seen = (seen, out)
-      | otherwise = (Map.insert key (d, route) seen, (next, d, route) : out)
+    relax cost key g ex action
+      | not (allowed g action) || nextKey == key = ex
+      | maybe True (nextCost <) (Map.lookup nextKey (exCosts ex)) = linked
+          { exQueue   = Set.insert (nextCost, nextKey) (exQueue ex)
+          , exCosts   = Map.insert nextKey nextCost (exCosts ex)
+          , exGames   = Map.insert nextKey next (exGames ex)
+          , exParents = Map.insert nextKey (key, action) (exParents ex)
+          }
+      | otherwise = linked
+      where
+        ready = refill g
+        next = applyAction level action ready
+        nextKey = stateKey next
+        nextCost = cost + gRemaining ready - gRemaining next
+        linked = ex { exEdges = (key, nextKey) : exEdges ex }
 
-    refill g = g { gRemaining = levelTicks, gFeedback = Nothing, gBump = 0 }
+    refill g = g { gRemaining = plentyOfTime, gHistory = [], gFeedback = Nothing, gBump = 0 }
+    plentyOfTime = 1000000 :: Int
+
+    routeTo = go []
+      where
+        go route k = case Map.lookup k (exParents explored) of
+          Nothing -> route
+          Just (parent, action) -> go (action : route) parent
 
     -- Walk the edges backwards from every won state.
     predecessors = Map.fromListWith (++) [(to, [from]) | (from, to) <- edges]
-    canWin = spread (Set.fromList (filter isWon (Map.keys visited)))
-                    (filter isWon (Map.keys visited))
+    canWin = spread (Set.fromList (filter isWon (Map.keys costs)))
+                    (filter isWon (Map.keys costs))
     spread done [] = done
     spread done (k : rest) =
       let new = [p | p <- Map.findWithDefault [] k predecessors, not (p `Set.member` done)]

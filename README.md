@@ -2,7 +2,7 @@
 
 Retrieve a power cell from the past and bring it back to illuminate a lighthouse in the present.
 
-One complete level of a top-down time-shifting puzzle, in Haskell with Gloss. It is a practice prototype for the University of Bristol CSS GameJam 2026, kept separate from the final submission. Nothing here has been published or submitted.
+A short campaign of a top-down time-shifting puzzle with a time budget, crates and pits, in Haskell with Gloss. It is a practice prototype for the University of Bristol CSS GameJam 2026, kept separate from the final submission. Nothing here has been published or submitted.
 
 Whether pre-event code is allowed in an entry, and whether this approach would qualify for the functional-programming prize, are **not established**. Check the event rules before reusing any of it.
 
@@ -26,7 +26,7 @@ cabal test spec --test-show-details=direct
 cabal run borrowed-light
 ```
 
-`cabal run borrowed-light -- --demo` plays the verified route, then hands you the keyboard.
+`cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to start at level N.
 
 ### Controls
 
@@ -34,15 +34,70 @@ cabal run borrowed-light
 |---|---|
 | WASD / arrows | Move |
 | Space | Shift era |
+| Z | Undo the last action (gives back half its time) |
+| Tab | Hold to look at the other era, for free |
 | P | Pause / resume |
 | R | Restart |
 | Enter | Start / retry |
 | Window close button | Exit |
 
+### Time
+
+Time is a budget, not a clock. A step costs 2 seconds and a shift costs 6, charged when the action is accepted. Standing still, pausing, refused actions and restarting cost nothing. Z restores the board exactly but refunds only half the action's cost, and R refills the budget at the price of walking it all again. With less than one step's price left, the level is lost, though Z still works from the lost screen. The prices live in a plain `Rules` record on each `Level`.
+
+Each level's budget is its par, the cheapest possible cost found by the solver, plus slack that shrinks as the game goes on.
+
+### The campaign
+
+Seven levels, each adding one idea or combining ideas already taught:
+
+| # | Level | Idea | Par | Budget |
+|---|---|---|---|---|
+| 1 | First Light | Walking, switching, and what each costs | 48 | 68 |
+| 2 | First Push | A crate only moves in the past | 42 | 58 |
+| 3 | The Plug | A crate plugs a door, and the obvious push seals it for good | 56 | 68 |
+| 4 | The Buried Lamp | The pushes that save steps are the fatal ones | 64 | 76 |
+| 5 | The Held Door | A crate on a plate opens a door in the present | 54 | 66 |
+| 6 | The Bridge | A crate in a pit becomes a way across | 44 | 56 |
+| 7 | The Wrong Way First | The crate must first move away from where it has to go | 64 | 72 |
+
+### Help the game gives
+
+Corner ticks under the keeper's feet mean you can switch era right here. Holding Tab shows the other era without spending anything. The moment a push makes the level unwinnable, a line under the map says so, using a list of dead states the solver works out for the level. It says nothing about running out of time, because that would give away the par.
+
+### Crates and pits
+
+A crate has one position, shared by both eras, so it only goes where both have room: it can't be pushed into a cell that is a wall in the present. In the past, walking into it pushes it one cell, and it can never be pulled. In the present it is rusted solid. You can't stand on its cell in either era, so a crate on a cell that is open in both closes that crossing, and moving it can open one. Holding a direction walks up to a crate and stops: a push needs a fresh press, so a walk can't shove one into a dead end.
+
+A pit (`~` on the past map) blocks the past until a crate is pushed in. The crate is used up and the cell becomes past floor, even if the present is a wall there, which makes it a bridge. If the present is open too, it is also a new crossing.
+
+A pressure plate is set in the floor of both eras. A door in the present is a wall until a crate rests on every plate, and it shuts again if a crate is pushed off. Only a crate holds a plate: standing on one does nothing. Doors are worked out from where the crates are, not stored, so undo, restart and the solver needed no new state. A crate can't be pushed into a door, open or shut.
+
+Pushes can't be walked back, so a level can now reach a state it can't be won from. Z and R are the way out.
+
+### Writing a level
+
+A level is two maps of the same size in `campaign` in `src/Game/Level.hs`, sealed by walls:
+
+| Character | Meaning | Map |
+|---|---|---|
+| `#` `.` | Wall, floor | Both |
+| `B` | Power cell, exactly one | Past |
+| `C` | Crate, on a cell that is floor in both eras | Past |
+| `~` | Pit | Past |
+| `P` | Pressure plate, on a cell that is floor in both eras | Past |
+| `D` | Door, opened by the plates | Present |
+| `S` | Spawn, exactly one, never under a crate | Present |
+| `G` | Lighthouse, exactly one | Present |
+
+Give it a name, a par and a slack, then run the tests. They re-derive the par through the real rules and print it, with the route's actions, the state count and the dead states. The solver proves a level can be won, not that it is any good, so each level should have one idea you can name in a sentence.
+
+With a Chinese input method in Chinese mode, Windows swallows the letter keys before the game sees them. Switch it to English, or use the arrow keys for movement.
+
 ### Native runtime requirements
 
 - **macOS (tested, arm64):** Apple's GLUT and OpenGL frameworks, which ship with the OS. Both are deprecated by Apple but present.
-- **Windows x64 (the team's target, not tested):** Gloss's GLUT backend needs `freeglut.dll` beside the executable or on `PATH`. See "Outstanding".
+- **Windows x64 (the team's target):** Gloss's GLUT backend needs `libfreeglut.dll` beside the executable or on `PATH`. With GHCup's MSYS2 it is in `C:\ghcup\msys64\mingw64\bin`. See "Outstanding".
 
 ### Development flags
 
@@ -53,31 +108,32 @@ cabal run borrowed-light
 ```
 src/Game/   pure core: no Gloss, no IO, compiled without a graphics dependency
   Types     Era, Phase, Motion, TickInput, Level, Game
-  Level     the two maps and the parser that validates them
+  Level     the campaign and the parser that validates its maps
   Logic     stepGame and tryShift: all the rules
   Input     key events into one TickInput per tick
   Fx        decorative state, derived by comparing successive games
-  Solution  the intended route, and breadth-first search over real stepGame
+  Solution  the intended route, and cheapest-first search over real stepGame
+  Run       which level is being played, and moving between them
 app/        Gloss only: Main (IO), Render, Station, Figures, Hud, Title, Font, Draw, Platform
 test/       plain assertions over the core
 ```
 
 ### The era transition
 
-A shift is an ordinary pure function. It flips the era if the player's cell is open in the other one, and records why not if it isn't:
+A shift is an ordinary pure function. It flips the era if the player's cell is open in the other one and the time is there, and records why not if it isn't:
 
 ```haskell
 tryShift level g
   | gMotion g /= Settled = g
-  | walkable level destination (gCell g) =
-      touchCell level cleared { gEra = destination, gMotion = Shifting shiftTicks, ... }
+  | not (openCell level g destination (gCell g)) = refuse (ShiftBlocked (gCell g))
+  | gRemaining g < cost = refuse ShiftTooCostly
   | otherwise =
-      cleared { gFeedback = Just (Feedback (ShiftBlocked (gCell g)) blockedFeedbackTicks) }
+      touchCell level (charge cost cleared) { gEra = destination, gMotion = Shifting shiftTicks, ... }
 ```
 
 The era changes at once. `Shifting` only locks input for 13 ticks (about 0.22 s) while the wave crosses the map, so what you see and what collides can't disagree. `Motion` is a sum type (`Settled | Stepping | Shifting`), so walking and shifting at the same time can't be represented. `touchCell` is the only place pickup and victory happen, and it runs both when a step lands and when an era changes.
 
-Each `stepGame` tick notes fresh presses, advances the current step or wave, starts what is pending (shift first, then move), then spends one tick. A win changes the phase before the tick is spent, which is why victory beats timeout on the final tick.
+Each `stepGame` tick notes fresh presses, advances the current step or wave, ends the level if nothing is affordable, then starts what is pending (undo, then shift, then move). Ticks spend nothing: an action is charged once, when it is accepted. A win changes the phase before the affordability check, which is why reaching the goal on the last second wins.
 
 ## Art direction
 
@@ -95,7 +151,7 @@ The two opposite passages explain themselves:
 | (4,2) | A door standing open, with brass thresholds and a runner through it | The lintel has fallen; a heap of rubble fills it |
 | (8,6) | A bolted bulkhead with a locking wheel and hazard stripes | The sea has torn it out, leaving jagged stubs and wet floor |
 
-Blocked cells are always bright and raised; walkable cells are always dark and flat.
+Walls and crates are bright and raised, and walkable cells are dark and flat. A pit is the one blocked cell drawn low, so it has a hazard-striped rim around a black shaft.
 
 **The shift** is the centrepiece: tiles flip edge-on, one by one, in order of distance from the player, behind a thin expanding ring. A refused shift outlines and hatches the cell and says why, with only a small shudder on the keeper. **Victory** moves the keeper aside, relights the tower, turns long beams through the scene and soaks warm light outward.
 
@@ -103,7 +159,7 @@ Everything is procedural geometry, with no external assets. Glows are layered tr
 
 ## Solution walkthrough
 
-Found by breadth-first search through the real `stepGame`, and also replayed through tick inputs and OS key events.
+For the original Harrow Point map, which is now the tests' fixture and not part of the campaign. Found by searching through the real `stepGame`, and also replayed through tick inputs and OS key events.
 
 | # | Keys | Where you end up |
 |---|---|---|
@@ -120,7 +176,7 @@ Found by breadth-first search through the real `stepGame`, and also replayed thr
 | 11 | Space | Present |
 | 12 | A | (2,2), the lighthouse: win |
 
-36 steps and 6 shifts make 42 actions, taking 367 ticks (about 6.1 s) with no idle time.
+36 steps and 6 shifts make 42 actions, costing 108 seconds of budget.
 
 ## Evidence
 
@@ -139,9 +195,9 @@ Toolchain, on macOS 26.5.2 (arm64):
 | containers | 0.6.7 |
 
 - **Automated tests:** all pass, covering the 18 required items plus parser, input-adapter and effects checks. Latest count: see "Test results" below.
-- **Reachability in the implementation:** 255 reachable states, 0 dead ends with the countdown refilled, shortest route 42 actions with 6 shifts. This confirms the earlier abstract model. Every walkable cell in both eras can be reached, and no route uses fewer than six shifts.
+- **Reachability in the implementation (the Harrow Point fixture):** 255 reachable states, 0 dead ends with the budget refilled, cheapest route 42 actions with 6 shifts. This confirms the earlier abstract model. Every walkable cell in both eras can be reached, and no route uses fewer than six shifts.
 - **Real window, real OS key events** (posted to the process): Enter, Space, tap, hold-to-repeat, P, R and the route to victory. Holding Space for 1 s shifted once. Space during a step shifted after landing. Keys pressed while paused were ignored.
-- **Timer against the wall clock:** 616 ticks in about 10.2 s, including process launch overhead.
+- **Tick rate against the wall clock:** 616 ticks in about 10.2 s, including process launch overhead. Measured before time became a budget, when the same ticks drove a countdown.
 - **Window close:** pressing the close button through the accessibility API exits with code 0.
 - **Resizing:** scales and letterboxes correctly at 900×700.
 - **Visual QA:** every screen in `docs/` was captured from the running game and inspected.
@@ -153,7 +209,7 @@ Toolchain, on macOS 26.5.2 (arm64):
 
 ### Unverified: not established
 
-- **Anything on Windows**, including building, linking `freeglut.dll`, key codes, window close and frame rate.
+- **On Windows:** window close and frame rate. It builds, passes its tests and runs on Windows 11 x64, with key events posted to the window and a person playing some of the levels.
 - A standalone, redistributable build on any platform.
 - Prize eligibility, and whether pre-event code or AI-assisted assets are allowed.
 - Physical key feel, including real auto-repeat behaviour: testing used injected events. Gloss turns GLUT key repeat off and `Game.Input` ignores repeated key-downs regardless.
@@ -162,15 +218,13 @@ Toolchain, on macOS 26.5.2 (arm64):
 
 ## Outstanding checks on Windows
 
-1. `cabal build`, with `freeglut.dll` available.
-2. `cabal test spec`, which needs no graphics at all.
-3. Play through with a real keyboard, including holding keys.
-4. Close the window and confirm the process exits.
-5. Check the frame rate on team laptops.
+1. Play the whole campaign with a real keyboard, including holding keys.
+2. Close the window and confirm the process exits.
+3. Check the frame rate on team laptops.
 
 ## Known issues and limitations
 
-- **Frame rate:** 40–58 fps measured here, while other sessions were using the GPU and CPU, and about 30 fps with every core saturated. The rules are fixed-step, so the timer stayed accurate and the route still won at that load. Gloss issues one draw call per shape, so a weaker GPU may be slower. If so, reduce the dressing in `floorDressing` first.
+- **Frame rate:** 40–58 fps measured here, while other sessions were using the GPU and CPU, and about 30 fps with every core saturated. The rules are fixed-step, so the route still won at that load, and frame rate cannot affect the time budget. Gloss issues one draw call per shape, so a weaker GPU may be slower. If so, reduce the dressing in `floorDressing` first.
 - **Rendering is 1× on Retina Macs.** Apple's GLUT has no high-resolution mode, so the window is upscaled and edges look slightly pixelated. No anti-aliasing is available through Gloss.
 - **Off-route script runs:** one of 12 scripted key-event runs left the route. A later run recorded Up moves that the script never sent, so keystrokes from outside the script reached the window, and that is the likely cause, though it is not proven for that specific run.
 - **Two taps of one key inside a single tick count as one press.** That needs a stall, and did not appear under load testing.
@@ -186,8 +240,15 @@ None. All art and lettering is procedural code in this repository.
 
 ```
 search: 255 reachable states, 0 dead ends
-search: shortest route is 42 actions, 6 of them shifts
-search: Space W W W W D D D Space S S S S D D D D Space W W W W D Space S S S S A A A Space W W W W A A A A Space A
-route:  intended route takes 367 ticks, ends (Present,(2,2),True,Won)
-98 passed, 0 failed
+search: cheapest route costs 108 s, 42 actions, 6 of them shifts
+search: W W W W D Space D D S S S S D D Space D D W W W W D Space A S S S S Space A A A A W W W W Space A A A Space
+route:  intended route takes 373 ticks, ends StateKey {skEra = Present, skCell = (2,2), skHasCell = True, skPhase = Won, skCrates = fromList [], skFilled = fromList []}
+level:  First Light: par 48, budget 68, 20 actions, 2 shifts, 35 states, 0 dead, 50% shared
+level:  First Push: par 42, budget 58, 17 actions, 2 shifts, 3051 states, 54 dead, 96% shared
+level:  The Plug: par 56, budget 68, 24 actions, 2 shifts, 177 states, 55 dead, 14% shared
+level:  The Buried Lamp: par 64, budget 76, 24 actions, 4 shifts, 208 states, 105 dead, 62% shared
+level:  The Held Door: par 54, budget 66, 19 actions, 4 shifts, 437 states, 136 dead, 85% shared
+level:  The Bridge: par 44, budget 56, 18 actions, 2 shifts, 937 states, 480 dead, 96% shared
+level:  The Wrong Way First: par 64, budget 72, 24 actions, 4 shifts, 346 states, 47 dead, 39% shared
+293 passed, 0 failed
 ```

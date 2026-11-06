@@ -12,6 +12,8 @@ module Station
   , pool
   , lightPools
   , sconceCells
+  , filledPit
+  , doorway
   , vignette
   ) where
 
@@ -20,6 +22,7 @@ import Font
 import Game.Level
 import Game.Types
 import Graphics.Gloss
+import qualified Data.Set as Set
 
 -- Palettes ---------------------------------------------------------------------
 
@@ -48,15 +51,20 @@ palette Present = Pal
 -- Neighbours -------------------------------------------------------------------
 
 solid :: Level -> Era -> Int -> Int -> Bool
-solid level era x y = not (walkable level era (x, y))
+solid level era x y = not (walkable level era (x, y) || isPit level era (x, y))
+
+-- | A pit stops the player but is not a wall: it is low, and casts no wall's shadow.
+isPit :: Level -> Era -> Cell -> Bool
+isPit level era cell = era == Past && cell `Set.member` lvPits level
 
 -- | Painting for a cell, in coordinates local to the cell's centre.
 cellArt :: Level -> Era -> Cell -> Picture
 cellArt level era cell@(x, y)
-  | era == Past && cell == door = pastDoor level (x, y)
-  | era == Present && cell == door = presentRubble
-  | era == Past && cell == breach = pastBulkhead
-  | era == Present && cell == breach = presentBreach level
+  | isPit level era cell = pit level cell
+  | era == Past && cell == door && pastOnly = pastDoor level (x, y)
+  | era == Present && cell == door && pastOnly = presentRubble
+  | era == Past && cell == breach && presentOnly = pastBulkhead
+  | era == Present && cell == breach && presentOnly = presentBreach level
   | solid level era x y = wall level era cell
   | otherwise = Pictures
       [ floorTile level era cell
@@ -65,6 +73,70 @@ cellArt level era cell@(x, y)
   where
     door = (4, 2)
     breach = (8, 6)
+    -- The painted passages say "open here, closed there", so they only appear where
+    -- that is true of this map.
+    pastOnly = walkable level Past cell && not (walkable level Present cell)
+    presentOnly = walkable level Present cell && not (walkable level Past cell)
+
+-- | Past only: a shaft in the floor, ringed in hazard paint. It has to read as a
+-- place that cannot be walked on, and as a place something could be dropped into.
+pit :: Level -> Cell -> Picture
+pit level cell = Pictures
+  [ floorTile level Past cell
+  , Color (hex 0x17100B) (rectC (cs - 6) (cs - 6))
+  , Color (hex 0xE0B23C) (rectC (cs - 12) (cs - 12))
+  , Color (hex 0x241610) (Pictures [ Translate o (half - 9) (rot 45 (rectC 6 15)) | o <- stripes ])
+  , Color (hex 0x241610) (Pictures [ Translate o (9 - half) (rot 45 (rectC 6 15)) | o <- stripes ])
+  , Color (hex 0x241610) (Pictures [ Translate (half - 9) o (rot 45 (rectC 15 6)) | o <- stripes ])
+  , Color (hex 0x241610) (Pictures [ Translate (9 - half) o (rot 45 (rectC 15 6)) | o <- stripes ])
+  , Color (hex 0x050302) (rectC (cs - 26) (cs - 26))
+  , Color (hex 0x1A100A) (rect (negate (half - 13)) (half - 21) (cs - 26) 8)
+  ]
+  where stripes = [-20, -7, 7, 20]
+
+-- | Present only, drawn over the wall the map has there. Shut, it is a barred iron
+-- gate; open, the bars are gone and the floor runs through. Its lamp agrees, but the
+-- shape says it first.
+doorway :: Level -> Cell -> Bool -> Picture
+doorway level cell open
+  | open = Pictures
+      [ floorTile level Present cell
+      , Color (hex 0x83929A) (Pictures [rect (-half) (-half) 7 cs, rect (half - 7) (-half) 7 cs])
+      , Color (hex 0xAEBBC0) (rect (-half) (half - 9) cs 9)
+      , Translate 0 (half - 5) (Color (hex 0x9CE0B0) (ngon 8 4))
+      ]
+  | otherwise = Pictures
+      [ Color (hex 0x83929A) (rectC cs cs)
+      , Color (hex 0x10171B) (rectC (cs - 14) (cs - 14))
+      , Color (hex 0xAEBBC0) (Pictures [ rect x (-half + 7) 6 (cs - 14) | x <- [-25, -9, 7, 23] ])
+      , Color (hex 0x5D6B72) (Pictures [ rect (-half + 7) y (cs - 14) 5 | y <- [-14, 12] ])
+      , Translate 0 (half - 5) (Pictures
+          [ Color (hex 0x10171B) (ngon 8 5.5), Color (hex 0xFF7A4A) (ngon 8 3.5) ])
+      ]
+
+-- | A plate set in the floor, in both eras, because a crate rests on it in both.
+plate :: Era -> Picture
+plate era = Pictures
+  [ Color rim (rectC 50 50)
+  , Color face (rectC 42 42)
+  , Color mark (Pictures [rectC 30 3, rectC 3 30])
+  , Color rim (ngon 12 6)
+  , Color mark (ngon 12 3.5)
+  ]
+  where
+    (rim, face, mark) = case era of
+      Past    -> (hex 0x2A1A0E, hex 0xC89C50, hex 0xF2D083)
+      Present -> (hex 0x10171B, hex 0x6B4630, hex 0x94684A)
+
+-- | Past only: the same pit with a crate wedged in it, flush, and safe to walk over.
+filledPit :: Level -> Cell -> Picture
+filledPit level cell = Pictures
+  [ floorTile level Past cell
+  , Color (hex 0x17100B) (rectC (cs - 6) (cs - 6))
+  , Color (hex 0x4E3820) (rectC (cs - 12) (cs - 12))
+  , Color (hex 0x2E2012) (Pictures [ rect (-half + 6) y (cs - 12) 1.5 | y <- [-17, -3, 11] ])
+  , Pictures [ Translate x y (Color (hex 0x8A6A3F) (ngon 6 2)) | x <- [-26, 26], y <- [-26, 26] ]
+  ]
 
 -- Floors -----------------------------------------------------------------------
 
@@ -117,7 +189,7 @@ floorTile level era (x, y) = Pictures $
 
 floorDressing :: Level -> Era -> Cell -> Picture
 floorDressing level era cell@(x, y) = Pictures $
-  carpet ++ sand ++ moss ++ water ++ stencil ++ landmark
+  (if lvDressed level then carpet ++ water ++ stencil else []) ++ sand ++ moss ++ landmark
   where
     p = palette era
     n s = rnd x y s
@@ -174,7 +246,8 @@ floorDressing level era cell@(x, y) = Pictures $
     landmark
       | cell == lvGoal level = [case era of { Past -> lampFooting; Present -> towerAt }]
       | cell == lvPowerCell level = [cradle era]
-      | cell == (2, 1) || cell == (10, 1) = [channel era]
+      | cell `Set.member` lvPlates level = [plate era]
+      | lvDressed level && (cell == (2, 1) || cell == (10, 1)) = [channel era]
       | otherwise = []
 
 -- | The conduit from the store to the lighthouse, sunk in the floor.
@@ -259,7 +332,7 @@ faceH :: Float
 faceH = 22
 
 wall :: Level -> Era -> Cell -> Picture
-wall level era (x, y) = Pictures (body ++ detail ++ conduit)
+wall level era (x, y) = Pictures (body ++ detail ++ (if lvDressed level then conduit else []))
   where
     p = palette era
     n s = rnd x y s
@@ -291,7 +364,7 @@ wall level era (x, y) = Pictures (body ++ detail ++ conduit)
       , [(half * 0.45, capBottom), (half * 0.45, capBottom + capH * 0.5)]
       ]
     bracket
-      | not ((x, y) `elem` sconceCells) = []
+      | not (lvDressed level && (x, y) `elem` sconceCells) = []
       | era == Past = [ Color (hex 0x3A2413) (rect (-8) (-half + 4) 16 15)
                       , Color (hex 0xC89C50) (rect (-6) (-half + 6) 12 11) ]
       | otherwise   = [ Color (hex 0x10171B) (rect (-8) (-half + 4) 16 15)
@@ -505,15 +578,19 @@ pool c strength rx ry = Pictures
 
 -- | Light falling on the floor at a strength from 0 to 1. Warm lamps in service;
 -- in the present, only thin daylight at the breach.
-lightPools :: Era -> Float -> Picture
-lightPools _ k | k <= 0.01 = Blank
-lightPools Past k = Pictures $
+lightPools :: Level -> Era -> Float -> Picture
+lightPools _ _ k | k <= 0.01 = Blank
+lightPools level Past k | not (lvDressed level) =
+  at (cellPos (lvPowerCell level)) (pool 0xFFC879 (0.17 * k) 165 125)
+lightPools level Present k | not (lvDressed level) =
+  at (cellPos (lvGoal level)) (pool 0x9CC7D8 (0.14 * k) 120 90)
+lightPools _ Past k = Pictures $
   [ at (sconcePos c) (pool 0xFFC879 (0.17 * k) 165 125) | c <- sconceCells ] ++
   [ at (cellPos (4, 2)) (pool 0xFFC879 (0.13 * k) 70 56) ] ++
   [ at (sconcePos c) (Color (hexA 0xFFE9B0 (0.95 * k)) (rect (-4) (-3) 8 8)) | c <- sconceCells ]
   where
     sconcePos (x, y) = let (px, py) = cellPos (x, y) in (px, py - half + 12)
-lightPools Present k = Pictures
+lightPools _ Present k = Pictures
   [ at (cellPos (8, 6)) (pool 0x9CC7D8 (0.2 * k) 90 62)
   , at (cellPos (2, 5)) (rot 14 (pool 0x8FB2C2 (0.08 * k) 70 42))
   , at (cellPos (6, 3)) (rot 14 (pool 0x8FB2C2 (0.07 * k) 56 36))

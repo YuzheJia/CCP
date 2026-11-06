@@ -15,7 +15,7 @@ import Game.Types
 data GameKey
   = KW | KA | KS | KD
   | KUp | KDown | KLeft | KRight
-  | KSpace | KEnter | KRestart | KPause
+  | KSpace | KEnter | KRestart | KPause | KUndo | KPeek
   deriving (Eq, Ord, Show)
 
 data Keys = Keys
@@ -55,6 +55,9 @@ tickInput keys = TickInput
   , tiEnter   = down KEnter
   , tiRestart = down KRestart
   , tiPause   = down KPause
+  , tiUndo    = down KUndo
+  , tiPeek    = down KPeek
+  , tiDirRevealed = null [d | Just d <- map dirOf (kTapped keys)]
   }
   where
     down k = k `elem` kHeld keys || k `elem` kTapped keys

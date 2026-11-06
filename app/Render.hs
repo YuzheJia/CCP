@@ -3,11 +3,14 @@ module Render (Scene, mkScene, render) where
 
 import Draw
 import Figures
+import Font (textC)
 import Game.Fx
 import Game.Logic
+import Game.Solution (StateKey, deadStates, stateKey)
 import Game.Types
 import Graphics.Gloss
 import Hud
+import qualified Data.Set as Set
 import Station
 import Title
 
@@ -23,11 +26,15 @@ data Scene = Scene
   , scPresentVig   :: Picture
   , scPastCaption  :: Picture
   , scPresentCaption :: Picture
+  , scWonCaption   :: Picture
+  , scHasNext      :: Bool
+  , scDead         :: Set.Set StateKey  -- ^ worked out once, the first time it is needed
   , scHud          :: HudArt
   }
 
-mkScene :: Level -> Scene
-mkScene level = Scene
+-- | @title@ names the level above the map; @hasNext@ says whether another follows.
+mkScene :: String -> Bool -> Level -> Scene
+mkScene title hasNext level = Scene
   { scPastCells = cells Past
   , scPresentCells = cells Present
   , scPastWhole = whole Past
@@ -36,9 +43,12 @@ mkScene level = Scene
   , scPresentBack = back Present
   , scPastVig = bake (vignette Past)
   , scPresentVig = bake (vignette Present)
-  , scPastCaption = bake (mapCaption Past)
-  , scPresentCaption = bake (mapCaption Present)
-  , scHud = mkHudArt
+  , scPastCaption = bake (mapCaption title Past)
+  , scPresentCaption = bake (mapCaption title Present)
+  , scWonCaption = wonCaption title
+  , scHasNext = hasNext
+  , scDead = deadStates level
+  , scHud = mkHudArt (lvRules level)
   }
   where
     ordered = [ (x, y) | y <- [0 .. lvHeight level - 1], x <- [0 .. lvWidth level - 1] ]
@@ -82,9 +92,9 @@ frame :: Scene -> Level -> Game -> Fx -> Picture
 frame scene level g fx = case gPhase g of
   Menu -> titleScreen clock
   _ -> Pictures
-    [ world scene level g fx
-    , hud (scHud scene) g clock
-    , overlays g fx
+    [ world scene level (if peeking g fx then peekView g else g) fx
+    , hud (scHud scene) level g fx clock
+    , overlays scene g fx
     , startFade
     ]
   where
@@ -94,13 +104,25 @@ frame scene level g fx = case gPhase g of
           Color (hexA 0x05080A (1 - smooth (fromIntegral (fxLevelAge fx) / 26))) (rectC canvasW canvasH)
       | otherwise = Blank
 
+-- | Holding Tab while nothing is flipping. The rules never read this key.
+peeking :: Game -> Fx -> Bool
+peeking g fx = tiPeek (gPrev g) && gPhase g == Playing && fxWave fx == Nothing
+
+-- | The same moment seen from the other era: only drawing ever sees this game.
+peekView :: Game -> Game
+peekView g = g { gEra = otherEra (gEra g), gFeedback = Nothing }
+
 world :: Scene -> Level -> Game -> Fx -> Picture
 world scene level g fx = Pictures
   [ backOf scene shownEra
   , stationCells scene g fx
-  , lightPools Past pastK
-  , lightPools Present presentK
+  , lightPools level Past pastK
+  , lightPools level Present presentK
   , cellOnCradle
+  , filledPits
+  , gates
+  , crossingMarks
+  , crates
   , winBeneath
   , carried
   , ambient Past clock pastK
@@ -108,10 +130,11 @@ world scene level g fx = Pictures
   , blockedOutline
   , actor
   , burst
+  , costFloat
   , winAbove
   , vigOf scene shownEra
   , waveFront
-  , if gPhase g == Won then wonCaption else captionOf scene (gEra g)
+  , if gPhase g == Won then scWonCaption scene else captionOf scene (gEra g)
   , hintLine
   , blockedNote
   ]
@@ -143,8 +166,8 @@ world scene level g fx = Pictures
     bumpK = sin (fromIntegral (gBump g) / fromIntegral bumpTicks * pi)
     (px0, py0) = cellVec visX visY
     refuseShake = case gFeedback g of
-      Just (Feedback (ShiftBlocked _) left)
-        | left > blockedFeedbackTicks - 18 ->
+      Just (Feedback kind left)
+        | kind /= CellCollected && left > blockedFeedbackTicks - 18 ->
             3 * sin (fromIntegral left * 1.9) * fromIntegral (left - (blockedFeedbackTicks - 18)) / 18
       _ -> 0
     playerAt = ( px0 + 4 * bumpK * fromIntegral dx + refuseShake
@@ -171,13 +194,48 @@ world scene level g fx = Pictures
       | powerShown = at (cellPos powerAt) (powerCell clock)
       | otherwise = Blank
 
+    -- Each object swaps with its own tile as the wave passes, like the power cell.
+    eraOf c = case wave of
+      Nothing -> era
+      Just w -> eraOfCellDuring w era c
+
+    -- A crate being pushed moves with the keeper, from the cell they are stepping
+    -- onto to the cell it was sent to. In a pit, it finishes the journey before the
+    -- pit shows as filled.
+    pushedCrate = case (gPushing g, gMotion g) of
+      (Just c, Stepping to left) -> Just (c, to, smooth (1 - fromIntegral left / fromIntegral stepTicks))
+      _ -> Nothing
+    crates = Pictures $
+      [ at (cellPos c) (crate (eraOf c))
+      | c <- Set.toList (gCrates g), Just c /= fmap (\(moving, _, _) -> moving) pushedCrate ] ++
+      [ at (cellVec (lerp e (fromIntegral fx0) (fromIntegral cx)) (lerp e (fromIntegral fy0) (fromIntegral cy)))
+           (crate (eraOf (cx, cy)))
+      | Just ((cx, cy), (fx0, fy0), e) <- [pushedCrate] ]
+    -- Only under the keeper's feet: "you can switch era right here".
+    crossingMarks = Pictures
+      [ at (cellPos c) (crossingMark (eraOf c)) | c <- markedCells ]
+    markedCells
+      | gPhase g /= Playing || peeking g fx || gMotion g /= Settled = []
+      | otherwise = filter (== gCell g) (crossings level g)
+    gates = Pictures
+      [ at (cellPos c) (doorway level c (doorsOpen level (gCrates g)))
+      | c <- Set.toList (lvDoors level), eraOf c == Present ]
+    filledPits = Pictures
+      [ at (cellPos c) (filledPit level c)
+      | c <- Set.toList (gFilled g), eraOf c == Past, not (fillingNow c) ]
+    -- Only the step that fills a pit hides its fill. A crate sliding over a pit
+    -- filled earlier leaves it filled.
+    fillingNow c = Just c == gPushing g && case gHistory g of
+      (before : _) -> c `Set.notMember` snFilled before
+      [] -> False
+
     burst = case fxBurst fx of
       Just b -> at (cellPos (burstCell b)) (pickupBurst (burstAge b))
       Nothing -> Blank
 
     -- Refused shift: outline the cell that is solid over there.
     blockedOutline = case gFeedback g of
-      Just (Feedback (ShiftBlocked c) left) ->
+      Just (Feedback kind left) | Just c <- refusedCell kind ->
         let k = clamp01 (fromIntegral left / 30)
             pulse = 0.65 + 0.35 * sin (fromIntegral left * 0.35)
             s = half - 2
@@ -189,14 +247,36 @@ world scene level g fx = Pictures
     blockedNote = case gFeedback g of
       Just (Feedback (ShiftBlocked c) left) ->
         blockedPlate era c (clamp01 (fromIntegral left / 20))
+      Just (Feedback ShiftTooCostly left) ->
+        tooCostlyPlate (lvRules level) (gCell g) (clamp01 (fromIntegral left / 20))
+      Just (Feedback (PushBlocked c) left) ->
+        pushBlockedPlate c (clamp01 (fromIntegral left / 20))
       _ -> Blank
 
-    hintLine = case gFeedback g of
-      Just (Feedback CellCollected left) | gPhase g `elem` [Playing, Paused] ->
-        hintBand era (clamp01 (fromIntegral left / 30)) pickupText
-      _ -> case currentHint level g of
-        Just h -> hintBand era 1 (hintText h)
-        Nothing -> Blank
+    -- What the last action just spent, or an undo gave back, rising off the keeper.
+    costFloat = case fxCost fx of
+      Just c | gPhase g /= Won ->
+        let p = fromIntegral (cfAge c) / fromIntegral costLife :: Float
+            (x, y) = cellPos (cfCell c)
+        in at (x, y + half + 10 + 34 * smooth p) (Pictures
+             [ Color (fade (1 - p * p) (hex 0x05080A)) (Translate 1.5 (-1.5) (textC 22 (costText (cfAmount c))))
+             , Color (fade (1 - p * p) (costColor (cfAmount c))) (textC 22 (costText (cfAmount c)))
+             ])
+      _ -> Blank
+
+    hintLine
+      | peeking g fx = hintBand era 1 (peekText era)
+      | stateKey g `Set.member` scDead scene = hintBand era 1 deadEndText
+      | otherwise = case gFeedback g of
+          Just (Feedback CellCollected left) | gPhase g `elem` [Playing, Paused] ->
+            hintBand era (clamp01 (fromIntegral left / 30)) pickupText
+          Just (Feedback PushNeedsPress left) ->
+            hintBand era (clamp01 (fromIntegral left / 30)) pushAgainText
+          Just (Feedback CrateRusted left) ->
+            hintBand era (clamp01 (fromIntegral left / 30)) rustedText
+          _ -> case currentHint level g of
+            Just h -> hintBand era 1 (hintText h)
+            Nothing -> Blank
 
     waveFront = case wave of
       Just w -> at (cellPos (waveOrigin w)) (waveRing t)
@@ -209,7 +289,7 @@ world scene level g fx = Pictures
     winBeneath
       | won = Pictures
           [ warmthOver endAge goalAt
-          , relitSconces endAge goalAt
+          , if lvDressed level then relitSconces endAge goalAt else Blank
           ]
       | otherwise = Blank
     winAbove
@@ -218,6 +298,13 @@ world scene level g fx = Pictures
           , lanternGlow clock (smooth (endAge / 24))
           ])
       | otherwise = Blank
+
+-- | The cell a refusal is about, to outline it.
+refusedCell :: FeedbackKind -> Maybe Cell
+refusedCell kind = case kind of
+  ShiftBlocked c -> Just c
+  PushBlocked c  -> Just c
+  _              -> Nothing
 
 -- | Which era a cell is showing partway through a wave.
 eraOfCellDuring :: Wave -> Era -> Cell -> Era
@@ -251,10 +338,10 @@ stationCells scene g fx = case fxWave fx of
            , if shine > 0.02 then Color (hexA 0xFFFFFF (0.3 * shine)) (rectC (cs * squash) cs) else Blank
            ])
 
-overlays :: Game -> Fx -> Picture
-overlays g fx = case gPhase g of
+overlays :: Scene -> Game -> Fx -> Picture
+overlays scene g fx = case gPhase g of
   Paused -> pausedScreen (gEra g) (smooth (fromIntegral (fxPaused fx) / 8))
-  Won -> wonScreen (smooth ((end - 70) / 30)) (gRemaining g)
+  Won -> wonScreen (scHasNext scene) (smooth ((end - 70) / 30)) (gRemaining g)
   Lost -> lostScreen (smooth (end / 24))
   _ -> Blank
   where end = fromIntegral (fxEnd fx) :: Float

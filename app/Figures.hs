@@ -2,6 +2,8 @@
 module Figures
   ( keeper
   , powerCell
+  , crate
+  , crossingMark
   , cellIcon
   , carriedLight
   , pickupBurst
@@ -116,6 +118,54 @@ powerCell clock = Pictures
     pulse = 0.5 + 0.5 * sin (clock * 0.09)
     orbit r = Pictures [ Color (fade 0.9 goldCore) (Rotate a (Translate r 0 (rectC 2.4 2.4)))
                        | a <- [0, 120, 240] ]
+
+-- | The crate: one object, seen at two times. Kept timber and brass that a keeper
+-- could shove, then a seized block of rust. The same outline in both, raised above
+-- the floor, so it reads as an obstacle in either era.
+crate :: Era -> Picture
+crate era = Pictures
+  [ Color (hexA 0x000000 0.4) (Translate 2 (-4) (rectC 62 62))
+  , Color edge (rectC 62 62)
+  , Color front (rect (-29) (-29) 58 13)
+  , Color top (rect (-29) (-16) 58 45)
+  , Color shine (rect (-29) 26 58 3)
+  , details
+  ]
+  where
+    (edge, front, top, shine) = case era of
+      Past    -> (hex 0x2E1C0E, hex 0x70482A, hex 0xA8763F, hex 0xD6A661)
+      Present -> (hex 0x14100E, hex 0x4A2C1C, hex 0x7A4A2C, hex 0xA06A42)
+    details = case era of
+      Past -> Pictures
+        [ Color (hex 0x70482A) (Pictures [ rect (-29) y 58 1.5 | y <- [-1, 13] ])
+        , Color (hex 0x70482A) (seg 3 (-27, -14) (27, 26))
+        , Color (hex 0xE8C47A) (Pictures
+            [ rect (-29) 19 9 9, rect 20 19 9 9, rect (-29) (-16) 9 9, rect 20 (-16) 9 9 ])
+        , Color (hex 0x5C4122) (Pictures
+            [ Translate x y (ngon 6 1.6) | x <- [-25, 24], y <- [-12, 23] ])
+        ]
+      Present -> Pictures
+        [ Color (hex 0x4A2C1C) (Pictures [ rect (-29) y 58 1.5 | y <- [-1, 13] ])
+        , Color (hex 0x4A2C1C) (seg 3 (-27, -14) (27, 26))
+        , Color (hexA 0xC27A3E 0.55) (Pictures
+            [ rect (-18) (-16) 4 22, rect 3 (-6) 5 26, rect 18 (-16) 3 16 ])
+        , Color (hex 0x2A1A12) (Pictures
+            [ Translate x y (ngon 6 2.4) | x <- [-25, 24], y <- [-12, 23] ])
+        , Color (hexA 0x5F7F4E 0.85) (Translate (-14) (-17) (ellipse 8 13 5))
+        , Color (hexA 0x5F7F4E 0.7) (Translate 22 22 (ellipse 7 6 4))
+        ]
+
+-- | Four corner ticks on a cell you could switch era on. Shape, not just colour.
+crossingMark :: Era -> Picture
+crossingMark era = Color shade (Pictures
+  [ Translate x y (Pictures [rect (min 0 (negate (signum x) * len)) (-1) len 2, rect (-1) (min 0 (negate (signum y) * len)) 2 len])
+  | x <- [-corner, corner], y <- [-corner, corner] ])
+  where
+    corner = half - 7
+    len = 9
+    shade = case era of
+      Past    -> hexA 0xFFE2A8 0.6
+      Present -> hexA 0x9CC7D8 0.6
 
 -- | The HUD's version.
 cellIcon :: Bool -> Float -> Picture

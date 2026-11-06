@@ -133,6 +133,7 @@ labels = Pictures
     -- Premise and controls, on the water.
   , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Retrieve a power cell from the past"))
   , Color (hex 0xF2E6D0) (Translate 0 (-258) (textC 14 "and bring it back to illuminate a lighthouse in the present."))
+  , Color (hex 0xFFE2A8) (Translate 0 (-284) (textC 14 "Every action spends time. Standing still spends none."))
   , controlRow
   ]
   where
@@ -141,11 +142,13 @@ labels = Pictures
     wl = weighted
 
 controlRow :: Picture
-controlRow = Translate 0 (-312) (Pictures
-  [ item (-300) "WASD / ARROWS" "Move"
-  , item (-40) "SPACE" "Shift era"
-  , item 158 "P" "Pause"
-  , item 268 "R" "Restart"
+controlRow = Translate 0 (-324) (Pictures
+  [ item (-440) "WASD / ARROWS" "Move"
+  , item (-180) "SPACE" "Shift era"
+  , item 18 "Z" "Undo"
+  , item 118 "TAB" "Look"
+  , item 250 "P" "Pause"
+  , item 360 "R" "Restart"
   ])
   where
     item x key what =

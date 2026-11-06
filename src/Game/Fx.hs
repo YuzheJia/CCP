@@ -6,6 +6,8 @@ module Game.Fx
   ( Fx (..)
   , Wave (..)
   , Burst (..)
+  , CostFloat (..)
+  , costLife
   , initialFx
   , stepFx
   , waveProgress
@@ -24,6 +26,13 @@ data Burst = Burst
   , burstCell :: !Cell
   } deriving (Eq, Show)
 
+-- | The seconds an action just spent, or an undo gave back, rising off the player.
+data CostFloat = CostFloat
+  { cfAge    :: !Int
+  , cfAmount :: !Int   -- ^ the change in time left: negative when spent
+  , cfCell   :: !Cell
+  } deriving (Eq, Show)
+
 data Fx = Fx
   { fxClock    :: !Int           -- ^ ticks of ambient animation
   , fxWave     :: !(Maybe Wave)  -- ^ the era wave crossing the map
@@ -32,13 +41,15 @@ data Fx = Fx
   , fxEnd      :: !Int           -- ^ ticks since the level was won or lost
   , fxPaused   :: !Int           -- ^ ticks since pause
   , fxLevelAge :: !Int           -- ^ ticks since the level (re)started
+  , fxCost     :: !(Maybe CostFloat)
   } deriving (Eq, Show)
 
 initialFx :: Fx
-initialFx = Fx 0 Nothing Nothing 0 0 0 0
+initialFx = Fx 0 Nothing Nothing 0 0 0 0 Nothing
 
-burstLife :: Int
+burstLife, costLife :: Int
 burstLife = 40
+costLife = 48
 
 -- | 0 to 1 as the wave crosses the map. Same length as the input lock.
 waveProgress :: Wave -> Float
@@ -57,17 +68,31 @@ stepFx old new fx
       , fxEnd      = if gPhase new `elem` [Won, Lost] then fxEnd fx + 1 else 0
       , fxPaused   = 0
       , fxLevelAge = fxLevelAge fx + 1
+      , fxCost     = cost
       }
   where
-    restarted = gPhase new == Playing && gRemaining new == levelTicks
-                && (gPhase old /= Playing || gRemaining old /= levelTicks)
+    restarted = gAttempt new /= gAttempt old
+    -- A step is charged before it moves, but the price belongs where it is going.
+    floatCell = case gMotion new of
+      Stepping to _ -> to
+      _             -> gCell new
+    cost
+      | gRemaining new /= gRemaining old =
+          Just (CostFloat 0 (gRemaining new - gRemaining old) floatCell)
+      | otherwise = case fxCost fx of
+          Just c | cfAge c + 1 < costLife -> Just c { cfAge = cfAge c + 1 }
+          _ -> Nothing
+    -- An undo has no input lock for a wave to cross under, so it cuts straight back.
+    undone = length (gHistory new) < length (gHistory old)
     wave
+      | gEra new /= gEra old && undone = Nothing
       | gEra new /= gEra old = Just (Wave 0 (gEra old) (gCell new))
       | otherwise = case fxWave fx of
           Just w | waveAge w + 1 < shiftTicks -> Just w { waveAge = waveAge w + 1 }
           _ -> Nothing
     burst
-      | gHasCell new && not (gHasCell old) = Just (Burst 0 (gCell new))
+      | not (gHasCell new) = Nothing
+      | not (gHasCell old) = Just (Burst 0 (gCell new))
       | otherwise = case fxBurst fx of
           Just b | burstAge b + 1 < burstLife -> Just b { burstAge = burstAge b + 1 }
           _ -> Nothing
