@@ -6,7 +6,7 @@
 --
 -- Development flags, used to inspect exact moments of the game:
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
---                    w a s d move, x shift, W A S D X the press alone, z undo,
+--                    w a s d move, x shift, q echo, W A S D X the press alone, z undo,
 --                    T Tab held, e Enter, p pause, r restart, . one idle tick
 --   --after=N        then run N more idle ticks
 --   --fps            print measured frames per second to stdout
@@ -175,6 +175,8 @@ gameKey key = case key of
   Char 'R' -> Just KRestart
   Char 'z' -> Just KUndo
   Char 'Z' -> Just KUndo
+  Char 'e' -> Just KEcho
+  Char 'E' -> Just KEcho
   Char ' ' -> Just KSpace
   Char '\r' -> Just KEnter
   Char '\n' -> Just KEnter
@@ -197,6 +199,7 @@ scriptInputs = concatMap one
       'a' -> actionInputs (Go DirLeft)
       'd' -> actionInputs (Go DirRight)
       'x' -> actionInputs ShiftEra
+      'q' -> actionInputs SendEcho
       'X' -> [noInput { tiShift = True }]  -- the press alone, to inspect mid-wave
       'W' -> [noInput { tiDir = Just DirUp }]  -- the press alone, to inspect mid-step
       'S' -> [noInput { tiDir = Just DirDown }]

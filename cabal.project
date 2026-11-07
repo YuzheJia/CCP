@@ -1,2 +1,5 @@
-packages: .
+-- vendor/gloss-rendering-1.13.2.1 is Hackage's 1.13.2.1 with one line changed, so a
+-- minimised window (reported as 0x0) no longer aborts the game on Windows. See the
+-- comment in its Graphics/Gloss/Internals/Rendering/Common.hs.
+packages: . vendor/gloss-rendering-1.13.2.1
 with-compiler: ghc-9.6.7

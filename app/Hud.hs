@@ -114,14 +114,18 @@ plaque era = Translate panelX 298 $ case era of
 -- | The prices are printed beside the keys, because they are the rules of the game.
 controls :: Rules -> Skin -> Picture
 controls rules sk = Pictures
-  [ row (-208) "WASD" ("Move  -" ++ show (ruStepCost rules) ++ " s")
-  , row (-238) "SPACE" ("Shift  -" ++ show (ruShiftCost rules) ++ " s")
-  , row (-268) "Z" ("Undo  +" ++ show (ruUndoRefundPercent rules) ++ " pct")
-  , row (-298) "TAB" "Look  free"
-  , row (-328) "R" "Restart  free"
-  , row (-358) "P" "Pause"
-  ]
+  [ row y key what | (y, (key, what)) <- zip [-208, -208 - gap ..] keys ]
   where
+    keys =
+      [ ("WASD", "Move  -" ++ show (ruStepCost rules) ++ " s")
+      , ("SPACE", "Shift  -" ++ show (ruShiftCost rules) ++ " s") ] ++
+      [ ("E", "Echo  -" ++ show (ruEchoCost rules) ++ " s") | ruEchoLength rules > 0 ] ++
+      [ ("Z", "Undo  +" ++ show (ruUndoRefundPercent rules) ++ " pct")
+      , ("TAB", "Look  free")
+      , ("R", "Restart  free")
+      , ("P", "Pause")
+      ]
+    gap = if length keys > 6 then 27 else 30
     row y key what = Pictures
       [ Translate (panelX - 92) y (keyCap sk key)
       , Color (skInk sk) (Translate (panelX - 10) (y + 2) (textL 12 what))
@@ -173,7 +177,7 @@ hud art level g fx clock = Pictures
     doorNote
       | Set.null (lvDoors level) = Blank
       | otherwise = Color (skInk sk) (Translate (panelX - 92) (-142)
-          (textL 13 (if doorsOpen level (gCrates g) then "The door is open" else "The door is shut")))
+          (textL 13 (if doorsOpen level (weights g) then "The door is open" else "The door is shut")))
     rules = lvRules level
     budget = lvBudget level
     remaining = gRemaining g
@@ -181,7 +185,10 @@ hud art level g fx clock = Pictures
     -- so the cost is felt rather than just subtracted.
     shown = fromIntegral remaining + stillDraining :: Float
     stillDraining = case gMotion g of
-      Stepping _ left -> fromIntegral (ruStepCost rules * left) / fromIntegral stepTicks
+      Stepping (tx, ty) left ->
+        let (fx', fy') = gCell g
+            price = if abs (tx - fx') + abs (ty - fy') > 1 then ruJumpCost rules else ruStepCost rules
+        in fromIntegral (price * left) / fromIntegral stepTicks
       Shifting left   -> fromIntegral (ruShiftCost rules * left) / fromIntegral shiftTicks
       Settled         -> 0
     share = shown / fromIntegral budget

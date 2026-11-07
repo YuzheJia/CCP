@@ -4,11 +4,13 @@ module Game.Level
   , parseLevel
   , theLevel
   , campaign
+  , extraLevels
   , walkable
   , passageCells
   ) where
 
 import Data.List (nub)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Game.Types
 
@@ -46,31 +48,162 @@ theLevel = (\l -> l { lvName = "Harrow Point Light Station", lvDressed = True, l
 
 -- | Every level in play order, or the reason one is malformed. A level's budget is
 -- its par, which a test re-derives with the solver, plus slack that shrinks as the
--- game goes on.
+-- game goes on. Short on purpose: it is played in about three minutes.
 campaign :: Either String [Level]
 campaign = sequence
-  [ room "First Light" 48 20
+  [ room baseRules "Through the Glass" 22 20
+      -- Three cells below the mirror, your reflection would land in the wall: walking
+      -- on is all the key does. Two below, it lands by the power cell, and the same
+      -- key steps through.
       [ "#############"
       , "#############"
-      , "##....#######"
-      , "##.##.#######"
-      , "##.##.#######"
-      , "##.##.#######"
-      , "##.##B#######"
+      , "#####.B.#####"
+      , "#####...#####"
+      , "######v######"
+      , "######.######"
+      , "######.######"
+      , "######.######"
+      , "#############"
+      ]
+      [ "#############"
+      , "#############"
+      , "#####...#####"
+      , "#####..G#####"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "######S######"
+      , "#############"
+      ]
+  , room baseRules "Rust in the Beam" 34 16
+      -- The present mirror's light stops at a crate rusted solid. In the past it
+      -- moves, and with it out of the way the light reaches the corridor.
+      [ "#############"
+      , "#############"
+      , "#####.B.#####"
+      , "#####...#####"
+      , "#####C....###"
+      , "#####.#######"
+      , "#############"
       , "#############"
       , "#############"
       ]
       [ "#############"
       , "#############"
-      , "##G.#########"
-      , "##.##########"
-      , "##.##########"
-      , "##.##########"
-      , "##S##########"
+      , "#############"
+      , "#...#########"
+      , "#.G.>....S###"
+      , "#...#.#######"
+      , "#############"
       , "#############"
       , "#############"
       ]
-  , room "First Push" 42 16
+  , room baseRules "One Way In" 42 12
+      -- The past mirror is the only way into the cell's room, and the room's only way
+      -- out is the present mirror, whose light a shut door stops. Step through first
+      -- and you are shut in: the crate has to reach the plate before you go.
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "######.B#####"
+      , "######..#####"
+      , "######v######"
+      , "##.....######"
+      , "##.CP..######"
+      , "#############"
+      ]
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "#.G.>D.######"
+      , "#############"
+      , "###S.########"
+      , "###..########"
+      , "#############"
+      ]
+  ]
+
+-- | The echo levels, kept to build on.
+echoLevels :: [Either String Level]
+echoLevels =
+  [ room echoRules "Echo" 38 16
+      -- Standing on the plate opens the door, and stepping off shuts it. Four steps
+      -- on from the plate, the oldest footprint is the plate itself.
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "#B###########"
+      , "#.#P#########"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "#############"
+      ]
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "#S......D.G##"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "#############"
+      ]
+  , room echoRules "Two Places at Once" 44 12
+      -- The plate can only be reached in the past, and the door is in the present.
+      -- The echo walks back across the shift and stays on the plate in the past.
+      [ "#############"
+      , "#############"
+      , "####B.#######"
+      , "####..#######"
+      , "####P..######"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "#############"
+      ]
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "####.#..D.G##"
+      , "######.######"
+      , "######S######"
+      , "#############"
+      , "#############"
+      ]
+  ]
+
+-- | Walking and switching, and what each costs. No echo yet.
+firstLight :: Either String Level
+firstLight = room baseRules "First Light" 48 20
+  [ "#############"
+  , "#############"
+  , "##....#######"
+  , "##.##.#######"
+  , "##.##.#######"
+  , "##.##.#######"
+  , "##.##B#######"
+  , "#############"
+  , "#############"
+  ]
+  [ "#############"
+  , "#############"
+  , "##G.#########"
+  , "##.##########"
+  , "##.##########"
+  , "##.##########"
+  , "##S##########"
+  , "#############"
+  , "#############"
+  ]
+
+-- | The earlier campaign, kept to build on. Not played, and not held to the
+-- campaign's checks, since the player's weight on a plate can change their pars.
+extraLevels :: Either String [Level]
+extraLevels = sequence $ firstLight : echoLevels ++
+  [ room baseRules "First Push" 42 16
       [ "#############"
       , "#############"
       , "#....#.....##"
@@ -91,7 +224,7 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
-  , room "The Plug" 56 12
+  , room baseRules "The Plug" 56 12
       [ "#############"
       , "#############"
       , "#############"
@@ -112,7 +245,7 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
-  , room "The Buried Lamp" 64 12
+  , room baseRules "The Buried Lamp" 64 12
       [ "#############"
       , "#...#########"
       , "#.....#######"
@@ -133,7 +266,7 @@ campaign = sequence
       , "######G######"
       , "#############"
       ]
-  , room "The Held Door" 54 12
+  , room baseRules "The Held Door" 54 12
       [ "#############"
       , "#############"
       , "#......######"
@@ -154,7 +287,7 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
-  , room "The Bridge" 44 12
+  , room baseRules "The Bridge" 44 12
       [ "#############"
       , "#############"
       , "#.....#######"
@@ -175,7 +308,7 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
-  , room "The Wrong Way First" 64 8
+  , room baseRules "The Wrong Way First" 64 8
       [ "#############"
       , "#############"
       , "#############"
@@ -197,9 +330,11 @@ campaign = sequence
       , "#############"
       ]
   ]
-  where
-    room name par slack past present =
-      (\l -> l { lvName = name, lvPar = par }) <$> parseLevel (par + slack) past present
+
+-- | A level with its rules, name and par. Its budget is the par plus the slack.
+room :: Rules -> String -> Int -> Int -> [String] -> [String] -> Either String Level
+room rules name par slack past present =
+  (\l -> l { lvName = name, lvPar = par, lvRules = rules }) <$> parseLevel (par + slack) past present
 
 walkable :: Level -> Era -> Cell -> Bool
 walkable level era cell = cell `Set.member` cells
@@ -231,6 +366,18 @@ scanMap name width height allowed rows
       | otherwise = Left (name ++ ": unexpected character " ++ show c
                           ++ " at " ++ show (x :: Int, y))
 
+-- | A mirror is drawn as the way its face looks: the light goes out that way.
+mirrorMarks :: String
+mirrorMarks = "^v<>"
+
+mirrorFace :: Char -> Maybe Dir
+mirrorFace c = case c of
+  '^' -> Just DirUp
+  'v' -> Just DirDown
+  '<' -> Just DirLeft
+  '>' -> Just DirRight
+  _   -> Nothing
+
 exactlyOne :: String -> Char -> [(Char, Cell)] -> Either String Cell
 exactlyOne name mark marks = case [c | (m, c) <- marks, m == mark] of
   [cell] -> Right cell
@@ -250,18 +397,22 @@ parseLevel budget past present = do
     [w] | w > 0 -> Right w
     _           -> Left "past: rows are empty or of different widths"
   let height = length past
-  pastMarks    <- scanMap "past" width height "#.BC~P" past
-  presentMarks <- scanMap "present" width height "#.GSD" present
+  pastMarks    <- scanMap "past" width height ("#.BC~P" ++ mirrorMarks) past
+  presentMarks <- scanMap "present" width height ("#.GSD" ++ mirrorMarks) present
   powerCell <- exactlyOne "past" 'B' pastMarks
   goal      <- exactlyOne "present" 'G' presentMarks
   spawn     <- exactlyOne "present" 'S' presentMarks
-  let open marks = Set.fromList [c | (m, c) <- marks, m /= '#', m /= '~', m /= 'D']
+  let open marks = Set.fromList [c | (m, c) <- marks, m `notElem` ("#~D" ++ mirrorMarks)]
+      mirrorsIn era marks = [ (c, (era, face)) | (m, c) <- marks, Just face <- [mirrorFace m] ]
+      mirrors = Map.fromList (mirrorsIn Past pastMarks ++ mirrorsIn Present presentMarks)
       marked mark marks = Set.fromList [c | (m, c) <- marks, m == mark]
       pits = marked '~' pastMarks
       crates = marked 'C' pastMarks
       plates = marked 'P' pastMarks
       doors = marked 'D' presentMarks
       onBorder (x, y) = x == 0 || y == 0 || x == width - 1 || y == height - 1
+      besideDoors = [ p | p <- Set.toList plates, d <- [minBound .. maxBound]
+                        , stepCell d p `Set.member` doors ]
       leaks = filter onBorder (Set.toList (open pastMarks) ++ Set.toList (open presentMarks)
                                ++ Set.toList pits ++ Set.toList doors)
   if spawn `Set.member` crates
@@ -274,12 +425,18 @@ parseLevel budget past present = do
                ++ show (Set.toList (plates `Set.difference` open presentMarks)))
   else if Set.null plates /= Set.null doors
     then Left "plates and doors need each other: a level has both or neither"
+  else if Map.size mirrors /= length (mirrorsIn Past pastMarks ++ mirrorsIn Present presentMarks)
+    then Left "a cell has a mirror in both eras; give each mirror its own cell"
+  else if not (null besideDoors)
+    then Left ("a plate is next to a door, so the player could hold it open while walking in, at "
+               ++ show besideDoors)
   else if null leaks
     then Right Level
       { lvWidth = width, lvHeight = height
       , lvPast = open pastMarks, lvPresent = open presentMarks
       , lvSpawn = spawn, lvPowerCell = powerCell, lvGoal = goal
       , lvCrates = crates, lvPits = pits, lvPlates = plates, lvDoors = doors
+      , lvMirrors = mirrors
       , lvBudget = budget, lvRules = baseRules
       , lvName = "", lvPar = budget, lvDressed = False
       }

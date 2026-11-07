@@ -22,14 +22,15 @@ import qualified Data.Set as Set
 import Game.Logic
 import Game.Types
 
-data Action = Go !Dir | ShiftEra
+data Action = Go !Dir | ShiftEra | SendEcho
   deriving (Eq, Ord, Show)
 
 allActions :: [Action]
-allActions = ShiftEra : map Go [minBound .. maxBound]
+allActions = ShiftEra : SendEcho : map Go [minBound .. maxBound]
 
 actionLabel :: Action -> String
 actionLabel ShiftEra      = "Space"
+actionLabel SendEcho      = "E"
 actionLabel (Go DirUp)    = "W"
 actionLabel (Go DirDown)  = "S"
 actionLabel (Go DirLeft)  = "A"
@@ -65,6 +66,7 @@ actionInputs :: Action -> [TickInput]
 actionInputs action = case action of
   Go dir   -> noInput { tiDir = Just dir } : replicate (stepTicks - 1) noInput
   ShiftEra -> noInput { tiShift = True }   : replicate shiftTicks noInput
+  SendEcho -> [noInput { tiEcho = True }, noInput]
 
 -- | The whole route, plus the one idle tick on which its last action completes.
 routeInputs :: [Action] -> [TickInput]
@@ -81,12 +83,15 @@ applyAction level action g = settle (stepGame level press g)
     press = case action of
       Go dir   -> noInput { tiDir = Just dir }
       ShiftEra -> noInput { tiShift = True }
+      SendEcho -> noInput { tiEcho = True }
     settle s
       | gPhase s == Playing && gMotion s /= Settled = settle (stepGame level noInput s)
       | otherwise = s
 
--- | Everything the rules can tell apart once the player has settled. Crates and
--- filled pits belong here: leave them out and different boards would be merged.
+-- | Everything the rules can tell apart once the player has settled. Crates, filled
+-- pits, footprints and the echo belong here: leave them out and different boards
+-- would be merged. A level without an echo keeps no footprints, so for it these add
+-- nothing.
 data StateKey = StateKey
   { skEra     :: !Era
   , skCell    :: !Cell
@@ -94,10 +99,13 @@ data StateKey = StateKey
   , skPhase   :: !Phase
   , skCrates  :: !(Set.Set Cell)
   , skFilled  :: !(Set.Set Cell)
+  , skTrail   :: ![Spot]
+  , skEcho    :: !(Maybe Spot)
   } deriving (Eq, Ord, Show)
 
 stateKey :: Game -> StateKey
 stateKey g = StateKey (gEra g) (gCell g) (gHasCell g) (gPhase g) (gCrates g) (gFilled g)
+                      (gTrail g) (gEcho g)
 
 data SearchResult = SearchResult
   { srStates   :: !(Map.Map StateKey Int)    -- ^ cheapest cost to reach each state

@@ -16,8 +16,17 @@ module Game.Logic
   , stepGame
   , tryShift
   , tryStep
+  , tryEcho
   , openCell
   , doorsOpen
+  , weights
+  , echoPath
+  , echoLanding
+  , Jump (..)
+  , mirrorAhead
+  , jumpTarget
+  , beamCells
+  , lightPasses
   , crossings
   , Hint (..)
   , currentHint
@@ -36,10 +45,15 @@ module Game.Logic
   , victoryText
   , failureText
   , pickupText
+  , echoNeedsStepsText
+  , echoInDoorwayText
+  , plateHeldText
+  , jumpAgainText
   ) where
 
 import Control.Applicative ((<|>))
 import Data.Maybe (isJust)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Game.Level (walkable)
 import Game.Types
@@ -54,6 +68,8 @@ initialGame level = Game
   , gRemaining    = lvBudget level
   , gCrates       = lvCrates level
   , gFilled       = Set.empty
+  , gTrail        = take (ruEchoLength (lvRules level)) [(Present, lvSpawn level)]
+  , gEcho         = Nothing
   , gHistory      = []
   , gPushing      = Nothing
   , gAttempt      = 0
@@ -62,6 +78,7 @@ initialGame level = Game
   , gPendingShift = False
   , gPendingMove  = Nothing
   , gPendingUndo  = False
+  , gPendingEcho  = False
   , gFeedback     = Nothing
   , gBump         = 0
   , gPrev         = noInput
@@ -100,7 +117,8 @@ stepGame level input g = next { gPrev = input }
 
 -- | Forget anything waiting to happen. Keys held across this need a fresh press.
 quiet :: Game -> Game
-quiet g = g { gPendingShift = False, gPendingMove = Nothing, gPendingUndo = False, gArmed = False }
+quiet g = g { gPendingShift = False, gPendingMove = Nothing, gPendingUndo = False
+            , gPendingEcho = False, gArmed = False }
 
 playTick :: Level -> TickInput -> Game -> Game
 playTick level input g0 = startNext level input (outOfTime level g2)
@@ -113,6 +131,7 @@ playTick level input g0 = startNext level input (outOfTime level g2)
       | otherwise = Nothing
     freshShift = tiShift input && not (tiShift (gPrev g0))
     freshUndo  = tiUndo input && not (tiUndo (gPrev g0))
+    freshEcho  = tiEcho input && not (tiEcho (gPrev g0))
     locked     = case gMotion g0 of
       Shifting _ -> True
       _          -> False
@@ -120,6 +139,7 @@ playTick level input g0 = startNext level input (outOfTime level g2)
       { gPendingShift = gPendingShift g0 || (freshShift && not locked)
       , gPendingMove  = freshDir <|> gPendingMove g0
       , gPendingUndo  = gPendingUndo g0 || freshUndo
+      , gPendingEcho  = gPendingEcho g0 || freshEcho
       , gArmed        = isJust (tiDir input) && (gArmed g0 || isJust freshDir)
       , gFeedback     = decayFeedback (gFeedback g0)
       , gBump         = max 0 (gBump g0 - 1)
@@ -163,6 +183,7 @@ startNext :: Level -> TickInput -> Game -> Game
 startNext level input g
   | gPhase g /= Playing || gMotion g /= Settled = g
   | gPendingUndo g = undo level g
+  | gPendingEcho g = startNext level input (tryEcho level g)
   | gPendingShift g = startNext level input (tryShift level g)
   | Just dir <- gPendingMove g =
       tryStep level True dir g { gPendingMove = Nothing }
@@ -192,7 +213,12 @@ charge cost g = g
     before = Snapshot
       { snEra = gEra g, snCell = gCell g, snHasCell = gHasCell g
       , snCrates = gCrates g, snFilled = gFilled g
-      , snFacing = gFacing g, snCost = cost }
+      , snFacing = gFacing g, snTrail = gTrail g, snEcho = gEcho g, snCost = cost }
+
+-- | Note where the player now stands, keeping only as many footprints as the level
+-- allows. A level with no echo keeps none, so its states stay as few as before.
+footprint :: Level -> Spot -> Game -> Game
+footprint level spot g = g { gTrail = take (ruEchoLength (lvRules level)) (spot : gTrail g) }
 
 -- | Rewind one accepted action. The board comes back exactly, the time only in
 -- part, so undoing can never beat having played well. It also cancels anything
@@ -207,6 +233,7 @@ undo level g = case gHistory g of
     in (quiet g)
          { gEra = snEra s, gCell = snCell s, gHasCell = snHasCell s
          , gCrates = snCrates s, gFilled = snFilled s, gFacing = snFacing s
+         , gTrail = snTrail s, gEcho = snEcho s
          , gRemaining = remaining, gHistory = rest
          , gMotion = Settled, gPushing = Nothing, gFeedback = Nothing, gBump = 0
          , gPhase = if remaining < ruStepCost rules then Lost else Playing
@@ -223,7 +250,7 @@ tryShift level g
   | gRemaining g < cost =
       refuse ShiftTooCostly
   | otherwise =
-      touchCell level (charge cost cleared)
+      touchCell level (footprint level (destination, gCell g) (charge cost cleared))
         { gEra      = destination
         , gMotion   = Shifting shiftTicks
         , gFeedback = keepPickupNote (gFeedback g)
@@ -245,7 +272,7 @@ openCell level g era cell = cell `Set.notMember` gCrates g && (onMap || filled |
   where
     onMap = walkable level era cell
     filled = era == Past && cell `Set.member` gFilled g
-    door = era == Present && cell `Set.member` lvDoors level && doorsOpen level (gCrates g)
+    door = era == Present && cell `Set.member` lvDoors level && doorsOpen level (weights g)
 
 -- | Every cell the player could switch era on right now: open in both eras, given
 -- where the crates, filled pits and open doors are. Worked out from the map and the
@@ -255,13 +282,106 @@ crossings level g =
   [ c | y <- [0 .. lvHeight level - 1], x <- [0 .. lvWidth level - 1], let c = (x, y)
       , openCell level g Past c, openCell level g Present c ]
 
--- | The doors open while a crate rests on every plate. This is worked out from where
--- the crates are, not stored, so undo, restart and the solver need nothing new, and a
--- door can never disagree with its plates. A crate only moves while the player is in
--- the past, so no door can shut on someone standing in it.
+-- | The doors open while something rests on every plate. This is worked out from
+-- where things are, not stored, so undo, restart and the solver need nothing new, and
+-- a door can never disagree with its plates. Nothing can leave a plate while the
+-- player stands in a door: crates only move while the player is in the past, the
+-- player is not on a plate while in a door, and the echo cannot be sent from one.
 doorsOpen :: Level -> Set.Set Cell -> Bool
-doorsOpen level crates = not (Set.null plates) && plates `Set.isSubsetOf` crates
+doorsOpen level held = not (Set.null plates) && plates `Set.isSubsetOf` held
   where plates = lvPlates level
+
+-- Mirrors ----------------------------------------------------------------------
+
+-- | Whether light crosses this cell in this era: anywhere you could stand, and an
+-- open pit. Walls, crates, shut doors and mirrors stop it.
+lightPasses :: Level -> Game -> Era -> Cell -> Bool
+lightPasses level g era cell =
+  openCell level g era cell || (era == Past && cell `Set.member` lvPits level)
+
+-- | The light a mirror throws out of its face, up to whatever stops it. Only in the
+-- mirror's own era.
+beamCells :: Level -> Game -> Cell -> [Cell]
+beamCells level g mirror = case Map.lookup mirror (lvMirrors level) of
+  Just (era, face) -> takeWhile (lightPasses level g era) (drop 1 (iterate (stepCell face) mirror))
+  Nothing -> []
+
+-- | A mirror the player stands in the light of, facing it.
+data Jump = Jump
+  { jMirror :: !Cell
+  , jTarget :: !Cell  -- ^ as far behind the mirror as the player stands in front of it
+  , jOpen   :: !Bool  -- ^ whether the player could stand there, so the jump would happen
+  } deriving (Eq, Show)
+
+-- | Looking along @dir@ from the player: if the light reaches a mirror in this era
+-- whose face looks back at them, that mirror and where it would put them. The
+-- player is in its light exactly when nothing stands between them.
+mirrorAhead :: Level -> Game -> Dir -> Maybe Jump
+mirrorAhead level g dir = look (1 :: Int) (stepCell dir (gCell g))
+  where
+    era = gEra g
+    look n c
+      | lightPasses level g era c = look (n + 1) (stepCell dir c)
+      | otherwise = case Map.lookup c (lvMirrors level) of
+          Just (e, face) | e == era && face == opposite dir ->
+            let target = iterate (stepCell dir) c !! n
+            in Just (Jump c target (openCell level g era target))
+          _ -> Nothing
+    opposite d = case d of
+      DirUp -> DirDown
+      DirDown -> DirUp
+      DirLeft -> DirRight
+      DirRight -> DirLeft
+
+-- | Where pressing @dir@ would jump the player to, if it would.
+jumpTarget :: Level -> Game -> Dir -> Maybe Cell
+jumpTarget level g dir = case mirrorAhead level g dir of
+  Just j | jOpen j -> Just (jTarget j)
+  _ -> Nothing
+
+-- | Every cell something is standing on: the crates, the player and the echo. A plate
+-- is set in the floor of both eras, so it does not matter which era they are in.
+weights :: Game -> Set.Set Cell
+weights g = Set.insert (gCell g) (maybe id (Set.insert . snd) (gEcho g) (gCrates g))
+
+-- | The way an echo sent now would walk: from the player's spot back along their
+-- footprints, oldest last, stopping before any footprint that is no longer open,
+-- such as one a crate has since been pushed onto. Shared by the rule and the drawing
+-- of where it would land, so the preview cannot disagree with what happens.
+echoPath :: Level -> Game -> [Spot]
+echoPath level g = case gTrail g of
+  here : older -> here : takeWhile free older
+  [] -> []
+  where
+    free (era, cell) = openCell level g era cell
+
+-- | Where an echo sent now would stand, if there is anywhere to walk back to.
+echoLanding :: Level -> Game -> Maybe Spot
+echoLanding level g = case echoPath level g of
+  path@(_ : _ : _) -> Just (last path)
+  _ -> Nothing
+
+-- | Send the echo: it walks the footprints back and stays where they end, until the
+-- next one replaces it. The footprints start again from here. Refused for free, with
+-- a reason, if there is nothing to walk back along, or from a doorway, where the old
+-- echo leaving its plate could shut the door on the player.
+tryEcho :: Level -> Game -> Game
+tryEcho level g
+  | gMotion g /= Settled = g
+  | ruEchoLength rules <= 0 = cleared
+  | Nothing <- landing = told EchoNeedsSteps
+  | gEra g == Present && gCell g `Set.member` lvDoors level = told EchoInDoorway
+  | gRemaining g < cost = cleared
+  | otherwise = (charge cost cleared)
+      { gEcho = landing
+      , gTrail = take (ruEchoLength rules) [(gEra g, gCell g)]
+      }
+  where
+    rules = lvRules level
+    cost = ruEchoCost rules
+    landing = echoLanding level g
+    cleared = g { gPendingEcho = False }
+    told kind = cleared { gFeedback = Just (Feedback kind hintFeedbackTicks) }
 
 -- | Start one step if the destination is open, or if it holds a crate that can be
 -- pushed. Everything is checked here, before anything moves, and never again. The
@@ -273,11 +393,21 @@ doorsOpen level crates = not (Set.null plates) && plates `Set.isSubsetOf` crates
 tryStep :: Level -> Bool -> Dir -> Game -> Game
 tryStep level isFresh dir g
   | gMotion g /= Settled = g
+  | Just target <- jumpTarget level g dir = jumpTo target
   | to `Set.member` gCrates g = pushOrRefuse
   | not (openCell level g (gEra g) to) = refused
   | gRemaining g < cost = g { gFacing = dir }
-  | otherwise = (charge cost g) { gFacing = dir, gMotion = Stepping to stepTicks }
+  | otherwise = (walked (charge cost g)) { gFacing = dir, gMotion = Stepping to stepTicks }
   where
+    walked = footprint level (gEra g, to)
+    -- Facing a mirror along its light, with somewhere to land: the key steps through
+    -- it instead of walking. Like a push, only a fresh press does, so holding a key
+    -- walks up into the light and stops there.
+    jumpTo target
+      | not isFresh = g { gFacing = dir, gFeedback = Just (Feedback JumpNeedsPress hintFeedbackTicks) }
+      | gRemaining g < ruJumpCost (lvRules level) = g { gFacing = dir }
+      | otherwise = (footprint level (gEra g, target) (charge (ruJumpCost (lvRules level)) g))
+          { gFacing = dir, gMotion = Stepping target stepTicks }
     cost = ruStepCost (lvRules level)
     to = stepCell dir (gCell g)
     beyond = stepCell dir to
@@ -294,7 +424,7 @@ tryStep level isFresh dir g
       | not pit && not freeInPresent =
           refused { gFeedback = Just (Feedback (PushBlocked beyond) blockedFeedbackTicks) }
       | gRemaining g < cost = g { gFacing = dir }
-      | otherwise = (charge cost g)
+      | otherwise = (walked (charge cost g))
           { gFacing  = dir
           , gMotion  = Stepping to stepTicks
           , gPushing = Just beyond
@@ -307,6 +437,7 @@ tryStep level isFresh dir g
 data Hint
   = HintLampDark       -- ^ on the lighthouse without the cell
   | HintOnlyFloor      -- ^ on the lighthouse's footing in the past, with the cell
+  | HintPlateHeld      -- ^ the player's own weight is what holds the door open
   deriving (Eq, Show)
 
 -- | A hint from where the player stands. Never the route.
@@ -315,13 +446,20 @@ currentHint level g
   | gPhase g /= Playing = Nothing
   | gEra g == Present && here == lvGoal level && not (gHasCell g) = Just HintLampDark
   | gEra g == Past && here == lvGoal level && gHasCell g = Just HintOnlyFloor
+  | doorsOpen level (weights g) && not (doorsOpen level (weights g `withoutPlayer` here))
+      = Just HintPlateHeld
   | otherwise = Nothing
   where
     here = gCell g
+    -- The player's cell, unless a crate or the echo is standing there too.
+    withoutPlayer held c
+      | c `Set.member` gCrates g || fmap snd (gEcho g) == Just c = held
+      | otherwise = Set.delete c held
 
 hintText :: Hint -> String
 hintText HintLampDark      = "The lamp is dark. It has nothing to burn."
 hintText HintOnlyFloor     = "Only a footing, back then. The lamp stands in the present."
+hintText HintPlateHeld     = plateHeldText
 
 objectiveText :: Game -> String
 objectiveText g
@@ -364,6 +502,19 @@ peekText Present = "Looking ahead to the present. Let go of Tab to return."
 
 pickupText :: String
 pickupText = "The power cell travels with you."
+
+echoNeedsStepsText :: String
+echoNeedsStepsText = "Walk first. The echo retraces your last steps."
+
+echoInDoorwayText :: String
+echoInDoorwayText = "Not from a doorway. The door would close on you."
+
+jumpAgainText :: String
+jumpAgainText = "Press the key again to step through the mirror."
+
+-- | Said while the player alone holds every plate down.
+plateHeldText :: String
+plateHeldText = "The door is open. But you cannot stay here."
 
 victoryText, failureText :: String
 victoryText = "You brought the light back"

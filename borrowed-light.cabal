@@ -37,7 +37,12 @@ executable borrowed-light
                     Station
                     Title
   build-depends:    base >=4.18 && <5, borrowed-light, containers, gloss ==1.13.*
-  ghc-options:      -threaded "-with-rtsopts=-A32m"
+  ghc-options:      "-with-rtsopts=-A32m"
+  -- The game runs no Haskell threads. On Windows it uses the single-threaded
+  -- runtime, after two unexplained crashes in the threaded one while freeglut called
+  -- back into Haskell; elsewhere it keeps the threaded runtime it was tested with.
+  if !os(windows)
+    ghc-options:    -threaded
   -- For the window's close button: see app/Platform.hs.
   if os(darwin)
     frameworks:     GLUT

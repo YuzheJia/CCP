@@ -2,7 +2,7 @@
 module Main (main) where
 
 import Control.Monad (forM, unless)
-import Data.List (foldl', sort)
+import Data.List (foldl', isInfixOf, sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Game.Fx
@@ -113,6 +113,8 @@ allChecks level = concat
   , undoChecks level
   , crateChecks
   , plateChecks
+  , echoChecks level
+  , mirrorChecks
   , campaignChecks
   , pendingShifts level
   , routeChecks level
@@ -378,7 +380,7 @@ restartAndPause level =
 timing :: Level -> [Check]
 timing level =
   [ check "12. the prices are 2 s a step and 6 s a shift, and the budget is par + 20" $
-      lvRules level == Rules 2 6 50
+      lvRules level == Rules 2 6 50 4 0 4
       && routeCost == 108 && lvBudget level == routeCost + 20
   , check "12. standing still spends nothing, for as long as you like" $
       let g = idle level 100000 (startPlaying level)
@@ -700,10 +702,18 @@ plateChecks =
           off = walk gatedYard DirRight on
       in not (doorsOpen gatedYard (gCrates g0)) && doorsOpen gatedYard (gCrates on)
          && not (doorsOpen gatedYard (gCrates off))
-  , check "door: a keeper standing on the plate does not hold it" $
-      let g = (at gatedYard Past (4, 3) False) { gCrates = Set.empty }
-      in not (doorsOpen gatedYard (gCrates g))
-         && gCell (walk gatedYard DirRight (at gatedYard Present (4, 2) False) { gCrates = Set.empty }) == (4, 2)
+  , check "door: a keeper standing on the plate holds it, in either era, until they step off" $
+      let onIt era = (at gatedYard era (4, 3) False) { gCrates = Set.empty }
+          off = walk gatedYard DirUp (onIt Present)
+      in doorsOpen gatedYard (weights (onIt Past)) && doorsOpen gatedYard (weights (onIt Present))
+         && gCell off == (4, 2) && not (doorsOpen gatedYard (weights off))
+         && gCell (walk gatedYard DirRight off) == (4, 2)
+  , check "door: the parser refuses a plate next to a door" $
+      case parseLevel 50
+             [ "#####", "#B..#", "#.P.#", "#...#", "#####" ]
+             [ "#####", "#S..#", "#...#", "#.DG#", "#####" ] of
+        Left err -> "next to a door" `isInfixOf` err
+        Right _ -> False
   , check "door: with two plates, one crate is not enough" $
       let two = gatedYard { lvPlates = Set.fromList [(4, 3), (6, 3)] }
       in not (doorsOpen two (Set.fromList [(4, 3)]))
@@ -736,7 +746,145 @@ nobodyInShutDoor :: Level -> Bool
 nobodyInShutDoor l = all ok (Map.keys (srStates (search l (\_ _ -> True) (startPlaying l))))
   where
     ok k = skEra k /= Present || walkable l Present (skCell k)
-           || (skCell k `Set.member` lvDoors l && doorsOpen l (skCrates k))
+           || (skCell k `Set.member` lvDoors l && doorsOpen l (held k))
+    held k = maybe id (Set.insert . snd) (skEcho k) (Set.insert (skCell k) (skCrates k))
+
+-- The echo. --------------------------------------------------------------------
+
+-- | The campaign's "Echo" level: spawn (1,4), plate (3,4), door (8,4), lighthouse
+-- (10,4), all in one row of the present; the cell is at (1,3) in the past.
+echoRoom :: Level
+echoRoom = head [l | Right ls <- [extraLevels], l <- ls, lvName l == "Echo"]
+
+sendEcho :: Level -> Game -> Game
+sendEcho level = applyAction level SendEcho
+
+walks :: Level -> [Dir] -> Game -> Game
+walks level ds g = foldl' (flip (walk level)) g ds
+
+echoChecks :: Level -> [Check]
+echoChecks fixture =
+  [ check "echo: steps and shifts leave footprints, newest first; refusals leave none" $
+      let g0 = startPlaying echoRoom
+          stepped = walk echoRoom DirRight g0
+          bumped = walk echoRoom DirUp g0
+          shifted = shift echoRoom g0
+      in gTrail g0 == [pr (1, 4)]
+         && gTrail stepped == [pr (2, 4), pr (1, 4)]
+         && gTrail bumped == gTrail g0
+         && gTrail shifted == [(Past, (1, 4)), pr (1, 4)]
+  , check "echo: only the last five footprints are kept, the player's own included" $
+      gTrail (walks echoRoom (replicate 6 DirRight) (startPlaying echoRoom))
+        == map pr [(7, 4), (6, 4), (5, 4), (4, 4), (3, 4)]
+  , check "echo: walking on four from the plate, it stops on the plate and the door opens" $
+      let g0 = walks echoRoom (replicate 6 DirRight) (startPlaying echoRoom)
+          g = sendEcho echoRoom g0
+      in not (doorsOpen echoRoom (weights g0))
+         && gEcho g == Just (pr (3, 4)) && doorsOpen echoRoom (weights g)
+         && gRemaining g == gRemaining g0 - 4 && gTrail g == [pr (7, 4)]
+         && gCell (walk echoRoom DirRight g) == (8, 4)
+  , check "echo: it follows the footprints across a shift into the other era" $
+      let g0 = walk echoRoom DirUp (shift echoRoom (startPlaying echoRoom))
+      in gEcho (sendEcho echoRoom g0) == Just (pr (1, 4)) && gEra g0 == Past
+  , check "echo: it stops before a footprint a crate now stands on" $
+      let g = (at echoRoom Present (7, 4) False)
+                { gTrail = map pr [(7, 4), (6, 4), (5, 4), (4, 4), (3, 4)]
+                , gCrates = Set.fromList [(5, 4)] }
+      in echoLanding echoRoom g == Just (pr (6, 4))
+         && echoPath echoRoom g == map pr [(7, 4), (6, 4)]
+  , check "echo: with nothing to walk back along, it is refused for free, and says why" $
+      let g0 = startPlaying echoRoom
+          g = sendEcho echoRoom g0
+      in gEcho g == Nothing && gRemaining g == gRemaining g0
+         && fmap fbKind (gFeedback g) == Just EchoNeedsSteps
+  , check "echo: it is refused for free from a doorway, and the old echo stays" $
+      let g0 = (at echoRoom Present (8, 4) False)
+                 { gEcho = Just (pr (3, 4)), gTrail = map pr [(8, 4), (7, 4)] }
+          g = sendEcho echoRoom g0
+      in gEcho g == Just (pr (3, 4)) && gRemaining g == gRemaining g0
+         && fmap fbKind (gFeedback g) == Just EchoInDoorway
+  , check "echo: without the time for it, it is refused for free" $
+      let g0 = (walks echoRoom [DirRight, DirRight] (startPlaying echoRoom)) { gRemaining = 3 }
+          g = sendEcho echoRoom g0
+      in gEcho g == Nothing && gRemaining g == 3
+  , check "echo: a second echo replaces the first" $
+      let first = sendEcho echoRoom (walks echoRoom [DirRight, DirRight] (startPlaying echoRoom))
+          second = sendEcho echoRoom (walks echoRoom [DirRight, DirRight] first)
+      in gEcho first == Just (pr (1, 4)) && gEcho second == Just (pr (3, 4))
+  , check "echo: undo takes it back, footprints and all, for half its price" $
+      let g0 = walks echoRoom (replicate 6 DirRight) (startPlaying echoRoom)
+          g = run echoRoom [undoKey, noInput] (sendEcho echoRoom g0)
+      in gEcho g == Nothing && gTrail g == gTrail g0 && gRemaining g == gRemaining g0 - 2
+  , check "echo: restart clears it" $
+      let g = sendEcho echoRoom (walks echoRoom [DirRight, DirRight] (startPlaying echoRoom))
+          again = run echoRoom [restartKey, noInput] g
+      in gEcho again == Nothing && gTrail again == [pr (1, 4)]
+  , check "echo: a level without it keeps no footprints and ignores E" $
+      let g0 = walk fixture DirUp (startPlaying fixture)
+          g = sendEcho fixture g0
+      in gTrail g0 == [] && g == g0 { gPrev = gPrev g }
+  , check "fx: a new echo walks back from the player to where it stays" $
+      let g0 = walks echoRoom (replicate 6 DirRight) (startPlaying echoRoom)
+          g = sendEcho echoRoom g0
+      in fmap ewPath (fxEchoWalk (stepFx g0 g initialFx))
+           == Just (map pr [(7, 4), (6, 4), (5, 4), (4, 4), (3, 4)])
+  ]
+  where
+    pr c = (Present, c)
+
+-- Mirrors. ---------------------------------------------------------------------
+
+levelNamed :: String -> Level
+levelNamed name = head [l | Right ls <- [campaign], l <- ls, lvName l == name]
+
+-- | "Through the Glass": a past mirror at (6,4) facing down, the cell at (6,2).
+glass, rust, oneWay :: Level
+glass = levelNamed "Through the Glass"
+rust = levelNamed "Rust in the Beam"
+oneWay = levelNamed "One Way In"
+
+mirrorChecks :: [Check]
+mirrorChecks =
+  [ check "parser: a mirror belongs to the era it is drawn in, and is solid there" $
+      Map.lookup (6, 4) (lvMirrors glass) == Just (Past, DirDown)
+        && not (walkable glass Past (6, 4))
+        && Map.lookup (4, 4) (lvMirrors rust) == Just (Present, DirRight)
+  , check "mirror: in its light and facing it, the key steps through, as far behind as in front" $
+      let g0 = at glass Past (6, 6) False
+          g = walk glass DirUp g0
+      in gCell g == (6, 2) && gHasCell g && gRemaining g == gRemaining g0 - 4
+  , check "mirror: with nowhere to land, the same key only walks" $
+      let g0 = at glass Past (6, 7) False
+          g = walk glass DirUp g0
+      in fmap jOpen (mirrorAhead glass g0 DirUp) == Just False
+         && gCell g == (6, 6) && gRemaining g == gRemaining g0 - 2
+  , check "mirror: holding the key walks into the light and stops, saying to press again" $
+      let g = run glass (press DirUp : replicate 40 (press DirUp)) (at glass Past (6, 7) False)
+      in gCell g == (6, 6) && fmap fbKind (gFeedback g) == Just JumpNeedsPress
+  , check "mirror: only the key that faces it steps through" $
+      jumpTarget glass (at glass Past (6, 6) False) DirDown == Nothing
+  , check "mirror: it only works in its own era" $
+      let open g = g { gCrates = Set.empty }
+      in jumpTarget rust (open (at rust Present (6, 4) False)) DirLeft == Just (2, 4)
+         && jumpTarget rust (open (at rust Past (6, 4) False)) DirLeft == Nothing
+  , check "mirror: a crate in the light stops it" $
+      let g = at rust Present (6, 4) False
+      in mirrorAhead rust g DirLeft == Nothing && gCell (walk rust DirLeft g) == (6, 4)
+  , check "mirror: a shut door stops the light, and one held open lets it through" $
+      let shut = at oneWay Present (6, 4) True
+          held = shut { gCrates = Set.fromList [(4, 7)] }
+      in jumpTarget oneWay shut DirLeft == Nothing && gCell (walk oneWay DirLeft shut) == (6, 4)
+         && jumpTarget oneWay held DirLeft == Just (2, 4)
+         && gPhase (walk oneWay DirLeft held) == Won
+  , check "mirror: undo brings the player back through it, for half the price" $
+      let g0 = at glass Past (6, 6) False
+          g = run glass [undoKey, noInput] (walk glass DirUp g0)
+      in gCell g == (6, 6) && not (gHasCell g) && gRemaining g == gRemaining g0 - 2
+  , check "mirror: stepping through first in One Way In shuts the player in" $
+      let g = foldl' (flip (applyAction oneWay)) (startPlaying oneWay)
+                [ShiftEra, Go DirRight, Go DirRight, Go DirRight, Go DirUp]
+      in gCell g == (6, 4) && stateKey g `Set.member` deadStates oneWay
+  ]
 
 -- The campaign. -----------------------------------------------------------------
 campaignChecks :: [Check]
@@ -768,7 +916,7 @@ campaignChecks = case campaign of
           in runIndex back == 0 && gPhase (runGame back) == Menu
              && runIndex held == 0 && gPhase (runGame held) == Menu
       , check "dead ends: pushing the Plug's crate the obvious way is known to be lost" $
-          let plug = head [l | l <- levels, lvName l == "The Plug"]
+          let plug = head [l | Right extra <- [extraLevels], l <- extra, lvName l == "The Plug"]
               actions = [Go DirDown, Go DirRight, Go DirRight, Go DirRight, ShiftEra, Go DirRight]
               ended = foldl' (flip (applyAction plug)) (startPlaying plug) actions
               rewound = run plug [undoKey] ended
@@ -800,8 +948,10 @@ levelChecks l =
       gPhase (play (lvPar l)) == Won && gRemaining (play (lvPar l)) == 0
   , named "and cannot win with one step less" $
       gPhase (play (lvPar l - 2)) /= Won
-  , named "with no crates there are no dead ends" $
-      not (Set.null (lvCrates l)) || null (srDeadEnds result)
+  -- An echo can strand the player too: sent again from beyond its door, it leaves
+  -- the plate and shuts them in. Like a bad push, the game says so, and Z undoes it.
+  , named "with no crates and no echo there are no dead ends" $
+      not (Set.null (lvCrates l)) || ruEchoLength (lvRules l) > 0 || null (srDeadEnds result)
   , named "its crates matter: it cannot be won without pushing one, if it has any" $
       Set.null (lvCrates l) || srGoal (search l noPushing start) == Nothing
   , named "its search stays small enough to run" $ Map.size (srStates result) <= 20000
@@ -815,6 +965,12 @@ levelChecks l =
       in all (\g -> stateKey g `Set.notMember` dead) trail
   , named "its door matters: it cannot be won without opening it, if it has one" $
       Set.null (lvDoors l) || srGoal (search (noDoors l) (\_ _ -> True) (startPlaying (noDoors l))) == Nothing
+  , named "its echo matters: it cannot be won without one, if it allows one" $
+      ruEchoLength (lvRules l) == 0
+        || srGoal (search l (\_ a -> a /= SendEcho) start) == Nothing
+  , named "its mirrors matter: it cannot be won without stepping through one, if it has any" $
+      Map.null (lvMirrors l)
+        || srGoal (search l (\g a -> case a of { Go d -> jumpTarget l g d == Nothing; _ -> True }) start) == Nothing
   , named "nobody ever stands on a crate" $
       all (\k -> skCell k `Set.notMember` skCrates k) (Map.keys (srStates result))
   ]
@@ -828,6 +984,7 @@ levelChecks l =
     noPushing g action = case action of
       Go d -> stepCell d (gCell g) `Set.notMember` gCrates g || gEra g /= Past
       ShiftEra -> True
+      SendEcho -> True
     play n = run l (routeInputs route) start { gRemaining = n }
 
 -- Undo. ------------------------------------------------------------------------
@@ -1147,17 +1304,17 @@ fxChecks level =
       in fmap burstCell (fxBurst (stepFx g (run level [noInput] g) initialFx)) == Just (10, 2)
   , check "fx: pausing freezes effects but lets the start fade finish" $
       let g = run level [pauseKey] (at level Present (2, 6) False)
-          dirty = Fx 100 (Just (Wave 3 Past (1, 1))) Nothing 0 0 0 5 Nothing
+          dirty = Fx 100 (Just (Wave 3 Past (1, 1))) Nothing 0 0 0 5 Nothing Nothing
           fx = stepFx g g dirty
       in fxClock fx == 100 && fmap waveAge (fxWave fx) == Just 3 && fxLevelAge fx == 6
   , check "fx: restart clears every effect" $
       let g = at level Past (9, 2) True
           dirty = Fx 500 (Just (Wave 3 Past (1, 1))) (Just (Burst 3 (1, 1))) 50 9 9 9
-                    (Just (CostFloat 3 (-2) (1, 1)))
+                    (Just (CostFloat 3 (-2) (1, 1))) (Just (EchoWalk 2 [(Past, (1, 1)), (Past, (2, 1))]))
       in stepFx g (run level [restartKey] g) dirty == initialFx
   , check "fx: resuming from a pause is not mistaken for a restart" $
       let g = run level [pauseKey] (startPlaying level)
-          dirty = Fx 500 Nothing Nothing 0 0 3 9 Nothing
+          dirty = Fx 500 Nothing Nothing 0 0 3 9 Nothing Nothing
       in fxClock (stepFx g (run level [noInput, pauseKey] g) dirty) == 501
   , check "fx: undoing a pickup stops its burst" $
       let g = walk level DirRight (at level Past (9, 2) False)

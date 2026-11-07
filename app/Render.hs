@@ -10,6 +10,7 @@ import Game.Solution (StateKey, deadStates, stateKey)
 import Game.Types
 import Graphics.Gloss
 import Hud
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Station
 import Title
@@ -121,13 +122,20 @@ world scene level g fx = Pictures
   , cellOnCradle
   , filledPits
   , gates
+  , heldPlates
+  , beams
+  , mirrors
   , crossingMarks
+  , footprints
   , crates
   , winBeneath
   , carried
   , ambient Past clock pastK
   , ambient Present clock presentK
   , blockedOutline
+  , echo
+  , reflections
+  , jumpFlash
   , actor
   , burst
   , costFloat
@@ -155,7 +163,17 @@ world scene level g fx = Pictures
 
     -- Player position: authoritative cell, plus a purely visual ease to the next.
     (fromX, fromY) = gCell g
+    -- A jump through a mirror: the keeper shrinks to nothing where they stood and
+    -- grows again where they land, rather than sliding through the walls between.
+    jumpP = case gMotion g of
+      Stepping (toX, toY) left | abs (toX - fromX) + abs (toY - fromY) > 1 ->
+        Just ((toX, toY), 1 - fromIntegral left / fromIntegral stepTicks)
+      _ -> Nothing :: Maybe (Cell, Float)
+    jumpK = maybe 1 (\(_, p) -> max 0.04 (abs (1 - 2 * p))) jumpP
     (visX, visY, stepPhase) = case gMotion g of
+      Stepping (toX, toY) _ | Just (_, p) <- jumpP ->
+        if p < 0.5 then (fromIntegral fromX, fromIntegral fromY, 0)
+                   else (fromIntegral toX, fromIntegral toY, 0)
       Stepping (toX, toY) left ->
         let p = 1 - fromIntegral left / fromIntegral stepTicks
             e = smooth p
@@ -175,8 +193,36 @@ world scene level g fx = Pictures
     -- At the win the keeper steps aside, so the tower they relit can be seen.
     asideK = if gPhase g == Won then smooth (fromIntegral (fxEnd fx) / 26) else 0
     actor = at (fst playerAt + 42 * asideK, snd playerAt + 6 - 26 * asideK)
-               (keeper (if asideK > 0.5 then DirLeft else gFacing g)
-                       (if gPhase g == Won then (if asideK < 1 then asideK * 2 else 0) else stepPhase))
+               (Scale jumpK jumpK (keeper (if asideK > 0.5 then DirLeft else gFacing g)
+                       (if gPhase g == Won then (if asideK < 1 then asideK * 2 else 0) else stepPhase)))
+
+    -- Mirrors stand in their own era, and their light only shows there.
+    mirrors = Pictures
+      [ at (cellPos c) (mirrorArt e face clock)
+      | (c, (e, face)) <- Map.toList (lvMirrors level), eraOf c == e ]
+    beams = Pictures
+      [ beamLight e clock (edge c face) (if null cells then edge c face else edge (last cells) face)
+      | wave == Nothing, gPhase g /= Menu
+      , (c, (e, face)) <- Map.toList (lvMirrors level), e == era
+      , let cells = beamCells level g c ]
+    edge c face = let (x, y) = cellPos c; (ux, uy) = screenDir face in (x + half * ux, y + half * uy)
+
+    -- Standing in a mirror's light: the reflection shows where its key would put
+    -- the keeper, with an arrow on the key that does it, or a cross if it cannot.
+    reflections
+      | gPhase g /= Playing || gMotion g /= Settled || peeking g fx = Blank
+      | otherwise = Pictures
+          [ if jOpen j
+              then Pictures [ at (cellPos (jTarget j)) (Pictures [landingMark clock, echoFigure clock 0.9])
+                            , at playerAt (jumpArrow d clock) ]
+              else at (cellPos (jTarget j)) blockedLanding
+          | d <- [minBound .. maxBound], Just j <- [mirrorAhead level g d] ]
+    jumpFlash = case jumpP of
+      Just (to, p) -> Pictures
+        [ at (cellPos (gCell g)) (Color (hexA 0xE6FAFF (0.7 * (1 - p))) (ring 28 (20 + 30 * p) 3 1))
+        , at (cellPos to) (Color (hexA 0xE6FAFF (0.7 * p)) (ring 28 (50 - 30 * p) 3 1))
+        ]
+      Nothing -> Blank
 
     carried
       | gHasCell g && gPhase g /= Won = at playerAt (carriedLight clock (fromIntegral (fxCarried fx)))
@@ -218,8 +264,37 @@ world scene level g fx = Pictures
       | gPhase g /= Playing || peeking g fx || gMotion g /= Settled = []
       | otherwise = filter (== gCell g) (crossings level g)
     gates = Pictures
-      [ at (cellPos c) (doorway level c (doorsOpen level (gCrates g)))
+      [ at (cellPos c) (doorway level c (doorsOpen level (weights g)))
       | c <- Set.toList (lvDoors level), eraOf c == Present ]
+    -- A plate with anything on it glows, so it is clear what holds a door open.
+    heldPlates = Pictures
+      [ at (cellPos c) (heldPlateGlow clock)
+      | gPhase g /= Menu, c <- Set.toList (lvPlates level), c `Set.member` weights g ]
+
+    -- The footprints an echo would walk back along, fainter the older they are, and
+    -- fainter still in the other era. The one it would stop on is ringed.
+    echoing = ruEchoLength (lvRules level) > 0
+    footprints
+      | not echoing || gPhase g /= Playing || gMotion g /= Settled = Blank
+      | otherwise = Pictures $
+          [ at (cellPos c) (footprintMark (eraK e * (1 - 0.15 * fromIntegral i)))
+          | (i, (e, c)) <- zip [0 :: Int ..] (drop 1 (gTrail g)) ] ++
+          [ at (cellPos c) (Scale (0.6 + 0.4 * eraK e) (0.6 + 0.4 * eraK e) (landingMark clock))
+          | Just (e, c) <- [echoLanding level g] ]
+    eraK e = if e == era then 1 else 0.4
+
+    -- The echo walks back along the footprints, then stays. Crossing a shift, it
+    -- fades from one era into the other on the same cell.
+    echo = case fxEchoWalk fx >>= echoWalkAt of
+      _ | gPhase g == Menu -> Blank
+      Just ((e0, (x0, y0)), (e1, (x1, y1)), p) ->
+        let e = smooth p
+            k = lerp e (eraK e0) (eraK e1)
+        in at (cellVec (lerp e (fromIntegral x0) (fromIntegral x1)) (lerp e (fromIntegral y0) (fromIntegral y1)))
+              (echoFigure clock k)
+      Nothing -> case gEcho g of
+        Just (e, c) -> at (cellPos c) (echoFigure clock (eraK e))
+        Nothing -> Blank
     filledPits = Pictures
       [ at (cellPos c) (filledPit level c)
       | c <- Set.toList (gFilled g), eraOf c == Past, not (fillingNow c) ]
@@ -274,6 +349,12 @@ world scene level g fx = Pictures
             hintBand era (clamp01 (fromIntegral left / 30)) pushAgainText
           Just (Feedback CrateRusted left) ->
             hintBand era (clamp01 (fromIntegral left / 30)) rustedText
+          Just (Feedback EchoNeedsSteps left) ->
+            hintBand era (clamp01 (fromIntegral left / 30)) echoNeedsStepsText
+          Just (Feedback EchoInDoorway left) ->
+            hintBand era (clamp01 (fromIntegral left / 30)) echoInDoorwayText
+          Just (Feedback JumpNeedsPress left) ->
+            hintBand era (clamp01 (fromIntegral left / 30)) jumpAgainText
           _ -> case currentHint level g of
             Just h -> hintBand era 1 (hintText h)
             Nothing -> Blank

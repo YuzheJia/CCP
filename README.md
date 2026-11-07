@@ -49,17 +49,39 @@ Each level's budget is its par, the cheapest possible cost found by the solver, 
 
 ### The campaign
 
-Seven levels, each adding one idea or combining ideas already taught:
+Three levels, sized for a three-minute demo, each adding one idea:
 
 | # | Level | Idea | Par | Budget |
 |---|---|---|---|---|
-| 1 | First Light | Walking, switching, and what each costs | 48 | 68 |
-| 2 | First Push | A crate only moves in the past | 42 | 58 |
-| 3 | The Plug | A crate plugs a door, and the obvious push seals it for good | 56 | 68 |
-| 4 | The Buried Lamp | The pushes that save steps are the fatal ones | 64 | 76 |
-| 5 | The Held Door | A crate on a plate opens a door in the present | 54 | 66 |
-| 6 | The Bridge | A crate in a pit becomes a way across | 44 | 56 |
-| 7 | The Wrong Way First | The crate must first move away from where it has to go | 64 | 72 |
+| 1 | Through the Glass | Stand in a mirror's light and the key toward it steps through; how far depends on where you stand | 22 | 42 |
+| 2 | Rust in the Beam | A crate rusted into the present's light can be moved in the past | 34 | 50 |
+| 3 | One Way In | A mirror is a one-way door: open the way out, a door the crate holds, before stepping in | 42 | 54 |
+
+Earlier levels are kept in `extraLevels` in `src/Game/Level.hs`: First Light, the two echo levels, and the crate levels (First Push, The Plug, The Buried Lamp, The Held Door, The Bridge, The Wrong Way First). They are not played or checked, because a player standing on a plate can now change their pars.
+
+### Mirrors
+
+A mirror stands in one era, solid there, and throws light out of its face in a straight line until a wall, a crate, a shut door or another mirror stops it. Light crosses an open pit. On the map it is drawn as the way its face looks, `^ v < >`, on the map of the era it works in.
+
+- **Where it puts you:** as far behind the mirror as you stand in front of it. Two cells in front, two cells behind.
+- **How to use it:** stand in its light and press the key that points at the mirror. If you could stand where your reflection is, you step through, in the same era. If not, the key just walks you a cell, as it always would.
+- **Reading it before you press:** in the light, your reflection shows where you would land, with an arrow beside you on the key that does it. If the landing is blocked, a red cross shows instead and the key only walks. Other keys never jump.
+- **Holding a key** walks up into the light and stops; jumping takes a fresh press, like a push.
+- **Price:** 4 seconds, however far. Z takes it back for half, like any action.
+
+The light, the reflection and the jump are all worked out from the board by one function, `mirrorAhead`, so what is drawn cannot disagree with what happens. Jumping is an ordinary move, so the solver needed no new action.
+
+### The echo (not in the campaign)
+
+E sends an echo, in levels that use `echoRules`. It starts on your spot and walks back along your footprints, then stays where they end and stands in for you. The game keeps your last five footprints, your own spot included, so walking straight, the echo stops four steps back. A shift leaves a footprint too, so an echo can walk back across one and end up in the other era.
+
+- It costs 4 seconds, and Z takes it back for half, like any action.
+- There is one echo at a time. A new one replaces the old, and your footprints start again from where you sent it.
+- It stops early before any footprint that is no longer open, such as one a crate has since been pushed onto.
+- It holds plates and nothing else: it doesn't block anyone, pick up the cell or light the lamp.
+- It is refused for free with nothing to walk back along, and from a doorway, where the old echo leaving its plate could shut the door on you.
+
+The footprints are drawn on the floor and the one the echo would stop on is ringed, worked out by the same function the rule uses. A level turns the echo on with `echoRules`; with `baseRules` it keeps no footprints and its search is as small as before.
 
 ### Help the game gives
 
@@ -71,9 +93,9 @@ A crate has one position, shared by both eras, so it only goes where both have r
 
 A pit (`~` on the past map) blocks the past until a crate is pushed in. The crate is used up and the cell becomes past floor, even if the present is a wall there, which makes it a bridge. If the present is open too, it is also a new crossing.
 
-A pressure plate is set in the floor of both eras. A door in the present is a wall until a crate rests on every plate, and it shuts again if a crate is pushed off. Only a crate holds a plate: standing on one does nothing. Doors are worked out from where the crates are, not stored, so undo, restart and the solver needed no new state. A crate can't be pushed into a door, open or shut.
+A pressure plate is set in the floor of both eras. A door in the present is a wall until something rests on every plate (a crate, the player or the echo, in either era), and it shuts again when that leaves. Doors are worked out from where things stand, not stored, so undo, restart and the solver needed no new state. A crate can't be pushed into a door, open or shut. The parser refuses a plate next to a door, or the player could hold it open while walking in.
 
-Pushes can't be walked back, so a level can now reach a state it can't be won from. Z and R are the way out.
+Pushes can't be walked back, so a level can now reach a state it can't be won from. So can stepping through a mirror into a room with no way out yet, or an echo sent again from beyond its door. The game says so at once, and Z and R are the way out.
 
 ### Writing a level
 
@@ -243,12 +265,8 @@ search: 255 reachable states, 0 dead ends
 search: cheapest route costs 108 s, 42 actions, 6 of them shifts
 search: W W W W D Space D D S S S S D D Space D D W W W W D Space A S S S S Space A A A A W W W W Space A A A Space
 route:  intended route takes 373 ticks, ends StateKey {skEra = Present, skCell = (2,2), skHasCell = True, skPhase = Won, skCrates = fromList [], skFilled = fromList []}
-level:  First Light: par 48, budget 68, 20 actions, 2 shifts, 35 states, 0 dead, 50% shared
-level:  First Push: par 42, budget 58, 17 actions, 2 shifts, 3051 states, 54 dead, 96% shared
-level:  The Plug: par 56, budget 68, 24 actions, 2 shifts, 177 states, 55 dead, 14% shared
-level:  The Buried Lamp: par 64, budget 76, 24 actions, 4 shifts, 208 states, 105 dead, 62% shared
-level:  The Held Door: par 54, budget 66, 19 actions, 4 shifts, 437 states, 136 dead, 85% shared
-level:  The Bridge: par 44, budget 56, 18 actions, 2 shifts, 937 states, 480 dead, 96% shared
-level:  The Wrong Way First: par 64, budget 72, 24 actions, 4 shifts, 346 states, 47 dead, 39% shared
-293 passed, 0 failed
+level:  Through the Glass: par 22, budget 42, 6 actions, 2 shifts, 15 states, 0 dead, 77% shared
+level:  Rust in the Beam: par 34, budget 50, 12 actions, 2 shifts, 76 states, 9 dead, 28% shared
+level:  One Way In: par 42, budget 54, 15 actions, 2 shifts, 46 states, 12 dead, 29% shared
+275 passed, 0 failed
 ```

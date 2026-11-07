@@ -4,6 +4,15 @@ module Figures
   , powerCell
   , crate
   , crossingMark
+  , echoFigure
+  , footprintMark
+  , landingMark
+  , heldPlateGlow
+  , mirrorArt
+  , beamLight
+  , jumpArrow
+  , blockedLanding
+  , screenDir
   , cellIcon
   , carriedLight
   , pickupBurst
@@ -166,6 +175,112 @@ crossingMark era = Color shade (Pictures
     shade = case era of
       Past    -> hexA 0xFFE2A8 0.6
       Present -> hexA 0x9CC7D8 0.6
+
+-- The echo ---------------------------------------------------------------------
+
+-- | The keeper's echo: their outline in pale light. @k@ is how strongly it shows,
+-- lower when it stands in the era the player is not looking at.
+echoFigure :: Float -> Float -> Picture
+echoFigure clock k = Scale 1.08 1.08 (Pictures
+  [ Color (hexA 0x9CE7FF (0.16 * k)) (Translate 0 (-2) (ngon 24 (24 + 2 * sin (clock * 0.08))))
+  , Color (hexA 0x0A2A33 (0.35 * k)) (Translate 0 (-20) (ellipse 16 15 6))
+  , Color (hexA 0x9CE7FF (0.55 * k)) (Polygon [(-14, -12), (14, -12), (10.5, 11), (-10.5, 11)])
+  , Color (hexA 0x9CE7FF (0.55 * k)) (Translate 0 15 (ngon 16 11))
+  , Color (hexA 0xE6FAFF (0.85 * k)) (Pictures
+      [ segs 1.6 [(-14, -12), (14, -12), (10.5, 11), (-10.5, 11), (-14, -12)]
+      , ring 16 11 1.6 1 `atY` 15
+      ])
+  ])
+  where atY p y = Translate 0 y p
+
+-- | One of the footprints the echo would walk back along. @k@ fades the older ones.
+footprintMark :: Float -> Picture
+footprintMark k = Color (hexA 0x9CE7FF (0.45 * k)) (Pictures
+  [ Translate (-6) (-3) (rot 10 (ellipse 8 4 6))
+  , Translate 6 4 (rot 10 (ellipse 8 4 6))
+  ])
+
+-- | The footprint an echo sent now would stop on, ringed and turning.
+landingMark :: Float -> Picture
+landingMark clock = Pictures
+  [ Color (hexA 0x9CE7FF (0.55 + 0.25 * sin (clock * 0.12))) (ring 28 30 2.5 1)
+  , Color (hexA 0xE6FAFF 0.9) (Pictures
+      [ rot (clock * 1.5 + a) (rect 18 (-2) 12 4) | a <- [0, 45 .. 315] ])
+  ]
+
+-- | A plate with something on it, lit from below.
+heldPlateGlow :: Float -> Picture
+heldPlateGlow clock = Pictures
+  [ glow (hexA 0x9CE7FF 1) 30 4
+  , Color (hexA 0xE6FAFF (0.5 + 0.2 * sin (clock * 0.1))) (ring 24 22 2 1)
+  ]
+
+-- Mirrors ----------------------------------------------------------------------
+
+-- | A direction on screen, where up is +y.
+screenDir :: Dir -> (Float, Float)
+screenDir d = case d of
+  DirUp    -> (0, 1)
+  DirDown  -> (0, -1)
+  DirLeft  -> (-1, 0)
+  DirRight -> (1, 0)
+
+-- | Gloss turns clockwise, in degrees.
+faceAngle :: Dir -> Float
+faceAngle d = case d of
+  DirUp    -> 0
+  DirRight -> 90
+  DirDown  -> 180
+  DirLeft  -> 270
+
+beamColor :: Era -> Int
+beamColor Past    = 0xFFE7B0
+beamColor Present = 0xBFEFFF
+
+-- | A standing mirror filling its cell, its glass on the side it faces: a brass frame
+-- in the past, tarnished steel in the present.
+mirrorArt :: Era -> Dir -> Float -> Picture
+mirrorArt era face clock = rot (faceAngle face) (Pictures
+  [ Color (hexA 0x000000 0.45) (rect (-half + 2) (-half + 2) (cs - 4) (cs - 4))
+  , Color frame (rect (-half + 5) (-half + 5) (cs - 10) (cs - 10))
+  , Color backing (rect (-half + 11) (-half + 11) (cs - 22) (cs - 26))
+  , Color (hexA 0xFFFFFF 0.18) (Polygon [(-14, -20), (-4, -20), (8, 14), (-2, 14)])
+  , Color (hexA 0xFFFFFF 0.12) (Polygon [(2, -20), (7, -20), (19, 14), (14, 14)])
+  , Color (hexA (beamColor era) 0.9) (rect (-half + 8) (half - 15) (cs - 16) 8)
+  , Color (hexA 0xFFFFFF (0.55 + 0.3 * sin (clock * 0.07))) (rect (-half + 14) (half - 13) 16 3)
+  , Color (hexA (beamColor era) 0.35) (rect (-half + 4) (half - 6) (cs - 8) 3)
+  ])
+  where
+    (frame, backing) = case era of
+      Past    -> (hex 0xC2964F, hex 0x56676B)
+      Present -> (hex 0x6E7C82, hex 0x2E3D44)
+
+-- | The light a mirror throws, from its glass to the last cell it reaches.
+beamLight :: Era -> Float -> (Float, Float) -> (Float, Float) -> Picture
+beamLight era clock from to = Pictures $
+  (if from == to then [] else
+    [ Color (hexA c (0.10 + 0.03 * sin (clock * 0.11))) (seg 34 from to)
+    , Color (hexA c 0.16) (seg 14 from to)
+    , Color (hexA c 0.55) (seg 3 from to)
+    ]) ++
+  -- Where the light stops: on whatever is in its way, so a blocked beam still shows.
+  [ at to (Pictures [ glow (hexA c 0.9) 18 3, Color (hexA 0xFFFFFF 0.8) (ngon 10 3.5) ]) ]
+  where c = beamColor era
+
+-- | A chevron beside the keeper, pointing at the mirror: this key steps through.
+jumpArrow :: Dir -> Float -> Picture
+jumpArrow d clock = rot (faceAngle d) (Translate 0 (46 + 3 * sin (clock * 0.2)) (Pictures
+  [ Color (hexA 0x0A2A33 0.6) (Polygon [(-11, -3), (0, 9), (11, -3)])
+  , Color (hexA 0xE6FAFF 0.95) (Polygon [(-9, -2), (0, 7), (9, -2)])
+  ]))
+
+-- | Where a reflection would land, but cannot: crossed out.
+blockedLanding :: Picture
+blockedLanding = Color (hexA 0xFF7A4A 0.75) (Pictures
+  [ segs 3 [(-16, -16), (16, 16)]
+  , segs 3 [(-16, 16), (16, -16)]
+  , ring 24 22 2 1
+  ])
 
 -- | The HUD's version.
 cellIcon :: Bool -> Float -> Picture
