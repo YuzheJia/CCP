@@ -15,6 +15,8 @@ module Station
   , filledPit
   , doorway
   , vignette
+  , presentRubble
+  , pastBulkhead
   ) where
 
 import Draw

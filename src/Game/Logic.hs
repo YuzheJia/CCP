@@ -14,6 +14,10 @@
 module Game.Logic
   ( initialGame
   , stepGame
+  , swapKeepers
+  , anyHasCell
+  , carrierCell
+  , landedAt
   , tryShift
   , tryStep
   , tryEcho
@@ -24,6 +28,8 @@ module Game.Logic
   , echoLanding
   , Jump (..)
   , mirrorAhead
+  , mirrorAt
+  , opposite
   , jumpTarget
   , beamCells
   , lightPasses
@@ -49,8 +55,8 @@ module Game.Logic
   , echoInDoorwayText
   , plateHeldText
   , jumpAgainText
-  , mirrorPushText
-  , mirrorFrontText
+  , mirrorFaceText
+  , mirrorFixedText
   ) where
 
 import Control.Applicative ((<|>))
@@ -71,12 +77,10 @@ initialGame level = Game
   , gCrates       = lvCrates level
   , gFilled       = Set.empty
   , gMirrors      = lvMirrors level
-  , gMovableMirrors = lvMovableMirrors level
   , gTrail        = take (ruEchoLength (lvRules level)) [(Present, lvSpawn level)]
   , gEcho         = Nothing
   , gHistory      = []
   , gPushing      = Nothing
-  , gPushingMirror = Nothing
   , gAttempt      = 0
   , gMotion       = Settled
   , gFacing       = DirDown
@@ -88,7 +92,118 @@ initialGame level = Game
   , gBump         = 0
   , gPrev         = noInput
   , gArmed        = False
+  , gPartner      = fmap newPartner (lvSpawn2 level)
   }
+  where
+    newPartner c = Partner
+      { ptCell = c, ptHasCell = False, ptMotion = Settled, ptFacing = DirDown
+      , ptPushing = Nothing, ptPendingMove = Nothing, ptArmed = False, ptBump = 0 }
+
+-- Two keepers ------------------------------------------------------------------
+--
+-- In a level for two, the second keeper plays by exactly the first one's rules:
+-- every rule is written for "the player", and the second keeper's turn is taken by
+-- swapping the two keepers' places in the game, playing, and swapping back. The era,
+-- the crates, the mirrors, the time and the history stay where they are, shared.
+
+-- | Trade places: the second keeper becomes the one the rules speak of.
+swapKeepers :: Game -> Game
+swapKeepers g = case gPartner g of
+  Nothing -> g
+  Just p -> g
+    { gCell = ptCell p, gHasCell = ptHasCell p, gMotion = ptMotion p, gFacing = ptFacing p
+    , gPushing = ptPushing p, gPendingMove = ptPendingMove p, gArmed = ptArmed p
+    , gBump = ptBump p
+    , gPartner = Just Partner
+        { ptCell = gCell g, ptHasCell = gHasCell g, ptMotion = gMotion g
+        , ptFacing = gFacing g, ptPushing = gPushing g, ptPendingMove = gPendingMove g
+        , ptArmed = gArmed g, ptBump = gBump g }
+    }
+
+-- | Run a rule as the second keeper. Anything it charges is remembered from the
+-- first keeper's side, like everything else in the history, so undo needs no turns.
+asPartner :: (Game -> Game) -> Game -> Game
+asPartner f g = case gPartner g of
+  Nothing -> g
+  Just _ ->
+    let g' = swapKeepers (f (swapKeepers g))
+    in case gHistory g' of
+         s : rest | length (gHistory g') > length (gHistory g) -> g' { gHistory = swapSnapshot s : rest }
+         _ -> g'
+
+-- | A snapshot taken as the second keeper, told from the first keeper's side.
+swapSnapshot :: Snapshot -> Snapshot
+swapSnapshot s = case snPartner s of
+  Nothing -> s
+  Just p -> s
+    { snCell = landedAt p, snHasCell = ptHasCell p, snFacing = ptFacing p
+    , snPartner = Just Partner
+        { ptCell = snCell s, ptHasCell = snHasCell s, ptMotion = Settled, ptFacing = snFacing s
+        , ptPushing = Nothing, ptPendingMove = Nothing, ptArmed = False, ptBump = 0 }
+    }
+
+-- | Where a keeper is going to be: an accepted step has already been paid for.
+landedAt :: Partner -> Cell
+landedAt p = case ptMotion p of
+  Stepping to _ -> to
+  _ -> ptCell p
+
+-- | A keeper brought to rest where they were headed, with nothing waiting.
+settled :: Partner -> Partner
+settled p = p { ptCell = landedAt p, ptMotion = Settled, ptPushing = Nothing
+              , ptPendingMove = Nothing, ptArmed = False, ptBump = 0 }
+
+-- | The second keeper is still walking, or is in the middle of anything at all.
+partnerBusy :: Game -> Bool
+partnerBusy g = maybe False ((/= Settled) . ptMotion) (gPartner g)
+
+-- | Whether either keeper is carrying the power cell.
+anyHasCell :: Game -> Bool
+anyHasCell g = gHasCell g || maybe False ptHasCell (gPartner g)
+
+-- | The cell of whichever keeper carries the power cell.
+carrierCell :: Game -> Maybe Cell
+carrierCell g
+  | gHasCell g = Just (gCell g)
+  | otherwise = case gPartner g of
+      Just p | ptHasCell p -> Just (ptCell p)
+      _ -> Nothing
+
+-- | The keys each keeper reads: W A S D for the first, the arrows for the second.
+-- The era, undo and echo keys belong to the first keeper's turn, so they are shared.
+keysOf1, keysOf2 :: TickInput -> TickInput
+keysOf1 i = i { tiDir = tiDir1 i, tiDirRevealed = tiDir1Revealed i }
+keysOf2 i = i { tiDir = tiDir2 i, tiDirRevealed = tiDir2Revealed i
+              , tiShift = False, tiUndo = False, tiEcho = False }
+
+-- | One tick for two: both keepers note their keys, both walks advance, then the
+-- first keeper's turn (which holds the shared era, undo and echo), then the second.
+duoTick :: Level -> TickInput -> Game -> Game
+duoTick level input g0 = settleOnWin (asPartner (startMove level in2) started)
+  where
+    prev = gPrev g0
+    in1 = keysOf1 input
+    in2 = keysOf2 input
+    noted = asPartner (notePresses False (keysOf2 prev) in2) (notePresses True (keysOf1 prev) in1 g0)
+    advanced = asPartner (advanceMotion level) (advanceMotion level noted)
+    started = startNext level in1 (outOfTime level advanced)
+    -- Either keeper may light the lamp; the other stops where they were going.
+    settleOnWin g
+      | gPhase g == Won = g
+          { gCell = case gMotion g of { Stepping to _ -> to; _ -> gCell g }
+          , gMotion = Settled, gPushing = Nothing, gPartner = fmap settled (gPartner g) }
+      | otherwise = g
+
+-- | The second keeper's turn: only walking, pushing and jumping. It waits while the
+-- era is changing, and while a shift or an undo is waiting for both to stand still.
+startMove :: Level -> TickInput -> Game -> Game
+startMove level input g
+  | gPhase g /= Playing || gMotion g /= Settled = g
+  | gPendingUndo g || gPendingShift g = g
+  | Just p <- gPartner g, Shifting _ <- ptMotion p = g
+  | Just dir <- gPendingMove g = tryStep level True dir g { gPendingMove = Nothing }
+  | Just dir <- tiDir input, gArmed g = tryStep level False dir g
+  | otherwise = g
 
 -- | One simulation tick.
 stepGame :: Level -> TickInput -> Game -> Game
@@ -123,33 +238,44 @@ stepGame level input g = next { gPrev = input }
 -- | Forget anything waiting to happen. Keys held across this need a fresh press.
 quiet :: Game -> Game
 quiet g = g { gPendingShift = False, gPendingMove = Nothing, gPendingUndo = False
-            , gPendingEcho = False, gArmed = False }
+            , gPendingEcho = False, gArmed = False
+            , gPartner = fmap (\p -> p { ptPendingMove = Nothing, ptArmed = False }) (gPartner g) }
 
 playTick :: Level -> TickInput -> Game -> Game
-playTick level input g0 = startNext level input (outOfTime level g2)
+playTick level input g0
+  | Just _ <- gPartner g0 = duoTick level input g0
+  | otherwise = startNext level input (outOfTime level (advanceMotion level (notePresses True (gPrev g0) input g0)))
+
+-- | Step 1 for one keeper: fresh presses are remembered and the nudges decay. The
+-- era, undo and echo keys and the feedback are shared, so only the first keeper's
+-- turn (@shared@) takes them.
+notePresses :: Bool -> TickInput -> TickInput -> Game -> Game
+notePresses shared prev input g0
+  | shared = walking
+      { gPendingShift = gPendingShift g0 || (freshShift && not locked)
+      , gPendingUndo  = gPendingUndo g0 || freshUndo
+      , gPendingEcho  = gPendingEcho g0 || freshEcho
+      , gFeedback     = decayFeedback (gFeedback g0)
+      }
+  | otherwise = walking
   where
     -- Letting go of a newer key shows the older one still held. That keeps a walk
     -- going, through gArmed, but it is not a press: it must not replace a buffered
     -- tap, and after an undo or a restart it must not start a step that costs time.
     freshDir
-      | tiDir input /= tiDir (gPrev g0) && not (tiDirRevealed input) = tiDir input
+      | tiDir input /= tiDir prev && not (tiDirRevealed input) = tiDir input
       | otherwise = Nothing
-    freshShift = tiShift input && not (tiShift (gPrev g0))
-    freshUndo  = tiUndo input && not (tiUndo (gPrev g0))
-    freshEcho  = tiEcho input && not (tiEcho (gPrev g0))
+    freshShift = tiShift input && not (tiShift prev)
+    freshUndo  = tiUndo input && not (tiUndo prev)
+    freshEcho  = tiEcho input && not (tiEcho prev)
     locked     = case gMotion g0 of
       Shifting _ -> True
       _          -> False
-    g1 = g0
-      { gPendingShift = gPendingShift g0 || (freshShift && not locked)
-      , gPendingMove  = freshDir <|> gPendingMove g0
-      , gPendingUndo  = gPendingUndo g0 || freshUndo
-      , gPendingEcho  = gPendingEcho g0 || freshEcho
+    walking = g0
+      { gPendingMove  = freshDir <|> gPendingMove g0
       , gArmed        = isJust (tiDir input) && (gArmed g0 || isJust freshDir)
-      , gFeedback     = decayFeedback (gFeedback g0)
       , gBump         = max 0 (gBump g0 - 1)
       }
-    g2 = advanceMotion level g1
 
 decayFeedback :: Maybe Feedback -> Maybe Feedback
 decayFeedback Nothing = Nothing
@@ -165,8 +291,7 @@ advanceMotion level g = case gMotion g of
     | left <= 1 -> g { gMotion = Settled }
     | otherwise -> g { gMotion = Shifting (left - 1) }
   Stepping to left
-    | left <= 1 -> touchCell level g
-        { gMotion = Settled, gCell = to, gPushing = Nothing, gPushingMirror = Nothing }
+    | left <= 1 -> touchCell level g { gMotion = Settled, gCell = to, gPushing = Nothing }
     | otherwise -> g { gMotion = Stepping to (left - 1) }
 
 -- | The one place pickup and victory happen. Runs when a step lands and when an
@@ -175,7 +300,7 @@ touchCell :: Level -> Game -> Game
 touchCell level = victory . pickup
   where
     pickup g
-      | gEra g == Past && gCell g == lvPowerCell level && not (gHasCell g) =
+      | gEra g == Past && gCell g == lvPowerCell level && not (anyHasCell g) =
           g { gHasCell = True
             , gFeedback = Just (Feedback CellCollected pickupFeedbackTicks) }
       | otherwise = g
@@ -188,8 +313,10 @@ touchCell level = victory . pickup
 startNext :: Level -> TickInput -> Game -> Game
 startNext level input g
   | gPhase g /= Playing || gMotion g /= Settled = g
-  | gPendingUndo g = undo level g
+  -- With two keepers, an undo or a shift waits for the other one's step to land.
+  | gPendingUndo g = if partnerBusy g then g else undo level g
   | gPendingEcho g = startNext level input (tryEcho level g)
+  | gPendingShift g && partnerBusy g = g
   | gPendingShift g = startNext level input (tryShift level g)
   | Just dir <- gPendingMove g =
       tryStep level True dir g { gPendingMove = Nothing }
@@ -201,7 +328,7 @@ startNext level input g
 -- because it would give time back.
 outOfTime :: Level -> Game -> Game
 outOfTime level g
-  | gPhase g == Playing && gMotion g == Settled && not (gPendingUndo g)
+  | gPhase g == Playing && gMotion g == Settled && not (partnerBusy g) && not (gPendingUndo g)
     && gRemaining g < ruStepCost (lvRules level) = (quiet g) { gPhase = Lost, gFeedback = Nothing }
   | otherwise = g
 
@@ -212,15 +339,15 @@ charge cost g = g
   , gHistory = before : gHistory g
   , gFeedback = case gFeedback g of
       -- Advice about pushing has done its job once the player moves.
-      Just (Feedback kind _) | kind `elem` [PushNeedsPress, CrateRusted, MirrorNeedsPress, MirrorFrontBlocked] -> Nothing
+      Just (Feedback kind _) | kind `elem` [PushNeedsPress, CrateRusted, MirrorFaceSide, MirrorFixed] -> Nothing
       other -> other
   }
   where
     before = Snapshot
       { snEra = gEra g, snCell = gCell g, snHasCell = gHasCell g
       , snCrates = gCrates g, snFilled = gFilled g
-      , snMirrors = gMirrors g, snMovableMirrors = gMovableMirrors g
-      , snFacing = gFacing g, snTrail = gTrail g, snEcho = gEcho g, snCost = cost }
+      , snFacing = gFacing g, snTrail = gTrail g, snEcho = gEcho g
+      , snMirrors = gMirrors g, snCost = cost, snPartner = gPartner g }
 
 -- | Note where the player now stands, keeping only as many footprints as the level
 -- allows. A level with no echo keeps none, so its states stay as few as before.
@@ -234,19 +361,25 @@ footprint level spot g = g { gTrail = take (ruEchoLength (lvRules level)) (spot 
 undo :: Level -> Game -> Game
 undo level g = case gHistory g of
   [] -> quiet g
-  (s : rest) ->
-    let rules = lvRules level
-        remaining = gRemaining g + snCost s * ruUndoRefundPercent rules `div` 100
-    in (quiet g)
-         { gEra = snEra s, gCell = snCell s, gHasCell = snHasCell s
-         , gCrates = snCrates s, gFilled = snFilled s, gFacing = snFacing s
-         , gMirrors = snMirrors s, gMovableMirrors = snMovableMirrors s
-         , gTrail = snTrail s, gEcho = snEcho s
-         , gRemaining = remaining, gHistory = rest
-         , gMotion = Settled, gPushing = Nothing, gPushingMirror = Nothing
-         , gFeedback = Nothing, gBump = 0
-         , gPhase = if remaining < ruStepCost rules then Lost else Playing
-         }
+  (s : rest) -> asPartner pickedUp (pickedUp (restore s rest))
+  where
+    -- With two keepers, the one not being undone may have picked up the cell since
+    -- the snapshot; standing on the cradle again, they hold it again.
+    pickedUp h
+      | gEra h == Past && gCell h == lvPowerCell level && not (anyHasCell h) = h { gHasCell = True }
+      | otherwise = h
+    restore s rest =
+        let rules = lvRules level
+            remaining = gRemaining g + snCost s * ruUndoRefundPercent rules `div` 100
+        in (quiet g)
+             { gEra = snEra s, gCell = snCell s, gHasCell = snHasCell s
+             , gCrates = snCrates s, gFilled = snFilled s, gFacing = snFacing s
+             , gTrail = snTrail s, gEcho = snEcho s, gMirrors = snMirrors s
+             , gRemaining = remaining, gHistory = rest
+             , gMotion = Settled, gPushing = Nothing, gFeedback = Nothing, gBump = 0
+             , gPartner = fmap settled (snPartner s)
+             , gPhase = if remaining < ruStepCost rules then Lost else Playing
+             }
 
 -- | Switch era if this cell is open in the other one and the time is there. Only a
 -- settled player can shift; a shift refused here changes nothing but the feedback,
@@ -256,9 +389,12 @@ tryShift level g
   | gMotion g /= Settled = g
   | not (openCell level g destination (gCell g)) =
       refuse (ShiftBlocked (gCell g))
+  -- The era is shared: both keepers go, so both need somewhere to stand.
+  | Just p <- gPartner g, not (openCell level (swapKeepers g) destination (ptCell p)) =
+      refuse (ShiftBlocked (ptCell p))
   | gRemaining g < cost =
       refuse ShiftTooCostly
-  | otherwise =
+  | otherwise = asPartner (touchCell level) $
       touchCell level (footprint level (destination, gCell g) (charge cost cleared))
         { gEra      = destination
         , gMotion   = Shifting shiftTicks
@@ -274,11 +410,20 @@ tryShift level g
       _                               -> Nothing
 
 -- | Whether the player could stand here right now: the era's map, plus any pits
--- filled so far, minus wherever the crates are. A crate has one position, so it
--- blocks that cell in both eras.
+-- filled so far, minus wherever the crates are and this era's mirrors. A crate has
+-- one position, so it blocks that cell in both eras; a mirror only in its own.
 openCell :: Level -> Game -> Era -> Cell -> Bool
-openCell level g era cell =
-  cell `Set.notMember` gCrates g && mirrorAt g era cell == Nothing && (onMap || filled || door)
+openCell level g era cell = clearOfPartner && clearCell level g era cell
+  where
+    -- Two keepers never share a cell, or the one the other is stepping onto.
+    clearOfPartner = case gPartner g of
+      Just p -> cell /= ptCell p && cell /= landedAt p
+      Nothing -> True
+
+-- | 'openCell' without the other keeper: a keeper does not stop light.
+clearCell :: Level -> Game -> Era -> Cell -> Bool
+clearCell level g era cell =
+  cell `Set.notMember` gCrates g && not (isJust (mirrorAt g era cell)) && (onMap || filled || door)
   where
     onMap = walkable level era cell
     filled = era == Past && cell `Set.member` gFilled g
@@ -294,37 +439,40 @@ crossings level g =
 
 -- | The doors open while something rests on every plate. This is worked out from
 -- where things are, not stored, so undo, restart and the solver need nothing new, and
--- a door can never disagree with its plates. The parser keeps plates away from
--- doorways, and an echo cannot be sent from a doorway.
+-- a door can never disagree with its plates. Nothing can leave a plate while the
+-- player stands in a door: crates only move while the player is in the past, the
+-- player is not on a plate while in a door, and the echo cannot be sent from one.
 doorsOpen :: Level -> Set.Set Cell -> Bool
 doorsOpen level held = not (Set.null plates) && plates `Set.isSubsetOf` held
   where plates = lvPlates level
 
 -- Mirrors ----------------------------------------------------------------------
 
-mirrorAt :: Game -> Era -> Cell -> Maybe Dir
-mirrorAt g era cell = case Map.lookup cell (gMirrors g) of
-  Just (e, face) | e == era -> Just face
-  _ -> Nothing
-
-opposite :: Dir -> Dir
-opposite DirUp    = DirDown
-opposite DirDown  = DirUp
-opposite DirLeft  = DirRight
-opposite DirRight = DirLeft
-
 -- | Whether light crosses this cell in this era: anywhere you could stand, and an
 -- open pit. Walls, crates, shut doors and mirrors stop it.
 lightPasses :: Level -> Game -> Era -> Cell -> Bool
 lightPasses level g era cell =
-  openCell level g era cell || (era == Past && cell `Set.member` lvPits level)
+  clearCell level g era cell || (era == Past && cell `Set.member` lvPits level)
 
 -- | The light a mirror throws out of its face, up to whatever stops it. Only in the
 -- mirror's own era.
 beamCells :: Level -> Game -> Cell -> [Cell]
 beamCells level g mirror = case Map.lookup mirror (gMirrors g) of
-  Just (era, face) -> takeWhile (lightPasses level g era) (drop 1 (iterate (stepCell face) mirror))
+  Just m -> takeWhile (lightPasses level g (mEra m)) (drop 1 (iterate (stepCell (mFace m)) mirror))
   Nothing -> []
+
+-- | The mirror standing on this cell in this era, if there is one.
+mirrorAt :: Game -> Era -> Cell -> Maybe Mirror
+mirrorAt g era cell = case Map.lookup cell (gMirrors g) of
+  Just m | mEra m == era -> Just m
+  _ -> Nothing
+
+opposite :: Dir -> Dir
+opposite d = case d of
+  DirUp -> DirDown
+  DirDown -> DirUp
+  DirLeft -> DirRight
+  DirRight -> DirLeft
 
 -- | A mirror the player stands in the light of, facing it.
 data Jump = Jump
@@ -343,7 +491,7 @@ mirrorAhead level g dir = look (1 :: Int) (stepCell dir (gCell g))
     look n c
       | lightPasses level g era c = look (n + 1) (stepCell dir c)
       | otherwise = case mirrorAt g era c of
-          Just face | face == opposite dir ->
+          Just m | mFace m == opposite dir ->
             let target = iterate (stepCell dir) c !! n
             in Just (Jump c target (openCell level g era target))
           _ -> Nothing
@@ -357,7 +505,8 @@ jumpTarget level g dir = case mirrorAhead level g dir of
 -- | Every cell something is standing on: the crates, the player and the echo. A plate
 -- is set in the floor of both eras, so it does not matter which era they are in.
 weights :: Game -> Set.Set Cell
-weights g = Set.insert (gCell g) (maybe id (Set.insert . snd) (gEcho g) (gCrates g))
+weights g = Set.insert (gCell g) (maybe id (Set.insert . ptCell) (gPartner g)
+                                    (maybe id (Set.insert . snd) (gEcho g) (gCrates g)))
 
 -- | The way an echo sent now would walk: from the player's spot back along their
 -- footprints, oldest last, stopping before any footprint that is no longer open,
@@ -404,12 +553,12 @@ tryEcho level g
 -- board half done. Only a fresh press pushes: holding a key walks up to a crate and
 -- stops, so a walk can never shove one into a dead end. A crate exists in both eras,
 -- so it can only go where both have room: never into a wall in the present. A pit
--- in the past is the exception, because the crate is used up there.
+-- is the exception, because the crate is used up there and nothing is left standing.
 tryStep :: Level -> Bool -> Dir -> Game -> Game
 tryStep level isFresh dir g
   | gMotion g /= Settled = g
   | Just target <- jumpTarget level g dir = jumpTo target
-  | to `Set.member` gMovableMirrors g = pushMirrorOrRefuse
+  | Just m <- mirrorAt g (gEra g) to = pushMirror m
   | to `Set.member` gCrates g = pushOrRefuse
   | not (openCell level g (gEra g) to) = refused
   | gRemaining g < cost = g { gFacing = dir }
@@ -428,36 +577,13 @@ tryStep level isFresh dir g
     to = stepCell dir (gCell g)
     beyond = stepCell dir to
     refused = g { gFacing = dir, gBump = if isFresh then bumpTicks else gBump g }
-    pit = gEra g == Past && beyond `Set.member` lvPits level && beyond `Set.notMember` gFilled g
+    pit = beyond `Set.member` lvPits level && beyond `Set.notMember` gFilled g
     freeInPast = openCell level g Past beyond
-    freeInPresent = walkable level Present beyond && mirrorAt g Present beyond == Nothing
+    freeInPresent = walkable level Present beyond && not (isJust (mirrorAt g Present beyond))
     moved = Set.delete to (gCrates g)
-    mirrorSpec = Map.lookup to (gMirrors g)
-    mirrorDestinationOpen = openCell level g (gEra g) beyond
-    movedMirrors = case mirrorSpec of
-      Just spec -> Map.insert beyond spec (Map.delete to (gMirrors g))
-      Nothing   -> gMirrors g
-    movedMirrorCells = Set.insert beyond (Set.delete to (gMovableMirrors g))
-    mirrorFront = case mirrorSpec of
-      Just (_, face) -> gCell g == stepCell face to
-      Nothing        -> False
     hinted kind = refused { gFeedback = Just (Feedback kind hintFeedbackTicks) }
-    pushMirrorOrRefuse
-      | Just (mirrorEra, _) <- mirrorSpec, mirrorEra /= gEra g = refused
-      | mirrorFront = if isFresh then hinted MirrorFrontBlocked else refused
-      | not isFresh = if mirrorDestinationOpen then hinted MirrorNeedsPress else refused
-      | not mirrorDestinationOpen = refused
-      | gRemaining g < cost = g { gFacing = dir }
-      | otherwise = (walked (charge cost g))
-          { gFacing = dir
-          , gMotion = Stepping to stepTicks
-          , gPushingMirror = Just beyond
-          , gMirrors = movedMirrors
-          , gMovableMirrors = movedMirrorCells
-          }
     pushOrRefuse
-      | gEra g == Present && not (ruPushInPresent (lvRules level)) =
-          if isFresh then hinted CrateRusted else refused
+      | gEra g /= Past = if isFresh then hinted CrateRusted else refused
       | not isFresh = if pit || (freeInPast && freeInPresent) then hinted PushNeedsPress else refused
       | not pit && not freeInPast = refused
       | not pit && not freeInPresent =
@@ -470,6 +596,25 @@ tryStep level isFresh dir g
           , gCrates  = if pit then moved else Set.insert beyond moved
           , gFilled  = if pit then Set.insert beyond (gFilled g) else gFilled g
           }
+    -- A mirror is a door from its face and a crate from its back and sides. Pressing
+    -- into its face only ever jumps, which was tried above, so here it explains why
+    -- nothing happened. It moves in its own era, onto floor open there: never into a
+    -- pit or a door, open or shut, like a crate.
+    pushMirror m
+      | not (mMovable m) = if isFresh then hinted MirrorFixed else refused
+      | dir == opposite (mFace m) = if isFresh then hinted MirrorFaceSide else refused
+      | not mirrorRoom = refused
+      | not isFresh = hinted PushNeedsPress
+      | gRemaining g < cost = g { gFacing = dir }
+      | otherwise = (walked (charge cost g))
+          { gFacing  = dir
+          , gMotion  = Stepping to stepTicks
+          , gPushing = Just beyond
+          , gMirrors = Map.insert beyond m (Map.delete to (gMirrors g))
+          }
+    -- Mirrors never share a cell, even across eras: one cell holds one mirror.
+    mirrorRoom = walkable level (gEra g) beyond && openCell level g (gEra g) beyond
+                 && beyond `Map.notMember` gMirrors g
 
 -- Words ------------------------------------------------------------------------
 
@@ -503,7 +648,7 @@ hintText HintPlateHeld     = plateHeldText
 objectiveText :: Game -> String
 objectiveText g
   | gPhase g == Won = "The lighthouse is lit."
-  | gHasCell g = "Bring it to the lighthouse in the present."
+  | anyHasCell g = "Bring it to the lighthouse in the present."
   | otherwise  = "Find the power cell in the past."
 
 blockedTitle :: String
@@ -527,13 +672,7 @@ pushBlockedDetail :: String
 pushBlockedDetail = "In the present, there is a wall here."
 
 pushAgainText :: String
-pushAgainText = "Press the key again to push."
-
-mirrorPushText :: String
-mirrorPushText = "Press again to push the mirror from this unlit side."
-
-mirrorFrontText :: String
-mirrorFrontText = "The light holds this side. Push the mirror from behind or beside it."
+pushAgainText = "Press the key again to push the crate."
 
 rustedText :: String
 rustedText = "Rusted solid here. It only moves in the past."
@@ -556,6 +695,12 @@ echoInDoorwayText = "Not from a doorway. The door would close on you."
 
 jumpAgainText :: String
 jumpAgainText = "Press the key again to step through the mirror."
+
+mirrorFaceText :: String
+mirrorFaceText = "A mirror's face only takes you through. Push it from the back or sides."
+
+mirrorFixedText :: String
+mirrorFixedText = "This mirror is set in the wall. It never moves."
 
 -- | Said while the player alone holds every plate down.
 plateHeldText :: String

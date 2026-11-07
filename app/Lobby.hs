@@ -30,7 +30,8 @@ lobbyScreen levels run clock = Pictures
   , Color (hex 0xFFF0CE) (Translate 0 306 (textC 42 "BORROWED LIGHT"))
   , Color (hex 0x8FB4BF) (Translate 0 267 (textC 15 "LEVEL HALL"))
   , Color (hex 0xC8D7DA) (Translate 0 235 (textC 12 "Choose a lesson. Cleared rooms stay unlocked."))
-  , Pictures [levelCard i level | (i, level) <- zip [0 ..] levels]
+  -- A secret level is never listed: it is found, not chosen.
+  , Pictures [levelCard i level | (i, level) <- zip [0 ..] levels, not (lvSecret level)]
   , Color (hex 0xDCE6E7) (Translate 0 (-326) (textC 13 "W S OR ARROWS   SELECT       ENTER   PLAY"))
   , Color (hex 0x89A4AA) (Translate 0 (-355) (textC 11 "ESC TITLE SCREEN       PROGRESS SAVES AUTOMATICALLY"))
   ]

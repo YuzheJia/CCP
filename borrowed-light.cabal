@@ -43,12 +43,9 @@ executable borrowed-light
   -- The game runs no Haskell threads. On Windows it uses the single-threaded
   -- runtime, after two unexplained crashes in the threaded one while freeglut called
   -- back into Haskell; elsewhere it keeps the threaded runtime it was tested with.
+  -- Either way GLFW runs on the main OS thread, as it requires.
   if !os(windows)
     ghc-options:    -threaded
-  -- For the window's close button: see app/Platform.hs.
-  if os(darwin)
-    frameworks:     GLUT
-    extra-libraries: objc
 
 test-suite spec
   import:           shared

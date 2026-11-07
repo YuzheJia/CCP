@@ -3,6 +3,10 @@ module Hud
   ( HudArt
   , mkHudArt
   , hud
+  , hudNoted
+  , darkCaption
+  , endedPlate
+  , weightedC
   , mapCaption
   , wonCaption
   , hintBand
@@ -43,12 +47,12 @@ skin :: Era -> Skin
 skin Past    = Skin (hex 0xF3E2BE) (hex 0xB89E76) (hex 0x8A6A3F) (hex 0xE8B85C)
 skin Present = Skin (hex 0xD6E0E2) (hex 0x8A9AA0) (hex 0x4F5B60) (hex 0x9CC7D8)
 
-mkHudArt :: Rules -> HudArt
-mkHudArt rules = HudArt (bake (staticPanel rules Past)) (bake (staticPanel rules Present))
+mkHudArt :: Bool -> Rules -> HudArt
+mkHudArt duo rules = HudArt (bake (staticPanel duo rules Past)) (bake (staticPanel duo rules Present))
 
 -- | Backing plate, era plaque, section labels and controls.
-staticPanel :: Rules -> Era -> Picture
-staticPanel rules era = Pictures
+staticPanel :: Bool -> Rules -> Era -> Picture
+staticPanel duo rules era = Pictures
   [ Color (hexA 0x000000 0.5) (rect (panelLeft - 5) panelBottom (panelW + 10) (panelTop - panelBottom))
   , Color back (rect panelLeft panelBottom panelW (panelTop - panelBottom))
   , Color (skRule sk) (Pictures
@@ -65,7 +69,7 @@ staticPanel rules era = Pictures
       , Translate (panelX - 92) (-182) (textL 11 "Controls")
       ])
   , Color (skRule sk) (Pictures [ rect (panelX - 92) y 184 1 | y <- [200, 90, -20, -166] ])
-  , controls rules sk
+  , controls duo rules sk
   ]
   where
     sk = skin era
@@ -112,13 +116,16 @@ plaque era = Translate panelX 298 $ case era of
       ]
 
 -- | The prices are printed beside the keys, because they are the rules of the game.
-controls :: Rules -> Skin -> Picture
-controls rules sk = Pictures
+controls :: Bool -> Rules -> Skin -> Picture
+controls duo rules sk = Pictures
   [ row y key what | (y, (key, what)) <- zip [-208, -208 - gap ..] keys ]
   where
     keys =
-      [ ("WASD", "Move  -" ++ show (ruStepCost rules) ++ " s")
-      , ("SPACE", "Shift  -" ++ show (ruShiftCost rules) ++ " s") ] ++
+      (if duo
+         then [ ("WASD", "Yellow  -" ++ show (ruStepCost rules) ++ " s")
+              , ("ARROW", "Red  -" ++ show (ruStepCost rules) ++ " s") ]
+         else [ ("WASD", "Move  -" ++ show (ruStepCost rules) ++ " s") ]) ++
+      [ ("SPACE", (if duo then "Both  -" else "Shift  -") ++ show (ruShiftCost rules) ++ " s") ] ++
       [ ("E", "Echo  -" ++ show (ruEchoCost rules) ++ " s") | ruEchoLength rules > 0 ] ++
       [ ("Z", "Undo  +" ++ show (ruUndoRefundPercent rules) ++ " pct")
       , ("TAB", "Look  free")
@@ -126,7 +133,8 @@ controls rules sk = Pictures
       , ("P", "Pause")
       , ("ESC", "Level hall")
       ]
-    gap | length keys > 7 = 22
+    gap | length keys > 8 = 20
+        | length keys > 7 = 22
         | length keys > 6 = 27
         | otherwise = 30
     row y key what = Pictures
@@ -148,7 +156,12 @@ secondsText s = show s ++ " s"
 
 -- | The panel, with its live readings.
 hud :: HudArt -> Level -> Game -> Fx -> Float -> Picture
-hud art level g fx clock = Pictures
+hud = hudNoted Nothing
+
+-- | The panel, with the power cell's two lines and the objective given, not read
+-- off the game: an ending says what the rules cannot.
+hudNoted :: Maybe (String, String, String) -> HudArt -> Level -> Game -> Fx -> Float -> Picture
+hudNoted noted art level g fx clock = Pictures
   [ case era of { Past -> artPast art; Present -> artPresent art }
     -- Time left, with a tide line draining beneath it.
   , Color timeColor (Translate (panelX - 92) 128 (weighted 42 5.2 (secondsText (ceiling shown))))
@@ -161,21 +174,45 @@ hud art level g fx clock = Pictures
   , Translate (panelX - 66) 30 (Pictures
       [ Color (skRule sk) (rect (-28) (-26) 56 52)
       , Color (hexA 0x000000 0.6) (rect (-26) (-24) 52 48)
-      , Scale 0.95 0.95 (cellIcon (gHasCell g) clock)
+      , Scale 0.95 0.95 (cellIcon (anyHasCell g && noted == Nothing) clock)
       ])
   , Color (skInk sk) (Translate (panelX - 26) 35 (textL 13 cellState))
   , Color (skDim sk) (Translate (panelX - 26) 15 (textL 10 cellNote))
     -- Objective.
   , Color (skInk sk) (Pictures
       [ Translate (panelX - 92) (-62 - 22 * fromIntegral i) (textL 13 row)
-      | (i, row) <- zip [0 :: Int ..] (wrapText 13 186 (objectiveText g)) ])
+      | (i, row) <- zip [0 :: Int ..] (wrapText 13 186 objective) ])
+  , roomMap
   ]
   where
     era = gEra g
     sk = skin era
+    -- A level of several screens gets a small map of its rooms, in the corner of
+    -- the objective box: the rooms seen so far, and the one on screen picked out.
+    roomsAcross = (lvWidth level + roomCols - 1) `div` roomCols
+    roomsDown = (lvHeight level + roomRows - 1) `div` roomRows
+    roomMap
+      | roomsAcross * roomsDown <= 1 || not (roomedLevel level) = Blank
+      | otherwise = Pictures
+          [ Translate (panelX + 92 - fromIntegral (roomsAcross - rx) * 31)
+                      (-158 + fromIntegral (roomsDown - 1 - ry) * 21)
+              (roomTile (rx, ry))
+          | ry <- [0 .. roomsDown - 1], rx <- [0 .. roomsAcross - 1] ]
+    roomTile r
+      | r == fxRoom fx = Pictures
+          [ Color (skAccent sk) (rect 0 0 28 18)
+          , Color (hexA 0x000000 0.35) (rect 3 3 22 12)
+          , Color (skAccent sk) (Translate 14 9 (ngon 10 3.2)) ]
+      | r `elem` fxVisited fx = Color (skRule sk) (rect 0 0 28 18)
+      | otherwise = Color (fade 0.6 (skRule sk)) (Pictures
+          [ rect 0 0 28 1.5, rect 0 16.5 28 1.5, rect 0 0 1.5 18, rect 26.5 0 1.5 18 ])
+    objective = case noted of
+      Just (_, _, o) -> o
+      Nothing -> objectiveText g
     (cellState, cellNote)
+      | Just (s, n, _) <- noted = (s, n)
       | gPhase g == Won = ("In the lamp", "Burning")
-      | gHasCell g = ("Carried", "Travels with you")
+      | anyHasCell g = ("Carried", "Travels with you")
       | otherwise = ("Not found", "Somewhere in time")
     doorNote
       | Set.null (lvDoors level) = Blank
@@ -195,7 +232,8 @@ hud art level g fx clock = Pictures
       Shifting left   -> fromIntegral (ruShiftCost rules * left) / fromIntegral shiftTicks
       Settled         -> 0
     share = shown / fromIntegral budget
-    low = gPhase g /= Won && remaining * 5 <= budget
+    -- Once the level is won, or its ending is running, time no longer matters.
+    low = gPhase g /= Won && noted == Nothing && remaining * 5 <= budget
     costNote = case fxCost fx of
       Just c ->
         let t = fromIntegral (cfAge c) / fromIntegral costLife
@@ -314,3 +352,22 @@ lostScreen k = Pictures
 
 weightedC :: Float -> Float -> String -> Picture
 weightedC size w s = Translate (negate (textW size s) / 2) 0 (weighted size w s)
+
+-- | The line above the map once the lamp has gone out again.
+darkCaption :: String -> Picture
+darkCaption title = bake $ Pictures
+  [ Color (skAccent sk) (Translate mapLeft (mapTop + 23) (textL 16 "PRESENT"))
+  , Color (skDim sk) (Translate (mapLeft + textW 16 "PRESENT" + 18) (mapTop + 23) (textL 12 "The lamp has gone out"))
+  , Color (skDim sk) (Translate (mapRight - 4) (mapTop + 23) (textR 12 title))
+  ]
+  where sk = skin Present
+
+-- | The plate for a win that is not the end. It says what the last plate of all
+-- says, and offers nothing to press.
+endedPlate :: Float -> Int -> Picture
+endedPlate k remaining = Pictures
+  [ wide (-236) 150 k (hexA 0x1C1208 0.86) (hex 0xE8B85C)
+  , Color (fade k (hex 0xFFEFC4)) (Translate centreOfMap (-224) (weightedC 30 3.7 victoryText))
+  , Color (fade k (hex 0xD8BE90)) (Translate centreOfMap (-254) (textC 13 ("Time left " ++ secondsText remaining)))
+  , Color (fade k (hex 0xFFEFC4)) (Translate centreOfMap (-287) (textC 13 "Every lamp is lit"))
+  ]

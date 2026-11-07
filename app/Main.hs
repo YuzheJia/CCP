@@ -2,7 +2,11 @@
 --
 --   borrowed-light                 play
 --   borrowed-light --demo          watch the solver play every level, then take over
---   borrowed-light --level=N       select level N in the lobby, counting from 1
+--   --pace=N                       with --demo, wait N extra ticks (60 a second) after each move
+--   --leave=N                      with --demo, play only the first level, stop N moves short
+--                                  of winning it, and hand over the keyboard
+--   borrowed-light --level=N       select level N in the lobby, counting from 1; a secret
+--                                  level, which the lobby never lists, is opened directly
 --
 -- Development flags, used to inspect exact moments of the game:
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
@@ -59,7 +63,7 @@ main :: IO ()
 main = do
   args <- getArgs
   windowSize <- windowFor <$> getScreenSize
-  levels <- either (die . ("Level is malformed: " ++)) pure campaign
+  levels <- either (die . ("Level is malformed: " ++)) pure levelHall
   let flag name = listToMaybe (mapMaybe (stripPrefix ("--" ++ name ++ "=")) args)
       prepared = fmap scriptInputs (flag "script")
       after = maybe 0 read (flag "after") :: Int
@@ -69,15 +73,29 @@ main = do
   saved <- loadProgress total
   let startAt = max 0 (min (total - 1) (fromMaybe (savedSelected saved + 1) requested - 1))
       completedAtStart = max (savedCompleted saved) (if isJust requested then startAt else 0)
-      (run0, fx0) = foldl' (tickBoth levels)
-        (startRunWithProgress levels startAt completedAtStart, initialFx)
+      -- The run as it opens: the saved place may be clamped back into the hall.
+      start0 = (if isJust requested then startRunAt else startRunWithProgress) levels startAt completedAtStart
+      (run0, fx0) = foldl' (tickBoth levels) (start0, initialFx)
                     (maybe [] id prepared ++ replicate after noInput)
       scenes =
-        [ Render.mkScene (show (i + 1) ++ " of " ++ show total ++ "   " ++ lvName l) (i + 1 < total) l
+        [ Render.mkScene (label i l) (i + 1 < shownTotal) l
         | (i, l) <- zip [0 ..] levels ]
+      -- The hall counts only the levels it lists; a secret level gives its number alone.
+      shownTotal = lastVisible levels + 1
+      label i l
+        | lvSecret l = show (i + 1) ++ "   " ++ lvName l
+        | otherwise = show (i + 1) ++ " of " ++ show shownTotal ++ "   " ++ lvName l
+      -- What an ending leads into, for the card at its end.
+      beyond i
+        | i + 1 < total = (show (i + 2), lvName (levels !! (i + 1)))
+        | otherwise = ("", "")
       world0 = World
         { wRun = run0, wFx = fx0, wKeys = noKeys, wWindow = windowSize, wBank = 0
-        , wScript = if "--demo" `elem` args then demoInputs (drop startAt levels) else []
+        , wScript = if "--demo" `elem` args
+            then case flag "leave" >>= readMaybe of
+              Just n -> handOver (maybe 0 read (flag "pace")) n (levels !! runIndex start0)
+              Nothing -> demoInputs (maybe 0 read (flag "pace")) (drop (runIndex start0) levels)
+            else []
         , wFrozen = inspect
         , wSaved = saved
         }
@@ -108,6 +126,7 @@ main = do
               Title -> Render.render (scenes !! i) (levels !! i) (runGame run) (wFx w) (wWindow w)
               Lobby -> Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w)
               InLevel -> Render.render (scenes !! i) (levels !! i) (runGame run) (wFx w) (wWindow w)
+              Ending f -> Render.renderEnding (scenes !! i) (levels !! i) (beyond i) f (runGame run) (wFx w) (wWindow w)
         pure picture)
     (\event (t, w) -> pure (t, onEvent event w))
     (\_ (t, w) -> do
@@ -129,18 +148,29 @@ persistWorld world
   where progress = progressOf (wRun world)
 
 -- | The solver playing each level through the same keys a player would press.
-demoInputs :: [Level] -> [TickInput]
-demoInputs levels = concat (zipWith play (True : repeat False) levels)
+demoInputs :: Int -> [Level] -> [TickInput]
+demoInputs pace levels = concat (zipWith3 play starts levels (map Just (drop 1 levels) ++ [Nothing]))
   where
     press = noInput { tiEnter = True }
     pauseTicks = replicate 60 noInput
-    play first level =
-      (if first then [press, noInput, press] else replicate 150 noInput ++ [press])
+    paced action = actionInputs action ++ replicate pace noInput
+    -- The first level is started from the title; one after an ending starts itself;
+    -- any other is started from the last one's won plate.
+    starts = Just [press, noInput, press]
+           : [ if null (lvPassage l) then Just (replicate 150 noInput ++ [press]) else Nothing | l <- levels ]
+    play start level next =
+      maybe [] id start
       ++ pauseTicks
-      ++ routeInputs (route level)
-    route level = case srGoal (search level (\_ _ -> True) (startPlaying level)) of
-      Just (_, actions) -> actions
-      Nothing -> []
+      ++ concatMap paced (route level) ++ [noInput]
+      ++ (if not (null (lvPassage level)) && isJust next then ending level else [])
+    -- Wait for the wall to open, step into the passage, and run it to the end,
+    -- changing era at each barrier as a keeper reading the way ahead would.
+    ending level = replicate (revealTicks level + 50) noInput ++ actionInputs (Go DirUp)
+             ++ [noInput] ++ rushInputs level ++ replicate (arrivalTicks + 30) noInput
+    route level = case (knownRoute level, srGoal (search level (\_ _ -> True) (startPlaying level))) of
+      (Just actions, _) -> actions
+      (_, Just (_, actions)) -> actions
+      _ -> []
 
 tickBoth :: [Level] -> (Run, Fx) -> TickInput -> (Run, Fx)
 tickBoth levels (r, fx) input =
@@ -203,9 +233,18 @@ gameKey key = case key of
   Char '\r' -> Just KEnter
   Char '\n' -> Just KEnter
   SpecialKey KeySpace -> Just KSpace
+  -- In a level for two, the second keeper can shift from their side of the keyboard.
+  SpecialKey KeyShiftR -> Just KSpace
+  SpecialKey KeyPad0 -> Just KSpace
   SpecialKey KeyTab   -> Just KPeek
   SpecialKey KeyEsc   -> Just KLobby
   SpecialKey KeyEnter -> Just KEnter
+  -- GLFW names the keypad's keys apart from the main ones; GLUT gave the same keys.
+  SpecialKey KeyPadEnter -> Just KEnter
+  SpecialKey KeyPad8  -> Just KUp
+  SpecialKey KeyPad2  -> Just KDown
+  SpecialKey KeyPad4  -> Just KLeft
+  SpecialKey KeyPad6  -> Just KRight
   SpecialKey KeyUp    -> Just KUp
   SpecialKey KeyDown  -> Just KDown
   SpecialKey KeyLeft  -> Just KLeft
@@ -224,10 +263,10 @@ scriptInputs = concatMap one
       'x' -> actionInputs ShiftEra
       'q' -> actionInputs SendEcho
       'X' -> [noInput { tiShift = True }]  -- the press alone, to inspect mid-wave
-      'W' -> [noInput { tiDir = Just DirUp }]  -- the press alone, to inspect mid-step
-      'S' -> [noInput { tiDir = Just DirDown }]
-      'A' -> [noInput { tiDir = Just DirLeft }]
-      'D' -> [noInput { tiDir = Just DirRight }]
+      'W' -> [noInput { tiDir = Just DirUp, tiDir1 = Just DirUp }]  -- the press alone, to inspect mid-step
+      'S' -> [noInput { tiDir = Just DirDown, tiDir1 = Just DirDown }]
+      'A' -> [noInput { tiDir = Just DirLeft, tiDir1 = Just DirLeft }]
+      'D' -> [noInput { tiDir = Just DirRight, tiDir1 = Just DirRight }]
       'T' -> [noInput { tiPeek = True }]  -- hold Tab for this tick, to inspect the peek
       'e' -> [noInput { tiEnter = True }, noInput]
       'p' -> [noInput { tiPause = True }, noInput]
@@ -235,3 +274,17 @@ scriptInputs = concatMap one
       'z' -> [noInput { tiUndo = True }, noInput]
       '.' -> [noInput]
       _   -> []
+
+-- | The solver plays one level from the title, but stops @n@ moves short of the
+-- end and leaves the rest, and whatever follows, to the keyboard.
+handOver :: Int -> Int -> Level -> [TickInput]
+handOver pace n level =
+  [press, noInput, press] ++ replicate 60 noInput
+  ++ concatMap (\a -> actionInputs a ++ replicate pace noInput) (take (length route - n) route)
+  ++ [noInput]
+  where
+    press = noInput { tiEnter = True }
+    route = case (knownRoute level, srGoal (search level (\_ _ -> True) (startPlaying level))) of
+      (Just actions, _) -> actions
+      (_, Just (_, actions)) -> actions
+      _ -> []

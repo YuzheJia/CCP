@@ -1,6 +1,12 @@
 -- | Things that move or shine on top of the station.
 module Figures
   ( keeper
+  , keeperIn
+  , Coat (..)
+  , yellowCoat
+  , redCoat
+  , trueTower
+  , passageLamp
   , powerCell
   , crate
   , crossingMark
@@ -17,6 +23,7 @@ module Figures
   , carriedLight
   , pickupBurst
   , lanternGlow
+  , lanternOffset
   , victoryRays
   , relitSconces
   , warmthOver
@@ -33,7 +40,17 @@ import Station (pool, sconceCells)
 
 -- | The lighthouse keeper in a yellow oilskin. @phase@ runs 0..1 across a step.
 keeper :: Dir -> Float -> Picture
-keeper facing phase = Scale 1.08 1.08 (Pictures
+keeper = keeperIn yellowCoat
+
+-- | The oilskin, so two keepers can be told apart at a glance.
+data Coat = Coat { coatMain, coatDark, coatHood :: Color }
+
+yellowCoat, redCoat :: Coat
+yellowCoat = Coat (hex 0xF7C81E) (hex 0xC4920F) (hex 0xFFD93E)
+redCoat = Coat (hex 0xE5533A) (hex 0xA9361F) (hex 0xF4765B)
+
+keeperIn :: Coat -> Dir -> Float -> Picture
+keeperIn oilskin facing phase = Scale 1.08 1.08 (Pictures
   [ Color (hexA 0x000000 0.45) (Translate 0 (-20) (ellipse 16 17 7))
   , Translate 0 bob figure
   ])
@@ -41,9 +58,9 @@ keeper facing phase = Scale 1.08 1.08 (Pictures
     bob = 2.2 * abs (sin (phase * pi))
     stride = sin (phase * 2 * pi) * 3
     outline = hex 0x17100B
-    coat = hex 0xF7C81E
-    coatShade = hex 0xC4920F
-    hood = hex 0xFFD93E
+    coat = coatMain oilskin
+    coatShade = coatDark oilskin
+    hood = coatHood oilskin
     boots = hex 0x2A1B12
     skin = hex 0xEBC8A0
     figure = case facing of
@@ -237,10 +254,34 @@ beamColor :: Era -> Int
 beamColor Past    = 0xFFE7B0
 beamColor Present = 0xBFEFFF
 
--- | A standing mirror filling its cell, its glass on the side it faces: a brass frame
--- in the past, tarnished steel in the present.
-mirrorArt :: Era -> Dir -> Float -> Picture
-mirrorArt era face clock = rot (faceAngle face) (Pictures
+-- | A standing mirror, its glass on the side it faces: a brass frame in the past,
+-- tarnished steel in the present. One set in the wall fills its cell. A movable one
+-- stands smaller on a timber sled with four castors, like the crates, so it reads as
+-- something a keeper could shove.
+mirrorArt :: Bool -> Era -> Dir -> Float -> Picture
+mirrorArt movable era face clock
+  | movable = Pictures
+      [ Color (hexA 0x000000 0.4) (Translate 2 (-4) (rectC 62 62))
+      , Color sledEdge (rectC 62 62)
+      , Color sledTop (rectC 56 56)
+      , Color sledEdge (Pictures [ Translate x y (ngon 8 5) | x <- [-23, 23], y <- [-23, 23] ])
+      , Color castor (Pictures [ Translate x y (ngon 8 2.5) | x <- [-23, 23], y <- [-23, 23] ])
+      , Scale 0.74 0.74 (fixedMirrorArt era face clock)
+      -- Which side is the face matters more once the mirror moves: the face is the
+      -- one side that never pushes. A notch of its light marks it on the sled.
+      , rot (faceAngle face) (Pictures
+          [ Color (hexA (beamColor era) 0.95) (Polygon [(-10, 26), (10, 26), (0, 33)])
+          , Color (hexA (beamColor era) 0.5) (rect (-24) 27 48 2)
+          ])
+      ]
+  | otherwise = fixedMirrorArt era face clock
+  where
+    (sledEdge, sledTop, castor) = case era of
+      Past    -> (hex 0x2E1C0E, hex 0x8A5E33, hex 0xE8C47A)
+      Present -> (hex 0x14100E, hex 0x5A3A26, hex 0x8A9AA0)
+
+fixedMirrorArt :: Era -> Dir -> Float -> Picture
+fixedMirrorArt era face clock = rot (faceAngle face) (Pictures
   [ Color (hexA 0x000000 0.45) (rect (-half + 2) (-half + 2) (cs - 4) (cs - 4))
   , Color frame (rect (-half + 5) (-half + 5) (cs - 10) (cs - 10))
   , Color backing (rect (-half + 11) (-half + 11) (cs - 22) (cs - 26))
@@ -344,6 +385,46 @@ victoryRays clock k = at lanternOffset (Pictures
       [ Color (hexA 0xFFD98A (0.085 * k)) (Polygon [(0, 0), (reach, -reach * 0.1 - 6 * i), (reach, reach * 0.1 + 6 * i)])
       , Color (hexA 0xFFEDBE (0.075 * k)) (Polygon [(0, 0), (reach, -reach * 0.045), (reach, reach * 0.045)])
       ]
+
+-- | The real lighthouse, at the end of the passage: whole, banded, and burning. It
+-- stands on its cell and rises about two and a half cells above it. @k@ is how
+-- brightly its lamp burns, 0 to 1.
+trueTower :: Float -> Float -> Picture
+trueTower clock k = Pictures
+  [ Color (hexA 0x000000 0.45) (Translate 5 (-25) (ellipse 28 54 18))
+  , Color (hex 0x5C4634) (Translate 0 (-21) (ellipse 28 50 17))
+  , Color (hex 0x8C7253) (Translate 0 (-18) (ellipse 28 46 14))
+  , Pictures [ band i (if even i then 0xD8493B else 0xF4EADA) | i <- [0 .. 5] ]
+  , Color (hexA 0x2A1A12 0.28) (Polygon [(6, bottom), (widthAt bottom, bottom), (widthAt top, top), (4, top)])
+  , Color (hexA 0xFFE2A8 (0.3 * k)) (Polygon [(-widthAt bottom, bottom), (-widthAt bottom + 10, bottom), (-widthAt top + 6, top), (-widthAt top, top)])
+  , Color (hex 0x2A1A12) (Polygon [(-7, bottom), (7, bottom), (7, bottom + 20), (0, bottom + 26), (-7, bottom + 20)])
+  , Color (hex 0x2A1A12) (rect (-27) top 54 7)
+  , Color (hex 0xC89C50) (rect (-27) (top + 5) 54 3)
+  , Color (hex 0x2A1A12) (rect (-16) (top + 7) 32 30)
+  , Color (mix k (hex 0x3A3020) (hex 0xFFEFC4)) (rect (-13) (top + 9) 26 26)
+  , Color (fade k (hex 0xFFFFFF)) (rect (-6) (top + 13) 12 18)
+  , Color (hex 0x2A1A12) (Pictures [rect (-1) (top + 9) 2 26, rect (-13) (top + 21) 26 1.6])
+  , Color (hex 0xA8362E) (Polygon [(-20, top + 37), (20, top + 37), (0, top + 60)])
+  , Color (hex 0x2A1A12) (rect (-1.5) (top + 60) 3 9)
+  , Translate 0 (top + 22) (pool 0xFFD98A (0.55 * k) (95 + 8 * sin (clock * 0.05)) (85 + 8 * sin (clock * 0.05)))
+  ]
+  where
+    bottom = -18 :: Float
+    top = 128 :: Float
+    widthAt y = 34 - 14 * (y - bottom) / (top - bottom)
+    band i colr =
+      let y0 = bottom + (top - bottom) * fromIntegral (i :: Int) / 6
+          y1 = bottom + (top - bottom) * fromIntegral (i + 1) / 6
+      in Color (hex colr) (Polygon [(-widthAt y0, y0), (widthAt y0, y0), (widthAt y1, y1), (-widthAt y1, y1)])
+
+-- | A lamp on the wall of the passage, dark until the keeper reaches it, @k@ 0 to 1.
+passageLamp :: Float -> Picture
+passageLamp k = Pictures
+  [ pool 0xFFC879 (0.24 * k) 120 95
+  , Color (hex 0x10171B) (rect (-7) (-9) 14 18)
+  , Color (mix k (hex 0x3A464D) (hex 0xFFE9B0)) (rect (-4.5) (-6.5) 9 13)
+  , Color (fade k (hex 0xFFFFFF)) (rect (-2) (-3) 4 6)
+  ]
 
 -- | The wall lamps, lit one by one as the warmth reaches them.
 relitSconces :: Float -> (Float, Float) -> Picture

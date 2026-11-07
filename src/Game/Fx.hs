@@ -8,6 +8,12 @@ module Game.Fx
   , Burst (..)
   , CostFloat (..)
   , EchoWalk (..)
+  , RoomFade (..)
+  , roomCols, roomRows
+  , roomOf
+  , roomedLevel
+  , roomFadeTicks
+  , roomFadeDark
   , costLife
   , echoStepTicks
   , echoWalkAt
@@ -16,6 +22,8 @@ module Game.Fx
   , waveProgress
   ) where
 
+import Data.Maybe (fromMaybe)
+import Game.Logic (anyHasCell, carrierCell)
 import Game.Types
 
 data Wave = Wave
@@ -42,6 +50,13 @@ data EchoWalk = EchoWalk
   , ewPath :: ![Spot]  -- ^ the player's spot first, the echo's last
   } deriving (Eq, Show)
 
+-- | Moving to another room: the map darkens, the room changes at the darkest
+-- moment, and it lightens again.
+data RoomFade = RoomFade
+  { rfAge  :: !Int
+  , rfRoom :: !Cell  -- ^ the room being moved to
+  } deriving (Eq, Show)
+
 data Fx = Fx
   { fxClock    :: !Int           -- ^ ticks of ambient animation
   , fxWave     :: !(Maybe Wave)  -- ^ the era wave crossing the map
@@ -52,10 +67,41 @@ data Fx = Fx
   , fxLevelAge :: !Int           -- ^ ticks since the level (re)started
   , fxCost     :: !(Maybe CostFloat)
   , fxEchoWalk :: !(Maybe EchoWalk)
+  , fxRoom     :: !Cell            -- ^ the room on screen, in rooms, not cells
+  , fxRoomFade :: !(Maybe RoomFade)
+  , fxVisited  :: ![Cell]          -- ^ rooms seen so far, for the map in the panel
   } deriving (Eq, Show)
 
 initialFx :: Fx
-initialFx = Fx 0 Nothing Nothing 0 0 0 0 Nothing Nothing
+initialFx = Fx 0 Nothing Nothing 0 0 0 0 Nothing Nothing (0, 0) Nothing [(0, 0)]
+
+-- | A level larger than one screen is a grid of rooms this size, and the screen
+-- shows one room at a time. A one-room level is always room (0,0).
+roomCols, roomRows :: Int
+roomCols = 13
+roomRows = 9
+
+roomOf :: Cell -> Cell
+roomOf (x, y) = (x `div` roomCols, y `div` roomRows)
+
+-- | A level built as a grid of whole rooms is shown a room at a time. Any other
+-- size is shown through a camera that follows the keeper instead, and its rooms,
+-- which 'stepFx' still tracks, are never drawn.
+roomedLevel :: Level -> Bool
+roomedLevel level = lvWidth level `mod` roomCols == 0 && lvHeight level `mod` roomRows == 0
+
+-- | The whole fade, out and back in. The room changes halfway.
+roomFadeTicks :: Int
+roomFadeTicks = 16
+
+-- | How dark the map is during a room change, 0 to 1.
+roomFadeDark :: Fx -> Float
+roomFadeDark fx = case fxRoomFade fx of
+  Nothing -> 0
+  Just f ->
+    let halfway = fromIntegral roomFadeTicks / 2 :: Float
+        a = fromIntegral (rfAge f)
+    in if a < halfway then a / halfway else max 0 (2 - a / halfway)
 
 burstLife, costLife, echoStepTicks :: Int
 burstLife = 40
@@ -76,14 +122,15 @@ waveProgress w = fromIntegral (waveAge w) / fromIntegral shiftTicks
 
 stepFx :: Game -> Game -> Fx -> Fx
 stepFx old new fx
-  | restarted = initialFx
+  -- A restart, or a new level, starts on the player's room with nothing to fade.
+  | restarted = initialFx { fxRoom = roomOf (gCell new), fxVisited = [roomOf (gCell new)] }
   -- Pausing freezes the world's effects, but the fade-in must still finish.
   | gPhase new == Paused = fx { fxPaused = fxPaused fx + 1, fxLevelAge = fxLevelAge fx + 1 }
-  | otherwise = fx
+  | otherwise = room fx
       { fxClock    = fxClock fx + 1
       , fxWave     = wave
       , fxBurst    = burst
-      , fxCarried  = if gHasCell new then fxCarried fx + 1 else 0
+      , fxCarried  = if anyHasCell new then fxCarried fx + 1 else 0
       , fxEnd      = if gPhase new `elem` [Won, Lost] then fxEnd fx + 1 else 0
       , fxPaused   = 0
       , fxLevelAge = fxLevelAge fx + 1
@@ -91,6 +138,25 @@ stepFx old new fx
       , fxEchoWalk = echoWalk
       }
   where
+    -- The screen follows the room the player is in, or stepping into, so the
+    -- change starts as the step does. The room swaps at the darkest moment.
+    focus = case gMotion new of
+      Stepping to _ -> to
+      _             -> gCell new
+    wanted = roomOf focus
+    room f = case fxRoomFade f of
+      Nothing
+        | wanted /= fxRoom f -> f { fxRoomFade = Just (RoomFade 0 wanted) }
+        | otherwise -> f
+      Just rf ->
+        let age = rfAge rf + 1
+            rf' = rf { rfAge = age, rfRoom = wanted }
+            swapped = if age >= roomFadeTicks `div` 2 then rfRoom rf' else fxRoom f
+            seen = if swapped `elem` fxVisited f then fxVisited f else fxVisited f ++ [swapped]
+        in f { fxRoom = swapped
+             , fxVisited = seen
+             , fxRoomFade = if age >= roomFadeTicks then Nothing else Just rf'
+             }
     -- A new echo walks back along the footprints it was sent down, which are still
     -- in the old game. An undo puts the old echo straight back.
     echoWalk
@@ -108,9 +174,11 @@ stepFx old new fx
       (before, []) -> before
     restarted = gAttempt new /= gAttempt old
     -- A step is charged before it moves, but the price belongs where it is going.
-    floatCell = case gMotion new of
-      Stepping to _ -> to
-      _             -> gCell new
+    floatCell = case (fmap ptMotion (gPartner old), fmap ptMotion (gPartner new)) of
+      (Just Settled, Just (Stepping to _)) -> to  -- the second keeper set off
+      _ -> case gMotion new of
+        Stepping to _ -> to
+        _             -> gCell new
     cost
       | gRemaining new /= gRemaining old =
           Just (CostFloat 0 (gRemaining new - gRemaining old) floatCell)
@@ -126,8 +194,8 @@ stepFx old new fx
           Just w | waveAge w + 1 < shiftTicks -> Just w { waveAge = waveAge w + 1 }
           _ -> Nothing
     burst
-      | not (gHasCell new) = Nothing
-      | not (gHasCell old) = Just (Burst 0 (gCell new))
+      | not (anyHasCell new) = Nothing
+      | not (anyHasCell old) = Just (Burst 0 (fromMaybe (gCell new) (carrierCell new)))
       | otherwise = case fxBurst fx of
           Just b | burstAge b + 1 < burstLife -> Just b { burstAge = burstAge b + 1 }
           _ -> Nothing

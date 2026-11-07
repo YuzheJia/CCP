@@ -24,7 +24,7 @@ cabal test spec --test-show-details=direct
 cabal run borrowed-light
 ```
 
-`cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to select level N in the hall (and unlock it for development).
+`cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to select level N in the hall (and unlock it for development); `--level=4` opens the secret level directly. Add `--pace=N` to wait N ticks (60 a second) after each of the demo's moves.
 
 The game opens on its title screen. Enter opens the **Level Hall**; Escape from the
 hall returns to the title. Use W/S or the arrow keys to choose an unlocked lesson
@@ -55,38 +55,63 @@ Each option's budget is its verified route target plus enough slack for a first-
 
 ### Current levels
 
-The Level Hall contains the opening crate lesson, a three-mirror chamber and a
-large three-wing station whose camera follows the player through the map.
+The Level Hall contains the opening crate lesson, a mirror chamber and a four-room
+station shown a room at a time.
 
 | # | Level | Idea | Par | Budget |
 |---|---|---|---|---|
-| 1 | Clear the Way | Push a crate into a recess in either era, then switch eras to cross two blocked passages | 36 | 56 |
+| 1 | Clear the Way | The crate is rusted in the present: switch to the past to push it into its recess, then switch eras to cross two blocked passages | 48 | 68 |
 | 2 | Two Alignments | Clear a launch cell, then reposition the same mirror for two separate jumps | 80 | 96 |
-| 3 | Level 3 - The Long Reflection | Clear each beam with its crate, hold all three plates, position the mirrors and return through the opened doors | 224 | 300 |
+| 3 | The Long Way Round | Four rooms, two ways through each: chain jumps through a mirror set in the wall or clear its beam, Crowded Track's vault, lift two crates out of the gallery using the movable mirror as a door or standing on its cell in the other era, and open the shortcut home from its far side | 306 | 346 |
 
-Level 1 and Level 2 come from the updated remote campaign. Level 1 permits its crate
-to move in either era. Level 2 uses one explicitly movable mirror for two alignments.
-Level 3 combines four required mirrors, four required crates, three pressure plates and two doors on a
-25 x 15 map. Only a 13 x 9 section is visible at once, and the camera follows the
-keeper while the rest of the station remains beyond the frame. Dense walls divide
-each wing into narrow corridors, small chambers, side branches and deliberate
-push positions. Small arrows mark mirrors that can slide left or right.
+**Two cameras.** A level built from whole rooms of 13 by 9 (The Long Way Round is 2
+by 2) is shown one room at a time: stepping through a doorway darkens the map, swaps
+the room and lightens again, and a small map in the panel shows the rooms seen so far.
+A level of any other size (such as The Long Reflection, kept in `extraLevels`) slides under the map
+instead, keeping the keeper near the centre.
 
-A movable mirror can be pushed from its back and either unlit side. It cannot be
-pushed from the illuminated side directly in front of its face: pressing toward
-the mirror there performs reflection travel when the landing is open, and never
-moves the mirror. Movable mirrors may travel vertically or horizontally.
+The Long Reflection (no longer in the campaign) reaches about four million states, which takes the solver minutes
+and gigabytes, so its cheapest route is pinned in `knownRoute` in
+`src/Game/Solution.hs`. The tests and `--demo` replay that route instead of searching.
+Under these rules it costs 188 rather than the 224 the level was built for, so its
+budget is that 224.
 
-Its three wings deliberately combine mechanics. In the first two, the same crate
-that blocks the crossing beam must be moved onto a plate before the mirror can be
-pushed into position. In the third, a crate blocks the fixed mirror and must also
-end on the final plate. With no mirror route back across the wing walls, all three
-plates are required to open the two present-day return doors.
-One additional crate and one movable mirror sit in side chambers as believable
-alternatives, but neither belongs to the winning route.
+Earlier levels are kept in `extraLevels` in `src/Game/Level.hs`: The Long Reflection and Harrow Point, Below (the levels merged into level 3; Harrow's west room fills pits, which no level teaches), First Light, One Way In, the two echo levels, and the crate levels (First Push, The Plug, The Buried Lamp, The Held Door, The Bridge, The Wrong Way First). They are not played or checked, because a player standing on a plate can now change their pars.
 
-Unused prototypes remain in `extraLevels` in `src/Game/Level.hs`, including the echo,
-door, pit and combined-mechanic rooms. They are not part of the selectable campaign.
+### The ending, and the level the hall does not list
+
+Lighting level 3's lamp is not the end. The usual plate appears and says every lamp
+is lit; then the lamp flares white and goes out. Its light slips into the wall above
+the tower and runs west along row 3 across the whole hall, breaking each wall it
+meets, out through the outer wall. The keeper walks again (free: no time is spent,
+and the era, undo and restart keys do nothing), and stepping onto that row starts
+the rush: the keeper is carried west, faster and faster, down a corridor of lamps
+that catch as they pass, to the real lighthouse. It blazes, the screen whites out,
+and level 4 begins.
+
+Level 4, "Two Keepers", is secret: the level hall never lists it, never selects it
+and never counts it, however much has been cleared. It is reached from the end of
+level 3, or directly with `--level=4` for development. For now its map is a
+placeholder while the level itself is designed. It is for two players:
+
+| Keys | Who |
+|---|---|
+| `W A S D` | the yellow keeper |
+| arrow keys | the red keeper |
+| `Space` (or right `Shift`, keypad `0`) | shifts the era for both |
+
+Both keepers play by the same rules: either can push crates in the past, step
+through mirrors, carry the power cell and light the lamp. They never share a cell.
+The era is shared, so a shift waits until both stand still, and is refused (with the
+usual outline) unless both have floor in the other era. Time is shared too, and undo
+takes back the last action, whichever keeper took it. The solver knows one keeper
+only, so a level for two is not searched and never told it is a dead end.
+
+The ending lives in `Game.Run` (`Ending` mode, stages `Lit` `Flare` `Opening`
+`Beckon` `Rush` `Arrival`), apart from the rules, so the solver, pars and level
+tests are unchanged. A level gets an ending from `withPassage` in `src/Game/Level.hs`:
+the first cell beside the lighthouse, then the walls on one straight line to the
+outer wall. The second keeper is a `T` on the present map.
 
 ### Mirrors
 
@@ -100,7 +125,17 @@ A mirror stands in one era, solid there, and throws light out of its face in a s
 
 The light, the reflection and the jump are all worked out from the board by one function, `mirrorAhead`, so what is drawn cannot disagree with what happens. Jumping is an ordinary move, so the solver needed no new action.
 
-In Two Alignments, press a direction toward the side or back of a mirror to slide it one cell. A push costs 2 seconds, keeps the mirror's facing, and moves its beam and reflection with it. A press from the front uses the normal mirror jump. Z restores the mirror's previous position.
+#### Movable mirrors
+
+A movable mirror (`n s e w` on the map, the compass letter of the way its face looks) stands on a timber sled, with a notch of light on its face side. **From its face it is a door; from its back and sides it is a crate.** The same key in the same spot only ever means one thing, so pushing never gets in the way of jumping.
+
+- Pressing into its back or a side pushes it one cell, for a step's price, keeping its facing; its light and reflection move with it. Like a crate, holding a key walks up to it and stops, and a push takes a fresh press.
+- Pressing into its face jumps if the landing is open, as with any mirror. If it is not, nothing moves and the hint line says faces only take you through. So a mirror facing down can be pushed left, right and down, never up.
+- It moves only in its own era, and in the other era its cell is plain floor. Crates rust in the present; mirrors don't.
+- It only goes onto floor that is open in its era: never into a wall, a crate, a pit or a door, and never onto a cell that holds another mirror, even in the other era. A crate can't be pushed onto a cell where the other era has a mirror, because a crate stands in both.
+- You can't switch era onto a mirror's cell. It doesn't hold plates down.
+
+A mirror set in the wall (`^ v < >`) never moves, and says so if you press against it. Each mirror is fixed or movable on its own, so one level can mix both. The mirrors live in the game state (`gMirrors`), so undo, restart, the solver and the dead-end warning all cover them.
 
 ### Inactive engine prototype: the echo
 
@@ -120,7 +155,7 @@ Corner ticks under the keeper's feet mean you can switch era right here. Holding
 
 ### Crates and pits
 
-A crate has one position, shared by both eras, so it only goes where both have room. Pressing toward it pushes it one cell in the past. Clear the Way and Two Alignments also allow pushes in the present. A crate occupies its cell in both eras, so moving it can open a crossing. Holding a direction walks up to a crate and stops: a push needs a fresh press.
+A crate has one position, shared by both eras, so it only goes where both have room. In the past, walking into it pushes it one cell, and it can never be pulled. In the present it is rusted solid, in every level. A crate occupies its cell in both eras, so moving it can open a crossing. Holding a direction walks up to a crate and stops: a push needs a fresh press.
 
 A pit (`~` on the past map) blocks the past until a crate is pushed in. The crate is used up and the cell becomes past floor, even if the present is a wall there, which makes it a bridge. If the present is open too, it is also a new crossing.
 
@@ -142,6 +177,8 @@ A level is two maps of the same size in `campaign` in `src/Game/Level.hs`, seale
 | `D` | Door, opened by the plates | Present |
 | `S` | Spawn, exactly one, never under a crate | Present |
 | `G` | Lighthouse, exactly one | Present |
+| `^` `v` `<` `>` | Mirror set in the wall, facing that way | Either: the era it works in |
+| `n` `s` `e` `w` | Movable mirror on floor, facing north, south, east or west; never on a crate's cell | Either: the era it works in |
 
 Give it a name, a par and a slack, then run the tests. They re-derive the par through the real rules and print it, with the route's actions, the state count and the dead states. The solver proves a level can be won, not that it is any good, so each level should have one idea you can name in a sentence.
 
@@ -295,8 +332,8 @@ search: 255 reachable states, 0 dead ends
 search: cheapest route costs 108 s, 42 actions, 6 of them shifts
 search: W W W W D Space D D S S S S D D Space D D W W W W D Space A S S S S Space A A A A W W W W Space A A A Space
 route:  intended route takes 373 ticks, ends StateKey {skEra = Present, skCell = (2,2), skHasCell = True, skPhase = Won, skCrates = fromList [], skFilled = fromList []}
-level:  Clear the Way: par 36, budget 56, 14 actions, 2 shifts, 47 states, 0 dead, 71% shared
+level:  Clear the Way: par 48, budget 68, 16 actions, 4 shifts, 47 states, 0 dead, 71% shared
 level:  Two Alignments: par 80, budget 96, 29 actions, 4 shifts, 13011 states, 10513 dead, 69% shared
-level:  One Way In: par 42, budget 54, 15 actions, 2 shifts, 46 states, 12 dead, 29% shared
+level:  Crowded Track: par 112, budget 124, 42 actions, 6 shifts, 3175 states, 2611 dead, 86% shared
 279 passed, 0 failed
 ```

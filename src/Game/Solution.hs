@@ -3,6 +3,7 @@
 module Game.Solution
   ( Action (..)
   , intendedRoute
+  , knownRoute
   , actionInputs
   , routeInputs
   , applyAction
@@ -58,13 +59,33 @@ intendedRoute = concat
     left n  = replicate n (Go DirLeft)
     right n = replicate n (Go DirRight)
 
+-- | A cheapest route for each level too big to search on every run, found once by
+-- the full 'search'. The Long Reflection reaches about four million states, which
+-- takes minutes and gigabytes, so the tests and the demo replay this instead.
+-- W A S D are steps and @_@ is a shift.
+knownRoute :: Level -> Maybe [Action]
+knownRoute level = map key <$> lookup (lvName level) routes
+  where
+    routes =
+      [ ( "Level 3 - The Long Reflection"
+        , "WWW_DDDDWWWWWSAWASAAWWDDDDDSASSSAAAWWADWDDWAWSSSDSSAAWASSD_SSS"
+          ++ replicate 17 'A' ++ replicate 9 'W' )
+      ]
+    key c = case c of
+      'W' -> Go DirUp
+      'A' -> Go DirLeft
+      'S' -> Go DirDown
+      'D' -> Go DirRight
+      _   -> ShiftEra
+
 -- | Key states for one action: a press on the first tick, then idle, so the next
 -- action's press lands when the player can take it. A direction pressed on the tick
 -- a step lands is taken at once. Space pressed on a wave's last tick is dropped by
 -- the lock, so a shift waits one tick longer, or two shifts in a row would be one.
 actionInputs :: Action -> [TickInput]
 actionInputs action = case action of
-  Go dir   -> noInput { tiDir = Just dir } : replicate (stepTicks - 1) noInput
+  -- As W A S D would give it, so in a level for two it moves the first keeper.
+  Go dir   -> noInput { tiDir = Just dir, tiDir1 = Just dir } : replicate (stepTicks - 1) noInput
   ShiftEra -> noInput { tiShift = True }   : replicate shiftTicks noInput
   SendEcho -> [noInput { tiEcho = True }, noInput]
 
@@ -81,7 +102,7 @@ applyAction :: Level -> Action -> Game -> Game
 applyAction level action g = settle (stepGame level press g)
   where
     press = case action of
-      Go dir   -> noInput { tiDir = Just dir }
+      Go dir   -> noInput { tiDir = Just dir, tiDir1 = Just dir }
       ShiftEra -> noInput { tiShift = True }
       SendEcho -> noInput { tiEcho = True }
     settle s
@@ -99,15 +120,15 @@ data StateKey = StateKey
   , skPhase   :: !Phase
   , skCrates  :: !(Set.Set Cell)
   , skFilled  :: !(Set.Set Cell)
-  , skMirrors :: !(Map.Map Cell (Era, Dir))
-  , skMovableMirrors :: !(Set.Set Cell)
   , skTrail   :: ![Spot]
   , skEcho    :: !(Maybe Spot)
+  , skMirrors :: ![(Cell, Mirror)]  -- ^ the movable ones only: the rest never change
   } deriving (Eq, Ord, Show)
 
 stateKey :: Game -> StateKey
 stateKey g = StateKey (gEra g) (gCell g) (gHasCell g) (gPhase g) (gCrates g) (gFilled g)
-                      (gMirrors g) (gMovableMirrors g) (gTrail g) (gEcho g)
+                      (gTrail g) (gEcho g)
+                      (filter (mMovable . snd) (Map.toList (gMirrors g)))
 
 data SearchResult = SearchResult
   { srStates   :: !(Map.Map StateKey Int)    -- ^ cheapest cost to reach each state

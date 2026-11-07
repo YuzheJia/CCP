@@ -60,12 +60,18 @@ tickInput keys = TickInput
   , tiEcho    = down KEcho
   , tiLobby   = down KLobby
   , tiDirRevealed = null [d | Just d <- map dirOf (kTapped keys)]
+  , tiDir1    = firstJust (map dirOf (wasd (kHeld keys ++ kTapped keys)))
+  , tiDir1Revealed = null (wasd (kTapped keys))
+  , tiDir2    = firstJust (map dirOf (arrows (kHeld keys ++ kTapped keys)))
+  , tiDir2Revealed = null (arrows (kTapped keys))
   }
   where
     down k = k `elem` kHeld keys || k `elem` kTapped keys
     firstJust xs = case [d | Just d <- xs] of
       (d : _) -> Just d
       []      -> Nothing
+    wasd = filter (`elem` [KW, KA, KS, KD])
+    arrows = filter (`elem` [KUp, KDown, KLeft, KRight])
 
 -- | Call once the tick has seen the keys.
 afterTick :: Keys -> Keys
