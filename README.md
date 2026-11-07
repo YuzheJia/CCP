@@ -2,9 +2,7 @@
 
 Retrieve a power cell from the past and bring it back to illuminate a lighthouse in the present.
 
-A short campaign of a top-down time-shifting puzzle with a time budget, crates and pits, in Haskell with Gloss. It is a practice prototype for the University of Bristol CSS GameJam 2026, kept separate from the final submission. Nothing here has been published or submitted.
-
-Whether pre-event code is allowed in an entry, and whether this approach would qualify for the functional-programming prize, are **not established**. Check the event rules before reusing any of it.
+A short campaign of a top-down time-shifting puzzle with a time budget, crates and mirrors, in Haskell with Gloss, for the University of Bristol CSS GameJam 2026.
 
 | Past | Present |
 |---|---|
@@ -233,7 +231,6 @@ Toolchain, on macOS 26.5.2 (arm64):
 
 - **On Windows:** window close and frame rate. It builds, passes its tests and runs on Windows 11 x64, with key events posted to the window and a person playing some of the levels.
 - A standalone, redistributable build on any platform.
-- Prize eligibility, and whether pre-event code or AI-assisted assets are allowed.
 - Physical key feel, including real auto-repeat behaviour: testing used injected events. Gloss turns GLUT key repeat off and `Game.Input` ignores repeated key-downs regardless.
 - A physical mouse click on the close button: the test pressed it through accessibility.
 - Keys held while the window loses focus: the key-up may never arrive, which would leave a direction held. Not tested.
