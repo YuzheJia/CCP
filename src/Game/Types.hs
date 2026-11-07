@@ -55,12 +55,13 @@ data TickInput = TickInput
   , tiUndo    :: !Bool
   , tiPeek    :: !Bool
   , tiEcho    :: !Bool
+  , tiLobby   :: !Bool          -- ^ leave a level and return to level select
   , tiDirRevealed :: !Bool     -- ^ no direction went down this tick, so if 'tiDir'
                                --   changed, a newer key was let go of, not a press
   } deriving (Eq, Show)
 
 noInput :: TickInput
-noInput = TickInput Nothing False False False False False False False False
+noInput = TickInput Nothing False False False False False False False False False
 
 -- | The player does exactly one of these at a time. Being a sum type, "walking
 -- while shifting" cannot be represented at all.
@@ -83,6 +84,8 @@ data FeedbackKind
   | EchoNeedsSteps      -- ^ E with no footprints behind the player to walk back along
   | EchoInDoorway       -- ^ E while standing in a door: a new echo could shut it on you
   | JumpNeedsPress      -- ^ holding a key walks up a mirror's light; jumping takes a new press
+  | MirrorNeedsPress    -- ^ holding a key walks up to a movable mirror; pushing takes a fresh press
+  | MirrorFrontBlocked  -- ^ a mirror cannot be pushed from inside the light it casts
   deriving (Eq, Show)
 
 data Feedback = Feedback
@@ -128,9 +131,11 @@ data Level = Level
   , lvDoors    :: !(Set Cell)   -- ^ ...these, in the present; solid walls otherwise
   , lvMirrors  :: !(Map Cell (Era, Dir))
     -- ^ a mirror is solid in its own era, and its face looks out this way
+  , lvMovableMirrors :: !(Set Cell) -- ^ initial cells of mirrors that slide left/right
   , lvBudget   :: !Int          -- ^ seconds available in this level
   , lvRules    :: !Rules
   , lvName     :: !String
+  , lvLesson   :: !String       -- ^ the mechanic this level introduces
   , lvPar      :: !Int          -- ^ the cheapest possible cost; a test re-derives it
   , lvDressed  :: !Bool         -- ^ the original station, with its hand-placed dressing
   } deriving (Eq, Show)
@@ -145,6 +150,8 @@ data Snapshot = Snapshot
   , snHasCell :: !Bool
   , snCrates  :: !(Set Cell)
   , snFilled  :: !(Set Cell)
+  , snMirrors :: !(Map Cell (Era, Dir))
+  , snMovableMirrors :: !(Set Cell)
   , snFacing  :: !Dir
   , snTrail   :: ![Spot]
   , snEcho    :: !(Maybe Spot)
@@ -159,11 +166,14 @@ data Game = Game
   , gRemaining    :: !Int          -- ^ seconds of budget left; only actions spend it
   , gCrates       :: !(Set Cell)
   , gFilled       :: !(Set Cell)   -- ^ pits a crate has been pushed into
+  , gMirrors      :: !(Map Cell (Era, Dir))
+  , gMovableMirrors :: !(Set Cell)
   , gTrail        :: ![Spot]       -- ^ where the player has stood, newest first, their
                                    --   own spot included; an echo walks it back
   , gEcho         :: !(Maybe Spot) -- ^ where the echo stands, holding down any plate
   , gHistory      :: ![Snapshot]   -- ^ accepted actions, newest first, for undo
   , gPushing      :: !(Maybe Cell) -- ^ where this step's crate is going; only for drawing
+  , gPushingMirror :: !(Maybe Cell) -- ^ where this step's movable mirror is going
   , gAttempt      :: !Int          -- ^ counts starts and restarts
   , gMotion       :: !Motion
   , gFacing       :: !Dir          -- ^ which way the keeper looks; no rule reads it

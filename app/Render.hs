@@ -48,14 +48,16 @@ mkScene title hasNext level = Scene
   , scPresentCaption = bake (mapCaption title Present)
   , scWonCaption = wonCaption title
   , scHasNext = hasNext
-  , scDead = deadStates level
+  -- Exhaustive dead-state search grows quickly with several pushable objects.
+  -- Keep the level-select transition responsive in the larger rooms.
+  , scDead = if Set.size (lvCrates level) >= 3 then Set.empty else deadStates level
   , scHud = mkHudArt (lvRules level)
   }
   where
     ordered = [ (x, y) | y <- [0 .. lvHeight level - 1], x <- [0 .. lvWidth level - 1] ]
     cells era = [ (c, bake (cellArt level era c)) | c <- ordered ]
     whole era = bake (Pictures [ at (cellPos c) (cellArt level era c) | c <- ordered ])
-    back era = bake (Pictures [seaBackdrop era, foundation era])
+    back era = bake (foundation era)
 
 cellsOf :: Scene -> Era -> [(Cell, Picture)]
 cellsOf s Past = scPastCells s
@@ -95,6 +97,7 @@ frame scene level g fx = case gPhase g of
   _ -> Pictures
     [ world scene level (if peeking g fx then peekView g else g) fx
     , hud (scHud scene) level g fx clock
+    , lessonPlate level g fx
     , overlays scene g fx
     , startFade
     ]
@@ -104,6 +107,20 @@ frame scene level g fx = case gPhase g of
       | fxLevelAge fx < 26 =
           Color (hexA 0x05080A (1 - smooth (fromIntegral (fxLevelAge fx) / 26))) (rectC canvasW canvasH)
       | otherwise = Blank
+
+-- | Each room states its new rule on entry, then gets out of the player's way.
+lessonPlate :: Level -> Game -> Fx -> Picture
+lessonPlate level g fx
+  | null (lvLesson level) || gPhase g `notElem` [Playing, Paused] || age >= 420 = Blank
+  | otherwise = Translate centreX (mapBottom + 35) (Pictures
+      [ Color (hexA 0x05080A (0.88 * alpha)) (rectC 830 48)
+      , Color (fade alpha (hex 0xE8B85C)) (rect (-415) 21 830 2)
+      , Color (fade alpha (hex 0xF3E9D5)) (Translate 0 (-5) (textC 12 (lvLesson level)))
+      ])
+  where
+    age = fxLevelAge fx
+    alpha = if age < 330 then 1 else 1 - fromIntegral (age - 330) / 90
+    centreX = (mapLeft + mapRight) / 2
 
 -- | Holding Tab while nothing is flipping. The rules never read this key.
 peeking :: Game -> Fx -> Bool
@@ -115,8 +132,10 @@ peekView g = g { gEra = otherEra (gEra g), gFeedback = Nothing }
 
 world :: Scene -> Level -> Game -> Fx -> Picture
 world scene level g fx = Pictures
-  [ backOf scene shownEra
-  , stationCells scene g fx
+  [ seaBackdrop shownEra
+  , backOf scene shownEra
+  , Translate cameraDX cameraDY (Pictures
+  [ stationCells scene g fx
   , lightPools level Past pastK
   , lightPools level Present presentK
   , cellOnCradle
@@ -140,8 +159,10 @@ world scene level g fx = Pictures
   , burst
   , costFloat
   , winAbove
-  , vigOf scene shownEra
   , waveFront
+  ])
+  , viewportMask shownEra
+  , vigOf scene shownEra
   , if gPhase g == Won then scWonCaption scene else captionOf scene (gEra g)
   , hintLine
   , blockedNote
@@ -180,14 +201,27 @@ world scene level g fx = Pictures
         in ( lerp e (fromIntegral fromX) (fromIntegral toX)
            , lerp e (fromIntegral fromY) (fromIntegral toY), p)
       _ -> (fromIntegral fromX, fromIntegral fromY, 0)
+    -- The original 13 x 9 board is now a viewport. Small levels remain fixed;
+    -- larger ones slide smoothly under it while the keeper stays near the centre.
+    viewCols = 13 :: Float
+    viewRows = 9 :: Float
+    cameraX = max 0 (min (fromIntegral (lvWidth level) - viewCols) (visX - 6))
+    cameraY = max 0 (min (fromIntegral (lvHeight level) - viewRows) (visY - 4))
+    cameraDX = negate (cameraX * cs)
+    cameraDY = cameraY * cs
     (dx, dy) = dirDelta (gFacing g)
     bumpK = sin (fromIntegral (gBump g) / fromIntegral bumpTicks * pi)
     (px0, py0) = cellVec visX visY
     refuseShake = case gFeedback g of
       Just (Feedback kind left)
-        | kind /= CellCollected && left > blockedFeedbackTicks - 18 ->
+        | refusal kind && left > blockedFeedbackTicks - 18 ->
             3 * sin (fromIntegral left * 1.9) * fromIntegral (left - (blockedFeedbackTicks - 18)) / 18
       _ -> 0
+    refusal kind = case kind of
+      ShiftBlocked _ -> True
+      ShiftTooCostly -> True
+      PushBlocked _  -> True
+      _              -> False
     playerAt = ( px0 + 4 * bumpK * fromIntegral dx + refuseShake
                , py0 - 4 * bumpK * fromIntegral dy )
     -- At the win the keeper steps aside, so the tower they relit can be seen.
@@ -196,14 +230,38 @@ world scene level g fx = Pictures
                (Scale jumpK jumpK (keeper (if asideK > 0.5 then DirLeft else gFacing g)
                        (if gPhase g == Won then (if asideK < 1 then asideK * 2 else 0) else stepPhase)))
 
-    -- Mirrors stand in their own era, and their light only shows there.
-    mirrors = Pictures
-      [ at (cellPos c) (mirrorArt e face clock)
-      | (c, (e, face)) <- Map.toList (lvMirrors level), eraOf c == e ]
+    -- Mirrors stand in their own era. A movable one slides with the keeper while
+    -- it is being pushed, then casts its beam from the new cell.
+    pushedMirror = case (gPushingMirror g, gMotion g) of
+      (Just destination, Stepping source left) ->
+        Just (destination, source, smooth (1 - fromIntegral left / fromIntegral stepTicks))
+      _ -> Nothing
+    mirrorPicture c e face = Pictures
+      [ mirrorArt e face clock
+      , if c `Set.member` gMovableMirrors g then Color (hexA 0xFFF0B8 0.92) (Pictures
+          [ tri (-33, 0) (-23, 7) (-23, -7)
+          , tri (33, 0) (23, 7) (23, -7)
+          , tri (0, 33) (-7, 23) (7, 23)
+          , tri (0, -33) (-7, -23) (7, -23)
+          , seg 2 (-30, -25) (30, -25)
+          , seg 2 (-25, -30) (-25, 30)
+          ]) else Blank
+      ]
+    mirrors = Pictures $
+      [ at (cellPos c) (mirrorPicture c e face)
+      | (c, (e, face)) <- Map.toList (gMirrors g)
+      , Just c /= fmap (\(destination, _, _) -> destination) pushedMirror
+      , eraOf c == e ] ++
+      [ at (cellVec (lerp p (fromIntegral sx) (fromIntegral mx))
+                    (lerp p (fromIntegral sy) (fromIntegral my)))
+           (mirrorPicture destination e face)
+      | Just (destination@(mx, my), (sx, sy), p) <- [pushedMirror]
+      , Just (e, face) <- [Map.lookup destination (gMirrors g)]
+      , e == era ]
     beams = Pictures
       [ beamLight e clock (edge c face) (if null cells then edge c face else edge (last cells) face)
-      | wave == Nothing, gPhase g /= Menu
-      , (c, (e, face)) <- Map.toList (lvMirrors level), e == era
+      | wave == Nothing, gPhase g /= Menu, gPushingMirror g == Nothing
+      , (c, (e, face)) <- Map.toList (gMirrors g), e == era
       , let cells = beamCells level g c ]
     edge c face = let (x, y) = cellPos c; (ux, uy) = screenDir face in (x + half * ux, y + half * uy)
 
@@ -355,6 +413,10 @@ world scene level g fx = Pictures
             hintBand era (clamp01 (fromIntegral left / 30)) echoInDoorwayText
           Just (Feedback JumpNeedsPress left) ->
             hintBand era (clamp01 (fromIntegral left / 30)) jumpAgainText
+          Just (Feedback MirrorNeedsPress left) ->
+            hintBand era (clamp01 (fromIntegral left / 30)) mirrorPushText
+          Just (Feedback MirrorFrontBlocked left) ->
+            hintBand era (clamp01 (fromIntegral left / 30)) mirrorFrontText
           _ -> case currentHint level g of
             Just h -> hintBand era 1 (hintText h)
             Nothing -> Blank
@@ -379,6 +441,20 @@ world scene level g fx = Pictures
           , lanternGlow clock (smooth (endAge / 24))
           ])
       | otherwise = Blank
+
+-- | Hide the parts of a large station outside the original 13 x 9 map window.
+-- The HUD is drawn afterwards, so the right-hand mask also gives it a clean panel.
+viewportMask :: Era -> Picture
+viewportMask era = Color outside (Pictures
+  [ rect (-canvasW / 2) (-canvasH / 2) (mapLeft + canvasW / 2) canvasH
+  , rect mapRight (-canvasH / 2) (canvasW / 2 - mapRight) canvasH
+  , rect mapLeft mapTop (mapRight - mapLeft) (canvasH / 2 - mapTop)
+  , rect mapLeft (-canvasH / 2) (mapRight - mapLeft) (mapBottom + canvasH / 2)
+  ])
+  where
+    outside = case era of
+      Past -> hex 0x102F36
+      Present -> hex 0x050A0D
 
 -- | The cell a refusal is about, to outline it.
 refusedCell :: FeedbackKind -> Maybe Cell

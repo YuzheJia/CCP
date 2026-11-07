@@ -24,7 +24,14 @@ cabal test spec --test-show-details=direct
 cabal run borrowed-light
 ```
 
-`cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to start at level N.
+`cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to select level N in the hall (and unlock it for development).
+
+The game opens on its title screen. Enter opens the **Level Hall**; Escape from the
+hall returns to the title. Use W/S or the arrow keys to choose an unlocked lesson
+and Enter to play it. Escape returns to the hall from any point in a level.
+Clearing a room unlocks the next one. Completed rooms and the selected room are saved
+automatically in the operating system's user-data directory; an unfinished puzzle
+starts fresh when it is entered again.
 
 ### Controls
 
@@ -37,25 +44,48 @@ cabal run borrowed-light
 | P | Pause / resume |
 | R | Restart |
 | Enter | Start / retry |
+| Escape | Return to the Level Hall |
 | Window close button | Exit |
 
 ### Time
 
 Time is a budget, not a clock. A step costs 2 seconds and a shift costs 6, charged when the action is accepted. Standing still, pausing, refused actions and restarting cost nothing. Z restores the board exactly but refunds only half the action's cost, and R refills the budget at the price of walking it all again. With less than one step's price left, the level is lost, though Z still works from the lost screen. The prices live in a plain `Rules` record on each `Level`.
 
-Each level's budget is its par, the cheapest possible cost found by the solver, plus slack that shrinks as the game goes on.
+Each option's budget is its verified route target plus enough slack for a first-time player to experiment.
 
-### The campaign
+### Current levels
 
-Three levels, sized for a three-minute demo, each adding one idea:
+The Level Hall contains the opening crate lesson, a three-mirror chamber and a
+large three-wing station whose camera follows the player through the map.
 
 | # | Level | Idea | Par | Budget |
 |---|---|---|---|---|
-| 1 | Through the Glass | Stand in a mirror's light and the key toward it steps through; how far depends on where you stand | 22 | 42 |
-| 2 | Rust in the Beam | A crate rusted into the present's light can be moved in the past | 34 | 50 |
-| 3 | One Way In | A mirror is a one-way door: open the way out, a door the crate holds, before stepping in | 42 | 54 |
+| 1 | Option A - Pocket Above | Push the blocking crate upward into a dead pocket | 40 | 60 |
+| 2 | Level 2 - Three Reflections | Move three crates and use three mirrors to enter, leave and reach the lighthouse | 60 | 96 |
+| 3 | Level 3 - The Long Reflection | Clear each beam with its crate, hold all three plates, position the mirrors and return through the opened doors | 224 | 300 |
 
-Earlier levels are kept in `extraLevels` in `src/Game/Level.hs`: First Light, the two echo levels, and the crate levels (First Push, The Plug, The Buried Lamp, The Held Door, The Bridge, The Wrong Way First). They are not played or checked, because a player standing on a plate can now change their pars.
+Level 2 has three mirrors and three crates, including one mirror that slides horizontally.
+Level 3 combines four required mirrors, four required crates, three pressure plates and two doors on a
+25 x 15 map. Only a 13 x 9 section is visible at once, and the camera follows the
+keeper while the rest of the station remains beyond the frame. Dense walls divide
+each wing into narrow corridors, small chambers, side branches and deliberate
+push positions. Small arrows mark mirrors that can slide left or right.
+
+A movable mirror can be pushed from its back and either unlit side. It cannot be
+pushed from the illuminated side directly in front of its face: pressing toward
+the mirror there performs reflection travel when the landing is open, and never
+moves the mirror. Movable mirrors may travel vertically or horizontally.
+
+Its three wings deliberately combine mechanics. In the first two, the same crate
+that blocks the crossing beam must be moved onto a plate before the mirror can be
+pushed into position. In the third, a crate blocks the fixed mirror and must also
+end on the final plate. With no mirror route back across the wing walls, all three
+plates are required to open the two present-day return doors.
+One additional crate and one movable mirror sit in side chambers as believable
+alternatives, but neither belongs to the winning route.
+
+Unused prototypes remain in `extraLevels` in `src/Game/Level.hs`, including the echo,
+door, pit and combined-mechanic rooms. They are not part of the selectable campaign.
 
 ### Mirrors
 
@@ -69,7 +99,7 @@ A mirror stands in one era, solid there, and throws light out of its face in a s
 
 The light, the reflection and the jump are all worked out from the board by one function, `mirrorAhead`, so what is drawn cannot disagree with what happens. Jumping is an ordinary move, so the solver needed no new action.
 
-### The echo (not in the campaign)
+### Inactive engine prototype: the echo
 
 E sends an echo, in levels that use `echoRules`. It starts on your spot and walks back along your footprints, then stays where they end and stands in for you. The game keeps your last five footprints, your own spot included, so walking straight, the echo stops four steps back. A shift leaves a footprint too, so an echo can walk back across one and end up in the other era.
 

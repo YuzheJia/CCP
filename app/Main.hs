@@ -2,7 +2,7 @@
 --
 --   borrowed-light                 play
 --   borrowed-light --demo          watch the solver play every level, then take over
---   borrowed-light --level=N       start at level N, counting from 1
+--   borrowed-light --level=N       select level N in the lobby, counting from 1
 --
 -- Development flags, used to inspect exact moments of the game:
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
@@ -26,8 +26,10 @@ import Game.Types
 import GHC.Clock (getMonotonicTime)
 import Graphics.Gloss.Interface.Environment (getScreenSize)
 import Graphics.Gloss.Interface.IO.Game
+import qualified Lobby
 import Platform (exitWhenWindowCloses)
 import qualified Render
+import Save
 import System.Environment (getArgs)
 import System.Exit (die)
 import System.IO (hFlush, stdout)
@@ -41,6 +43,7 @@ data World = World
   , wBank   :: !Double       -- ^ unspent real time, in seconds
   , wScript :: [TickInput]   -- ^ overrides the keyboard while it lasts
   , wFrozen :: !Bool         -- ^ inspection only: no ticks at all
+  , wSaved  :: !Progress     -- ^ last progress successfully offered to the save file
   }
 
 -- | The 1280 x 800 the art is composed for, shrunk to fit a smaller display.
@@ -62,8 +65,12 @@ main = do
       after = maybe 0 read (flag "after") :: Int
       inspect = isJust prepared
       total = length levels
-      startAt = max 0 (min (total - 1) (fromMaybe 1 (flag "level" >>= readMaybe) - 1))
-      (run0, fx0) = foldl' (tickBoth levels) (startRun levels startAt, initialFx)
+      requested = flag "level" >>= readMaybe
+  saved <- loadProgress total
+  let startAt = max 0 (min (total - 1) (fromMaybe (savedSelected saved + 1) requested - 1))
+      completedAtStart = max (savedCompleted saved) (if isJust requested then startAt else 0)
+      (run0, fx0) = foldl' (tickBoth levels)
+        (startRunWithProgress levels startAt completedAtStart, initialFx)
                     (maybe [] id prepared ++ replicate after noInput)
       scenes =
         [ Render.mkScene (show (i + 1) ++ " of " ++ show total ++ "   " ++ lvName l) (i + 1 < total) l
@@ -72,6 +79,7 @@ main = do
         { wRun = run0, wFx = fx0, wKeys = noKeys, wWindow = windowSize, wBank = 0
         , wScript = if "--demo" `elem` args then demoInputs (drop startAt levels) else []
         , wFrozen = inspect
+        , wSaved = saved
         }
   start <- getMonotonicTime
   counter <- newIORef (start, 0 :: Int)
@@ -94,17 +102,31 @@ main = do
         first <- readIORef firstFrame
         when first (writeIORef firstFrame False >> exitWhenWindowCloses)
         countFrame
-        let i = runIndex (wRun w)
-        pure (Render.render (scenes !! i) (levels !! i) (runGame (wRun w)) (wFx w) (wWindow w)))
+        let run = wRun w
+            i = runIndex run
+            picture = case runMode run of
+              Title -> Render.render (scenes !! i) (levels !! i) (runGame run) (wFx w) (wWindow w)
+              Lobby -> Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w)
+              InLevel -> Render.render (scenes !! i) (levels !! i) (runGame run) (wFx w) (wWindow w)
+        pure picture)
     (\event (t, w) -> pure (t, onEvent event w))
     (\_ (t, w) -> do
         now <- getMonotonicTime
         let w' = onFrame levels (now - t) w
-            game = runGame (wRun w')
-        when ("--trace" `elem` args && (stateKey game /= stateKey (runGame (wRun w)) || runIndex (wRun w') /= runIndex (wRun w))) $ do
-          putStrLn ("level=" ++ show (runIndex (wRun w') + 1) ++ " " ++ show (stateKey game) ++ " remaining=" ++ show (gRemaining game))
+        w'' <- persistWorld w'
+        let game = runGame (wRun w'')
+        when ("--trace" `elem` args && (stateKey game /= stateKey (runGame (wRun w)) || runIndex (wRun w'') /= runIndex (wRun w) || runMode (wRun w'') /= runMode (wRun w))) $ do
+          putStrLn ("mode=" ++ show (runMode (wRun w'')) ++ " level=" ++ show (runIndex (wRun w'') + 1) ++ " " ++ show (stateKey game) ++ " remaining=" ++ show (gRemaining game))
           hFlush stdout
-        pure (now, w'))
+        pure (now, w''))
+
+persistWorld :: World -> IO World
+persistWorld world
+  | progress == wSaved world = pure world
+  | otherwise = do
+      saved <- saveProgress progress
+      pure (if saved then world { wSaved = progress } else world)
+  where progress = progressOf (wRun world)
 
 -- | The solver playing each level through the same keys a player would press.
 demoInputs :: [Level] -> [TickInput]
@@ -113,7 +135,7 @@ demoInputs levels = concat (zipWith play (True : repeat False) levels)
     press = noInput { tiEnter = True }
     pauseTicks = replicate 60 noInput
     play first level =
-      (if first then [press] else replicate 150 noInput ++ [press])
+      (if first then [press, noInput, press] else replicate 150 noInput ++ [press])
       ++ pauseTicks
       ++ routeInputs (route level)
     route level = case srGoal (search level (\_ _ -> True) (startPlaying level)) of
@@ -182,6 +204,7 @@ gameKey key = case key of
   Char '\n' -> Just KEnter
   SpecialKey KeySpace -> Just KSpace
   SpecialKey KeyTab   -> Just KPeek
+  SpecialKey KeyEsc   -> Just KLobby
   SpecialKey KeyEnter -> Just KEnter
   SpecialKey KeyUp    -> Just KUp
   SpecialKey KeyDown  -> Just KDown

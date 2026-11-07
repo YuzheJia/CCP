@@ -99,13 +99,15 @@ data StateKey = StateKey
   , skPhase   :: !Phase
   , skCrates  :: !(Set.Set Cell)
   , skFilled  :: !(Set.Set Cell)
+  , skMirrors :: !(Map.Map Cell (Era, Dir))
+  , skMovableMirrors :: !(Set.Set Cell)
   , skTrail   :: ![Spot]
   , skEcho    :: !(Maybe Spot)
   } deriving (Eq, Ord, Show)
 
 stateKey :: Game -> StateKey
 stateKey g = StateKey (gEra g) (gCell g) (gHasCell g) (gPhase g) (gCrates g) (gFilled g)
-                      (gTrail g) (gEcho g)
+                      (gMirrors g) (gMovableMirrors g) (gTrail g) (gEcho g)
 
 data SearchResult = SearchResult
   { srStates   :: !(Map.Map StateKey Int)    -- ^ cheapest cost to reach each state
