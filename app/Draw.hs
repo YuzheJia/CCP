@@ -17,6 +17,11 @@ module Draw
 
 import Data.Bits (shiftR, xor)
 import Graphics.Gloss
+    ( makeColor,
+      rgbaOfColor,
+      Color,
+      Picture(Pictures, Blank, Translate, Rotate, Scale, Polygon, Line,
+              Color) )
 
 canvasW, canvasH :: Float
 canvasW = 1280
