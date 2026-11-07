@@ -381,7 +381,7 @@ restartAndPause level =
 timing :: Level -> [Check]
 timing level =
   [ check "12. the prices are 2 s a step and 6 s a shift, and the budget is par + 20" $
-      lvRules level == Rules 2 6 50 4 0 4
+      lvRules level == Rules 2 6 50 4 0 4 False False
       && routeCost == 108 && lvBudget level == routeCost + 20
   , check "12. standing still spends nothing, for as long as you like" $
       let g = idle level 100000 (startPlaying level)
@@ -838,10 +838,30 @@ echoChecks fixture =
 levelNamed :: String -> Level
 levelNamed name = head [l | Right ls <- [campaign, extraLevels], l <- ls, lvName l == name]
 
--- | "Through the Glass": a past mirror at (6,4) facing down, the cell at (6,2).
-glass, rust, oneWay :: Level
-glass = levelNamed "Through the Glass"
-rust = levelNamed "Rust in the Beam"
+glass, twoAlignments, oneWay :: Level
+-- A past mirror facing down at (6,4), with the cell two spaces behind it.
+glass = either error id $ parseLevel 42
+  [ "########"
+  , "########"
+  , "######B#"
+  , "######.#"
+  , "######v#"
+  , "######.#"
+  , "######.#"
+  , "######.#"
+  , "########"
+  ]
+  [ "########"
+  , "########"
+  , "######G#"
+  , "########"
+  , "########"
+  , "########"
+  , "########"
+  , "######S#"
+  , "########"
+  ]
+twoAlignments = levelNamed "Two Alignments"
 oneWay = levelNamed "One Way In"
 
 mirrorChecks :: [Check]
@@ -849,7 +869,8 @@ mirrorChecks =
   [ check "parser: a mirror belongs to the era it is drawn in, and is solid there" $
       Map.lookup (6, 4) (lvMirrors glass) == Just (Past, DirDown)
         && not (walkable glass Past (6, 4))
-        && Map.lookup (4, 4) (lvMirrors rust) == Just (Present, DirRight)
+        && Map.lookup (5, 2) (lvMirrors twoAlignments) == Just (Present, DirRight)
+        && not (openCell twoAlignments (startPlaying twoAlignments) Present (5, 2))
   , check "mirror: in its light and facing it, the key steps through, as far behind as in front" $
       let g0 = at glass Past (6, 6) False
           g = walk glass DirUp g0
@@ -865,12 +886,33 @@ mirrorChecks =
   , check "mirror: only the key that faces it steps through" $
       jumpTarget glass (at glass Past (6, 6) False) DirDown == Nothing
   , check "mirror: it only works in its own era" $
-      let open g = g { gCrates = Set.empty }
-      in jumpTarget rust (open (at rust Present (6, 4) False)) DirLeft == Just (2, 4)
-         && jumpTarget rust (open (at rust Past (6, 4) False)) DirLeft == Nothing
+      jumpTarget twoAlignments (at twoAlignments Present (7, 2) False) DirLeft == Just (3, 2)
+        && jumpTarget twoAlignments (at twoAlignments Past (7, 2) False) DirLeft == Nothing
   , check "mirror: a crate in the light stops it" $
-      let g = at rust Present (6, 4) False
-      in mirrorAhead rust g DirLeft == Nothing && gCell (walk rust DirLeft g) == (6, 4)
+      let l = twoAlignments
+          g = (at l Past (7, 6) False)
+                { gCrates = Set.singleton (7, 5)
+                , gMirrors = Map.insert (7, 4) (Past, DirDown) (Map.delete (5, 4) (lvMirrors l)) }
+      in beamCells l g (7, 4) == [] && mirrorAhead l g DirUp == Nothing
+  , check "mirror: side and rear pushes preserve the face, and undo restores the position" $
+      let l = twoAlignments
+          side = at l Past (4, 4) False
+          moved = walk l DirRight side
+          rear = walk l DirDown (at l Past (5, 3) False)
+          front = walk l DirUp (at l Past (5, 5) False)
+          rewound = run l [undoKey, noInput] moved
+      in gCell moved == (5, 4) && Map.lookup (6, 4) (gMirrors moved) == Just (Past, DirDown)
+         && Map.notMember (5, 4) (gMirrors moved) && gRemaining moved == gRemaining side - 2
+         && Map.lookup (5, 5) (gMirrors rear) == Just (Past, DirDown)
+         && gCell front == (5, 3) && gMirrors front == lvMirrors l
+         && gCell rewound == gCell side && gMirrors rewound == gMirrors side
+  , check "two alignments: both eras can clear the mirror's launch cell" $
+      let l = twoAlignments
+          shove era = walk l DirLeft (at l era (8, 6) False)
+      in all (\era -> gCrates (shove era) == Set.singleton (6, 6)) [Past, Present]
+  , check "two alignments: fixed mirrors leave the level unsolvable" $
+      let l = twoAlignments { lvRules = (lvRules twoAlignments) { ruMoveMirrors = False } }
+      in srGoal (search l (\_ _ -> True) (startPlaying l)) == Nothing
   , check "mirror: a shut door stops the light, and one held open lets it through" $
       let shut = at oneWay Present (6, 4) True
           held = shut { gCrates = Set.fromList [(4, 7)] }
@@ -891,10 +933,20 @@ mirrorChecks =
 campaignChecks :: [Check]
 campaignChecks = case campaign of
   Left err -> [check ("campaign: parses: " ++ err) False]
-  Right levels -> concat
+  Right levels@(first : _) -> concat
     [ [ check "campaign: slack only ever shrinks" $
           let slacks = map (\l -> lvBudget l - lvPar l) levels
           in slacks == reverse (sort slacks)
+      , check "tutorial: the crate can be pushed into the recess in either era" $
+          let beside = walk first DirRight (startPlaying first)
+              past = applyAction first ShiftEra beside
+              canPush g =
+                let pushed = walk first DirRight g
+                    blockedByWall = walk first DirRight pushed
+                in gCell pushed == (4, 5) && gCrates pushed == Set.singleton (5, 5)
+                   && gRemaining pushed == gRemaining g - ruStepCost (lvRules first)
+                   && gCell blockedByWall == gCell pushed && gCrates blockedByWall == gCrates pushed
+          in gEra beside == Present && gEra past == Past && all canPush [beside, past]
       , check "run: Enter on a won level unlocks and starts the next, fresh" $
           let won = (runGame (startRun levels 0)) { gPhase = Won, gAttempt = 7 }
               next = stepRun levels enter (Run 0 0 0 InLevel won)
@@ -967,6 +1019,7 @@ campaignChecks = case campaign of
       ]
     , concatMap levelChecks levels
     ]
+  Right [] -> [check "campaign: contains a tutorial" False]
 
 -- | What every level must prove through the real rules.
 levelChecks :: Level -> [Check]
@@ -1011,7 +1064,7 @@ levelChecks l =
     route = maybe [] snd goal
     noDoors lv = lv { lvPlates = Set.fromList [(0, 0)] }
     noPushing g action = case action of
-      Go d -> stepCell d (gCell g) `Set.notMember` gCrates g || gEra g /= Past
+      Go d -> stepCell d (gCell g) `Set.notMember` gCrates g
       ShiftEra -> True
       SendEcho -> True
     play n = run l (routeInputs route) start { gRemaining = n }

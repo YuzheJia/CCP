@@ -93,8 +93,7 @@ data Feedback = Feedback
   , fbLeft :: !Int
   } deriving (Eq, Show)
 
--- | What actions cost, in seconds of a level's budget. Plain data, so a level (or
--- later a run's relics) can change the prices without touching the rules.
+-- | Per-level action settings. Costs are in seconds of the level's budget.
 data Rules = Rules
   { ruStepCost          :: !Int
   , ruShiftCost         :: !Int
@@ -103,13 +102,16 @@ data Rules = Rules
   , ruEchoLength        :: !Int  -- ^ footprints kept, counting the player's own spot;
                                  --   0 means this level has no echo at all
   , ruJumpCost          :: !Int  -- ^ stepping through a mirror, however far it carries you
+  , ruPushInPresent     :: !Bool
+  , ruMoveMirrors       :: !Bool
   } deriving (Eq, Show)
 
 -- | A switch is dearer than a step, so where and how often to switch is a real
 -- choice. Even prices keep a half refund in whole seconds.
 baseRules :: Rules
 baseRules = Rules { ruStepCost = 2, ruShiftCost = 6, ruUndoRefundPercent = 50
-                  , ruEchoCost = 4, ruEchoLength = 0, ruJumpCost = 4 }
+                  , ruEchoCost = 4, ruEchoLength = 0, ruJumpCost = 4
+                  , ruPushInPresent = False, ruMoveMirrors = False }
 
 -- | The levels that teach the echo: five footprints, the player's own included.
 echoRules :: Rules
@@ -131,7 +133,7 @@ data Level = Level
   , lvDoors    :: !(Set Cell)   -- ^ ...these, in the present; solid walls otherwise
   , lvMirrors  :: !(Map Cell (Era, Dir))
     -- ^ a mirror is solid in its own era, and its face looks out this way
-  , lvMovableMirrors :: !(Set Cell) -- ^ initial cells of mirrors that slide left/right
+  , lvMovableMirrors :: !(Set Cell) -- ^ initial cells of mirrors that may be pushed
   , lvBudget   :: !Int          -- ^ seconds available in this level
   , lvRules    :: !Rules
   , lvName     :: !String

@@ -41,67 +41,64 @@ presentRows =
   ]
 
 -- | The original station, kept as the tests' fixture: its map, route and dressing are
--- pinned there. The campaign opens with a shorter way through the same walls.
+-- pinned there.
 theLevel :: Either String Level
 theLevel = (\l -> l { lvName = "Harrow Point Light Station", lvDressed = True, lvPar = 108 })
   <$> parseLevel 128 pastRows presentRows
 
--- | The current three-room presentation. The former third room is now the second;
--- the finale is a much larger station explored through a following camera.
+-- | The remote branch's first two rooms, followed by the local large finale.
 campaign :: Either String [Level]
-campaign = sequence [optionAbove, threeReflections, grandStation]
+campaign = sequence [clearTheWay, twoAlignments, grandStation]
 
-optionAbove :: Either String Level
-optionAbove = withLesson "OPTION A: Space to the past, then push the crate into the pocket above."
-  <$> room baseRules "Option A - Pocket Above" 40 20
-      -- In the present the rusted crate seals the only route out of the spawn.
-      -- Shift on the lower stem, push it upward into the dead pocket in the past,
-      -- collect the cell on the left, then reach the lamp through the right stem.
+clearTheWay :: Either String Level
+clearTheWay = withLesson "Push the crate into its recess in either era, then use both timelines."
+  <$> room (baseRules { ruPushInPresent = True }) "Clear the Way" 36 20
+      -- Push the crate into its recess in either era. The passage above has
+      -- alternating gaps: cross the first in the present and the second in
+      -- the past, where the power cell waits below the lighthouse landing.
       [ "#############"
       , "#############"
       , "#########.###"
-      , "#####.###.###"
-      , "##B..C.....##"
-      , "#####.#######"
-      , "#####.#######"
+      , "#########B###"
+      , "####..#...###"
+      , "##..C.#######"
+      , "#############"
       , "#############"
       , "#############"
       ]
       [ "#############"
       , "#############"
-      , "#########G###"
-      , "#####.###.###"
-      , "##.........##"
-      , "#####.#######"
-      , "#####S#######"
+      , "#######G..###"
+      , "#########.###"
+      , "####....#.###"
+      , "##S...#######"
+      , "#############"
       , "#############"
       , "#############"
       ]
 
-threeReflections :: Either String Level
-threeReflections = withLesson "Three mirrors, three crates. Clear the last beam before entering the cell room."
-  <$> room baseRules "Level 2 - Three Reflections" 60 36
-      -- The third crate blocks the final mirror and also the only standing place
-      -- for pushing the entrance mirror. Move it into the upper pocket first.
-      -- Two more crates then block the entrance beam at different distances.
+twoAlignments :: Either String Level
+twoAlignments = withLesson "Clear the launch cell, then reposition the same mirror for two jumps."
+  <$> room (baseRules { ruPushInPresent = True, ruMoveMirrors = True }) "Two Alignments" 80 16
+      -- The lowercase mirror is movable under the local per-mirror rule.
       [ "#############"
       , "#############"
-      , "#########.B.#"
-      , "#####.###^###"
-      , "####..d.....#"
-      , "##.#>C....C.#"
-      , "###.....##C.#"
-      , "##########.##"
+      , "#######B#.###"
+      , "####..#######"
+      , "####.d....###"
+      , "####......###"
+      , "######.C..###"
+      , "#############"
       , "#############"
       ]
       [ "#############"
       , "#############"
-      , "##G######...#"
-      , "##.##.#######"
-      , "##.#........#"
-      , "##.#........#"
-      , "###.S...##..#"
-      , "##########.##"
+      , "###..>..#G###"
+      , "###.#########"
+      , "###.......###"
+      , "####......###"
+      , "######...S###"
+      , "#############"
       , "#############"
       ]
 
@@ -400,7 +397,15 @@ extraLevels = sequence $ firstLight : echoLevels ++
 -- | A level with its rules, name and par. Its budget is the par plus the slack.
 room :: Rules -> String -> Int -> Int -> [String] -> [String] -> Either String Level
 room rules name par slack past present =
-  (\l -> l { lvName = name, lvPar = par, lvRules = rules }) <$> parseLevel (par + slack) past present
+  withRules <$> parseLevel (par + slack) past present
+  where
+    withRules l = l { lvName = name, lvPar = par, lvRules = rules
+                    , lvPast = floorUnderMirrors l Past (lvPast l)
+                    , lvPresent = floorUnderMirrors l Present (lvPresent l) }
+    floorUnderMirrors l era floorCells
+      = floorCells `Set.union` Set.filter belongsToEra (lvMovableMirrors l)
+      where
+        belongsToEra c = maybe False ((== era) . fst) (Map.lookup c (lvMirrors l))
 
 walkable :: Level -> Era -> Cell -> Bool
 walkable level era cell = cell `Set.member` cells
@@ -490,7 +495,7 @@ parseLevel budget past present = do
       besideDoors = [ p | p <- Set.toList plates, d <- [minBound .. maxBound]
                         , stepCell d p `Set.member` doors ]
       leaks = filter onBorder (Set.toList (open pastMarks) ++ Set.toList (open presentMarks)
-                               ++ Set.toList pits ++ Set.toList doors)
+                               ++ Set.toList pits ++ Set.toList doors ++ Map.keys mirrors)
   if spawn `Set.member` crates
     then Left ("a crate stands on the spawn at " ++ show spawn)
   else if not (crates `Set.isSubsetOf` open presentMarks)

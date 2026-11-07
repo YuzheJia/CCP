@@ -121,19 +121,15 @@ tower = Pictures $
 labels :: Picture
 labels = Pictures
   [ Color (hex 0xF7DDB2) (Translate (-600) 356 (textL 15 "PAST"))
-  , Color (hex 0xF7DDB2) (Translate (-600) 336 (textL 11 "The light kept"))
   , Color (hex 0xA9B9BF) (Translate 600 356 (textR 15 "PRESENT"))
-  , Color (hex 0xA9B9BF) (Translate 600 336 (textR 11 "The light lost"))
     -- Title.
   , Translate 4 (-4) (Pictures
-      [ Color (hexA 0x000000 0.45) (Translate (-74) wordY (ws 68 8.6 "BORROWED"))
-      , Color (hexA 0x000000 0.6) (Translate 74 wordY (wl 68 8.6 "LIGHT")) ])
-  , Color (hex 0xFFF3D6) (Translate (-74) wordY (ws 68 8.6 "BORROWED"))
-  , Color (hex 0xE8F0F2) (Translate 74 wordY (wl 68 8.6 "LIGHT"))
+      [Color (hex 0xFFF3D6) (Translate (-74) wordY (ws 68 8.6 "BORROWED"))
+      , Color (hex 0xE8F0F2) (Translate 204 wordY (wl 68 8.6 "LIGHT"))])
+
     -- Premise and controls, on the water.
-  , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Retrieve a power cell from the past"))
-  , Color (hex 0xF2E6D0) (Translate 0 (-258) (textC 14 "and bring it back to illuminate a lighthouse in the present."))
-  , Color (hex 0xFFE2A8) (Translate 0 (-284) (textC 14 "Every action spends time. Standing still spends none."))
+  , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Borrow a power cell from the past to light the present"))
+  , Color (hex 0xFFE2A8) (Translate 0 (-258) (textC 14 "Every action spends time."))
   , controlRow
   ]
   where
@@ -142,7 +138,7 @@ labels = Pictures
     wl = weighted
 
 controlRow :: Picture
-controlRow = Translate 0 (-324) (Pictures
+controlRow = Translate 0 (-300) (Pictures
   [ item (-440) "WASD / ARROWS" "Move"
   , item (-180) "SPACE" "Shift era"
   , item 18 "Z" "Undo"
@@ -184,7 +180,7 @@ titleScreen clock = Pictures
       ]
     wrapTo size v = v - size * fromIntegral (floor (v / size) :: Int)
     glowK = 0.72 + 0.28 * sin (clock * 0.07)
-    prompt = Translate 0 (-366) (Pictures
+    prompt = Translate 0 (-350) (Pictures
       [ Color (hexA 0x000000 0.45) (rectC 300 42 `shift` 6)
       , Color (fade glowK (hex 0xFFE2A8)) (Translate 0 0 (textC 19 "Press Enter to begin"))
       ])
