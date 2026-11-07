@@ -17,11 +17,15 @@ module Station
   , vignette
   ) where
 
+import Data.List (sortOn)
+import qualified Data.Map.Strict as Map
 import Draw
 import Font
 import Game.Level
 import Game.Types
 import Graphics.Gloss
+import Propaganda (flag, hammerSickle, hanziC, star)
+import qualified Propaganda
 import qualified Data.Set as Set
 
 -- Palettes ---------------------------------------------------------------------
@@ -31,14 +35,16 @@ data Pal = Pal
   , pShadow, pPipe, pPipeHi, pStencil :: Color }
 
 palette :: Era -> Pal
+-- The past is a propaganda poster: red floors, cream walls, gold. The present is the
+-- same building after the glory has expired.
 palette Past = Pal
-  { pFloorA = hex 0x5E3F2A, pFloorB = hex 0x553824, pGrout = hex 0x38231A
-  , pInlay = hex 0xB98C4A
-  , pCap = hex 0xC6A679, pCapHi = hex 0xE8D3A8, pCapLo = hex 0x9C7E58
-  , pFace = hex 0x8E4A2E, pFaceDark = hex 0x5C2C1C, pMortar = hex 0xB57F5C
-  , pShadow = hexA 0x170A05 0.42
+  { pFloorA = hex 0x8A1E1C, pFloorB = hex 0x801B19, pGrout = hex 0x4E0E0C
+  , pInlay = hex 0xD9A23A
+  , pCap = hex 0xE6D2A2, pCapHi = hex 0xF7ECCD, pCapLo = hex 0xB9A074
+  , pFace = hex 0xA8281F, pFaceDark = hex 0x6A1410, pMortar = hex 0xD0644A
+  , pShadow = hexA 0x2A0503 0.42
   , pPipe = hex 0xB5853A, pPipeHi = hex 0xF2D083
-  , pStencil = hexA 0xEBD3A3 0.28 }
+  , pStencil = hexA 0xF2C14E 0.3 }
 palette Present = Pal
   { pFloorA = hex 0x2A373E, pFloorB = hex 0x253137, pGrout = hex 0x151D22
   , pInlay = hex 0x4E5D60
@@ -150,14 +156,10 @@ floorTile level era (x, y) = Pictures $
     p = palette era
     base = if even (x + y) then pFloorA p else pFloorB p
     n s = rnd x y s
-    -- The same inlay in both eras: a diamond at each tile's heart. The sea has
-    -- taken some of them in the present.
+    -- A gold star at each tile's heart in the past. In the present the floor has
+    -- been relaid with plain diamonds, and the sea has taken some of those.
     inlay
-      | era == Past =
-          [ Color (fade 0.55 (pInlay p)) (rot 45 (rectC 15 15))
-          , Color base (rot 45 (rectC 10 10))
-          , Color (pInlay p) (rot 45 (rectC 4.5 4.5))
-          ]
+      | era == Past = [Color (fade 0.75 (pInlay p)) (star 9)]
       | n 1 < 0.28 = [Color (fade 0.5 (pGrout p)) (rot 45 (rectC 15 15))]
       | otherwise =
           [ Color (fade 0.55 (pInlay p)) (rot 45 (rectC 15 15))
@@ -189,8 +191,16 @@ floorTile level era (x, y) = Pictures $
 
 floorDressing :: Level -> Era -> Cell -> Picture
 floorDressing level era cell@(x, y) = Pictures $
-  (if lvDressed level then carpet ++ water ++ stencil else []) ++ sand ++ moss ++ landmark
+  (if lvDressed level then carpet ++ water ++ stencil else []) ++ sand ++ moss ++ litter ++ landmark
   where
+    -- Visitors' leavings in the present: crisp packets and cans, always flat.
+    litter
+      | era /= Present || not (null landmark) = []
+      | n 400 < 0.12 = [ Translate (-20 + 40 * n 402) (-20 + 40 * n 403) (rot (360 * n 404) (Pictures
+          [ Color (hexA 0xC8102E 0.85) (rectC 11 7), Color (hexA 0xF2C200 0.85) (rectC 4 3) ])) ]
+      | n 401 < 0.07 = [ Translate (-20 + 40 * n 405) (-20 + 40 * n 406) (rot (360 * n 407) (Pictures
+          [ Color (hexA 0x9AA6AB 0.8) (rectC 10 5), Color (hexA 0x2E8B57 0.8) (rectC 4 5) ])) ]
+      | otherwise = []
     p = palette era
     n s = rnd x y s
     -- A runner down the middle hall. In the present it has rotted to strips.
@@ -264,14 +274,14 @@ channel era = case era of
     , Color (hex 0x6B4630) (rect (-2) 12 4 16)
     ]
 
--- | The ring a tower will stand on. Past: an ordinary, polished floor inlay.
+-- | The ring a tower will stand on. Past: the Party's emblem, set in the floor
+-- where the light will one day be brought back to.
 lampFooting :: Picture
-lampFooting = Translate 0 (-6) $ Pictures
-  [ Color (hexA 0x2A170C 0.5) (ellipse 28 30 21)
-  , Color (hex 0xC89C50) (ring 28 28 2 0.7)
-  , Color (hexA 0xC89C50 0.6) (ring 24 19 1.2 0.7)
-  , Color (hexA 0xF0DDB4 0.65) (Pictures [tri (-4, 0) (4, 0) (0, 16), tri (-4, 0) (4, 0) (0, -16)
-                                         , tri (0, -3) (0, 3) (-20, 0), tri (0, -3) (0, 3) (20, 0)])
+lampFooting = Translate 0 (-4) $ Pictures
+  [ Color (hexA 0x2A0503 0.5) (Translate 2 (-3) (ngon 28 27))
+  , Color (hex 0xE3B341) (ngon 28 27)
+  , Color (hex 0xC8161D) (ngon 28 23)
+  , Color (hex 0xF2C14E) (hammerSickle 32)
   ]
 
 -- | The lighthouse in the present: same footing, tapered banded tower, dead lamp.
@@ -332,8 +342,11 @@ faceH :: Float
 faceH = 22
 
 wall :: Level -> Era -> Cell -> Picture
-wall level era (x, y) = Pictures (body ++ detail ++ (if lvDressed level then conduit else []))
+wall level era (x, y) = Pictures (body ++ detail ++ (if lvDressed level then conduit else []) ++ posters)
   where
+    posters =
+      maybe [] (\d -> [decorArt era (x, y) d]) (Map.lookup (x, y) (decorPlan level)) ++
+      [ lanterns era (x, y) | hasFace, walkable level era (x, y + 1) ]
     p = palette era
     n s = rnd x y s
     hasFace = not (solid level era x (y + 1))
@@ -611,3 +624,197 @@ vignette era = Color shade (Pictures (concat
     shade = case era of
       Past -> hexA 0x1A0B04 0.022
       Present -> hexA 0x020608 0.04
+
+-- What hangs on the walls -----------------------------------------------------
+
+-- | What is painted or hung on a wall cell. Each piece fills one cell, so each
+-- cell still flips on its own when the era changes.
+--
+-- The two eras share where things hang and nothing else. In the past the station
+-- is a propaganda poster. In the present the same spots hold the signage of a shut
+-- British seaside attraction, with nothing left to say it was ever anything else:
+-- the shift is meant to catch the player out.
+data Decor
+  = Banner Line Char Int Int  -- ^ one cell of a slogan: its line, character, place, length
+  | FlagPole
+  | Emblem
+  | BigStar
+
+-- | The four slogans: across the top and bottom, and down the two sides.
+data Line = TopLine | BottomLine | LeftLine | RightLine
+  deriving Eq
+
+-- | Wall in both eras, and not a mirror or a door: the same stretch of wall then
+-- and now, so whatever hangs there in the past has something in its place today.
+steady :: Level -> Cell -> Bool
+steady level c@(x, y) =
+  solid level Past x y && solid level Present x y
+  && c `Map.notMember` lvMirrors level && c `Set.notMember` lvDoors level
+
+-- | Where the slogans go on this map. A slogan takes the longest unbroken stretch
+-- of wall in its row or column and is centred on it; if it does not fit, the next
+-- row out is tried, then a shorter slogan. The rest of the wall gets a scattering
+-- of flags, emblems and stars, never two side by side.
+decorPlan :: Level -> Map.Map Cell Decor
+decorPlan level = Map.union banners scattered
+  where
+    w = lvWidth level
+    h = lvHeight level
+    ok = steady level
+    rowCells r = [ (x, r) | x <- [0 .. w - 1] ]
+    colCells c = [ (c, y) | y <- [2 .. h - 3] ]
+    firstFit = foldr (\m acc -> maybe acc Just m) Nothing
+    place side slogans cellsInLine =
+      case sortOn (negate . length) (stretches cellsInLine) of
+        [] -> Nothing
+        (longest : _) -> firstFit
+          [ Just [ (c, Banner side ch i (length s)) | (i, (c, ch)) <- zip [0 ..] (zip (drop off longest) s) ]
+          | s <- slogans, let n = length s, n <= length longest, let off = (length longest - n) `div` 2 ]
+    stretches row = case dropWhile (not . ok) row of
+      [] -> []
+      rest -> let (run, after) = span ok rest in run : stretches after
+    tryLines side slogans lines' = maybe [] id (firstFit [ place side slogans l | l <- lines' ])
+    banners = Map.fromList (concat
+      [ tryLines TopLine ["光属于人民"] [rowCells 1, rowCells 0]
+      , tryLines BottomLine ["举报违规黑暗", "反对黑暗"] [rowCells (h - 2), rowCells (h - 1)]
+      , tryLines LeftLine ["灯塔万岁"] [colCells 1, colCells 0]
+      , tryLines RightLine ["超额发光"] [colCells (w - 2), colCells (w - 1)]
+      ])
+    near (ax, ay) (bx, by) = abs (ax - bx) <= 1 && abs (ay - by) <= 1
+    candidates =
+      [ (x, y) | y <- [0 .. h - 1], x <- [0 .. w - 1]
+      , ok (x, y), (x, y) `Map.notMember` banners, rnd x y 77 < 0.13 ]
+    scattered = foldl pick Map.empty candidates
+    pick m c
+      | any (near c) (Map.keys m ++ Map.keys banners) = m
+      | otherwise = Map.insert c (kindAt c) m
+    kindAt (x, y) = case (floor (rnd x y 78 * 3) :: Int) of
+      0 -> FlagPole
+      1 -> Emblem
+      _ -> BigStar
+
+-- | One cell's share of the wall, in the cell's own coordinates.
+decorArt :: Era -> Cell -> Decor -> Picture
+decorArt Past _ d = case d of
+  Banner side ch i len
+    | side `elem` [TopLine, BottomLine] -> Pictures
+        [ Color (hexA 0x2A0503 0.35) (rect (-half) (-19) cs 49)
+        , Color (hex 0xC8161D) (rect (-half) (-16) cs 46)
+        , Color (hex 0xE3B341) (Pictures [rect (-half) 27 cs 3, rect (-half) (-16) cs 3])
+        , Color (hex 0xE3B341) (Pictures ([rect (-half) (-16) 4 46 | i == 0] ++ [rect (half - 4) (-16) 4 46 | i == len - 1]))
+        , Color (hex 0xF2C14E) (Translate 0 7 (hanziC 34 [ch]))
+        ]
+    | otherwise -> Pictures
+        [ Color (hexA 0x2A0503 0.35) (rect (-20) (-half) 44 cs)
+        , Color (hex 0xC8161D) (rect (-22) (-half) 44 cs)
+        , Color (hex 0xE3B341) (Pictures [rect (-22) (-half) 3 cs, rect 19 (-half) 3 cs])
+        , Color (hex 0xE3B341) (Pictures ([rect (-26) (half - 6) 52 6 | i == 0] ++ [rect (-26) (-half) 52 6 | i == len - 1]))
+        , Color (hex 0xF2C14E) (hanziC 32 [ch])
+        ]
+  FlagPole -> Pictures
+    [ Color (hexA 0x2A0503 0.35) (Translate 4 (-30) (ellipse 12 12 4))
+    , Color (hex 0x5A3A1E) (rect (-23) (-30) 3.5 62)
+    , Color (hex 0xF2C14E) (Translate (-21.25) 33 (ngon 8 3.5))
+    , Translate (-19.5) 30 (flag 42)
+    ]
+  Emblem -> Pictures
+    [ Color (hexA 0x2A0503 0.4) (Translate 2 (-3) (ngon 28 27))
+    , Color (hex 0xE3B341) (ngon 28 27)
+    , Color (hex 0xC8161D) (ngon 28 23)
+    , Color (hex 0xF2C14E) (hammerSickle 32)
+    ]
+  BigStar -> Pictures
+    [ Color (hexA 0x2A0503 0.35) (Translate 2 (-3) (star 30))
+    , Color (hex 0xE3B341) (star 30)
+    , Color (hex 0xD7191F) (star 24)
+    ]
+decorArt Present (x, y) d = case d of
+  -- The tourist board's banner, a word to a cell, its far end torn and hanging.
+  Banner TopLine _ i len
+    | i == len - 1 -> Pictures
+        [ Color (hex 0x2A62A2) (Polygon [(-half, 18), (-half, -8), (-4, -8), (6, -30), (16, -24)])
+        , Color (hex 0x2A62A2) (Polygon [(-half, 18), (10, 18), (16, -24), (-half, -8)])
+        , Color (hexA 0xFFFFFF 0.85) (Translate (-8) 1 (textC 10 (bannerWord i)))
+        , nail (-half + 4)
+        ]
+    | otherwise -> Pictures
+        [ Color (hexA 0x020608 0.3) (rect (-half) (-11) cs 31)
+        , Color (hex 0x2E6DB4) (rect (-half) (-8) cs 26)
+        , Color (hexA 0xFFFFFF 0.6) (rect (-half) 15 cs 2)
+        , Color (hex 0xFFFFFF) (Translate 0 1 (textC 10 (bannerWord i)))
+        , if i == 0 then nail (-half + 5) else Blank
+        ]
+  -- Hazard tape and a warning sign along the bottom.
+  Banner BottomLine _ i _ -> Pictures $
+    [ Color (hex 0x1A1A1A) (rect (-half) (-12) cs 26)
+    , Color (hex 0xF2C200) (Pictures [ Polygon [(sx, -12), (sx + 9, -12), (sx + 19, 14), (sx + 10, 14)] | sx <- [-half, -half + 18 .. half - 19] ])
+    , Color (hex 0x1A1A1A) (Pictures [rect (-half) (-15) cs 3, rect (-half) 14 cs 3])
+    ] ++
+    [ Pictures [ Color (hex 0xF2C200) (rectC 64 20), Color (hex 0x1A1A1A) (Translate 0 (-5) (textC 10 (if even (i `div` 2) then "DANGER" else "KEEP OUT"))) ]
+    | even i ]
+  -- Down the sides: a CCTV sign, and graffiti.
+  Banner side _ i _ -> case (i + (if side == RightLine then 2 else 0)) `mod` 4 of
+    0 -> cctvSign
+    1 -> graffiti 0xD23C9A 16 "KEZ"
+    2 -> graffiti 0x8BE896 11 "NO WIFI"
+    _ -> graffiti 0xE8E8E8 11 "WOZ ERE"
+  -- Where a flag flew: a bare pole, and a gull on it.
+  FlagPole -> Pictures
+    [ Color (hexA 0x020608 0.35) (Translate 4 (-30) (ellipse 12 12 4))
+    , Color (hex 0x6E7C83) (rect (-23) (-30) 3.5 58)
+    , Translate (-20) 33 (Scale 1.4 1.4 gull)
+    ]
+  -- Where an emblem was: the estate agent's board.
+  Emblem -> forSale
+  -- Where a star was: the way to a gift shop that has also shut.
+  BigStar -> Pictures
+    [ Color (hexA 0x020608 0.4) (Translate 2 (-3) (rectC 68 30))
+    , Color (hex 0xE9E2D0) (rectC 68 30)
+    , Color (hex 0x1F3A68) (Translate 0 2 (textC 9 "GIFT SHOP"))
+    , Color (hex 0xB23A32) (Polygon [(-6, -8), (4, -8), (4, -11), (11, -6), (4, -1), (4, -4), (-6, -4)])
+    , Color (hexA 0xFFFFFF 0.7) (Translate 18 10 (ellipse 6 3 2))
+    ]
+  where
+    nail nx = Color (hex 0x3A464D) (Translate nx 13 (ngon 6 2))
+    bannerWord i = case i `mod` 5 of
+      0 -> "HARROW"
+      1 -> "POINT"
+      2 -> "LIGHT"
+      3 -> "HOUSE"
+      _ -> "TOURS"
+    graffiti c size str = Color (hexA c 0.75) (rot (-10 + 14 * rnd x y 97) (textC size str))
+    cctvSign = Pictures
+      [ Color (hexA 0x020608 0.4) (Translate 2 (-3) (rectC 34 42))
+      , Color (hex 0xF2C200) (rectC 34 42)
+      , Color (hex 0x1A1A1A) (Pictures [rect (-10) 6 16 9, Polygon [(6, 8), (12, 5), (12, 16), (6, 13)]])
+      , Color (hex 0x1A1A1A) (Translate 0 (-10) (textC 8 "CCTV"))
+      ]
+    forSale = Pictures
+      [ Color (hex 0x6B5A48) (Pictures [rect (-30) (-half + 4) 3 30, rect 27 (-half + 4) 3 30])
+      , Color (hexA 0x020608 0.4) (Translate 2 (-3) (rect (-37) (-10) 74 42))
+      , Color (hex 0xFFFFFF) (rect (-37) (-10) 74 42)
+      , Color (hex 0x1F3A68) (rect (-37) 20 74 12)
+      , Color (hex 0xFFFFFF) (Translate 0 23 (textC 6 "PRYCE ESTATES"))
+      , Color (hex 0x1F3A68) (Translate 0 2 (textC 10 "FOR SALE"))
+      , Color (hex 0x1F3A68) (Translate 0 (-6) (textC 5 "OFFERS INVITED"))
+      ]
+
+-- | A herring gull, standing, facing right, its feet at the origin.
+gull :: Picture
+gull = Pictures
+  [ Color (hex 0xF2B21E) (Pictures [rect (-2) 0 1 4, rect 1 0 1 4])
+  , Color (hex 0xF4F4F0) (Translate 0 7 (ellipse 12 8 4.5))
+  , Color (hex 0x9AA6AB) (Polygon [(-8, 7), (2, 9), (-3, 4)])
+  , Color (hex 0x2A2A2A) (Polygon [(-8, 7), (-12, 9), (-11, 5)])
+  , Color (hex 0xF4F4F0) (Translate 6 12 (ngon 10 3.4))
+  , Color (hex 0xF2B21E) (Polygon [(9, 12.5), (13, 11.5), (9, 10.5)])
+  , Color (hex 0x111111) (Translate 7 13 (ngon 6 0.7))
+  ]
+
+-- | Red lanterns hung on a wall's face, over a room: lit in the past, and in the
+-- present only the hooks are left.
+lanterns :: Era -> Cell -> Picture
+lanterns era (x, y)
+  | rnd x y 96 > 0.55 = Blank
+  | era == Past = Pictures [ Translate lx (-half + faceH + 2) (Scale 0.55 0.55 Propaganda.lantern) | lx <- [-20, 20] ]
+  | otherwise = Color (hex 0x2E383D) (Pictures [ Translate lx (-half + faceH - 2) (rect (-1) (-4) 2 6) | lx <- [-20, 20] ])

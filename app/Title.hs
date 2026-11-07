@@ -4,6 +4,7 @@ module Title (titleScreen) where
 import Draw
 import Font
 import Graphics.Gloss
+import Propaganda
 
 -- | Everything that holds still, drawn once.
 titleArt :: Picture
@@ -110,6 +111,11 @@ tower = Pictures $
   , Color (hex 0x5E6C72) (Pictures [rect 22 158 2.5 44, rect 11 158 1.6 26])
   , thin (hex 0x8A9AA0) [(3, 200), (10, 182), (6, 170), (16, 160)]
   , Color (hex 0xA8362E) (Polygon [(-30, 202), (0, 202), (0, 232)])
+    -- The flag over the past half; on the present half, only a bent pole.
+  , Color (hex 0x5A3A1E) (rect (-44) 158 3 96)
+  , Color (hex 0xF2C14E) (Translate (-42.5) 256 (ngon 8 3))
+  , Translate (-41) 252 (flag 34)
+  , Color (hex 0x3A464D) (Polygon [(40, 158), (43, 158), (49, 214), (46, 214)])
   , Color (hex 0x4B3A38) (Polygon [(0, 202), (28, 202), (0, 232)])
   , Color (hexA 0x0A1014 1) (tri (16, 202) (28, 202) (24, 214))
   ]
@@ -120,19 +126,24 @@ tower = Pictures $
 
 labels :: Picture
 labels = Pictures
-  [ Color (hex 0xF7DDB2) (Translate (-600) 356 (textL 15 "PAST"))
-  , Color (hex 0xF7DDB2) (Translate (-600) 336 (textL 11 "The light kept"))
+  [ Color (hex 0xF2C14E) (Translate (-600) 356 (textL 15 "PAST"))
+  , Color (hex 0xF2C14E) (Translate (-542) 352 (hanzi 18 "光荣的过去"))
+  , Color (hex 0xF7DDB2) (Translate (-600) 336 (textL 11 "The light belonged to the people"))
   , Color (hex 0xA9B9BF) (Translate 600 356 (textR 15 "PRESENT"))
-  , Color (hex 0xA9B9BF) (Translate 600 336 (textR 11 "The light lost"))
+  , Color (hex 0xA9B9BF) (Translate 600 336 (textR 11 "Closed for refurbishment"))
     -- Title.
   , Translate 4 (-4) (Pictures
       [ Color (hexA 0x000000 0.45) (Translate (-74) wordY (ws 68 8.6 "BORROWED"))
       , Color (hexA 0x000000 0.6) (Translate 74 wordY (wl 68 8.6 "LIGHT")) ])
   , Color (hex 0xFFF3D6) (Translate (-74) wordY (ws 68 8.6 "BORROWED"))
   , Color (hex 0xE8F0F2) (Translate 74 wordY (wl 68 8.6 "LIGHT"))
+    -- The Chinese title, under the past's half of the English one.
+  , Color (hexA 0x000000 0.5) (Translate (-271) (-17) (hanziC 30 "借来的光"))
+  , Color (hex 0xF2C14E) (Translate (-274) (-14) (hanziC 30 "借来的光"))
+  , Color (hex 0xF2C14E) (Pictures [ Translate x (-14) (star 9) | x <- [-384, -164] ])
     -- Premise and controls, on the water.
-  , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Retrieve a power cell from the past"))
-  , Color (hex 0xF2E6D0) (Translate 0 (-258) (textC 14 "and bring it back to illuminate a lighthouse in the present."))
+  , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Requisition the People's Battery from the glorious past"))
+  , Color (hex 0xF2E6D0) (Translate 0 (-258) (textC 14 "and bring it back to light the lighthouse in the present."))
   , Color (hex 0xFFE2A8) (Translate 0 (-284) (textC 14 "Every action spends time. Standing still spends none."))
   , controlRow
   ]

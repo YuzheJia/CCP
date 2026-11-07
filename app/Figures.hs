@@ -27,13 +27,15 @@ module Figures
 import Draw
 import Game.Types
 import Graphics.Gloss
+import Propaganda (star)
 import Station (pool, sconceCells)
 
 -- The keeper -------------------------------------------------------------------
 
 -- | The lighthouse keeper in a yellow oilskin. @phase@ runs 0..1 across a step.
-keeper :: Dir -> Float -> Picture
-keeper facing phase = Scale 1.08 1.08 (Pictures
+-- In the past they wear the red scarf of a model worker.
+keeper :: Era -> Dir -> Float -> Picture
+keeper era facing phase = Scale 1.08 1.08 (Pictures
   [ Color (hexA 0x000000 0.45) (Translate 0 (-20) (ellipse 16 17 7))
   , Translate 0 bob figure
   ])
@@ -46,11 +48,33 @@ keeper facing phase = Scale 1.08 1.08 (Pictures
     hood = hex 0xFFD93E
     boots = hex 0x2A1B12
     skin = hex 0xEBC8A0
-    figure = case facing of
+    figure = Pictures [body, if era == Past then scarf else Blank]
+    body = case facing of
       DirDown  -> front
       DirUp    -> back
       DirLeft  -> side
       DirRight -> Scale (-1) 1 side
+    scarfRed = hex 0xD7191F
+    redDark = hex 0x8E1014
+    -- Knotted at the throat; the tails hang in front, behind, or fly behind a walker.
+    scarf = case facing of
+      DirDown -> Pictures
+        [ Color redDark (Polygon [(-11.5, 5), (11.5, 5), (11, 10), (-11, 10)])
+        , Color scarfRed (Polygon [(-10.5, 6), (10.5, 6), (10, 9.5), (-10, 9.5)])
+        , Color redDark (Polygon [(1, 6), (7, 6), (6, -6), (2, -4)])
+        , Color scarfRed (Polygon [(2, 5.5), (6, 5.5), (5, -4.5), (2.8, -3)])
+        ]
+      DirUp -> Pictures
+        [ Color redDark (Polygon [(-11.5, 5), (11.5, 5), (11, 10), (-11, 10)])
+        , Color scarfRed (Polygon [(-10.5, 6), (10.5, 6), (10, 9.5), (-10, 9.5)])
+        ]
+      DirLeft -> sideScarf
+      DirRight -> Scale (-1) 1 sideScarf
+    sideScarf = Pictures
+      [ Color redDark (Polygon [(-11, 5), (11, 5), (10.5, 10), (-10.5, 10)])
+      , Color scarfRed (Polygon [(-10, 6), (10, 6), (9.5, 9.5), (-9.5, 9.5)])
+      , Color scarfRed (Polygon [(8, 8), (17, 6 + 2 * sin (phase * 2 * pi)), (16, 1 + 2 * sin (phase * 2 * pi)), (8, 4)])
+      ]
     legs a b = Pictures
       [ Color outline (Pictures [rect (-9) (-21 + a) 8 10, rect 1 (-21 + b) 8 10])
       , Color boots (Pictures [rect (-8) (-20 + a) 6 8, rect 2 (-20 + b) 6 8])
@@ -108,6 +132,7 @@ cellBody pulse = Pictures
   , Color (hex 0xF2D083) (rect (-8) 12 16 1.5)
   , Color (mix pulse (hex 0xFFD36E) goldCore) (rectC 12 18)
   , Color (hexA 0xFFFFFF 0.85) (rect (-4) (-7) 2.5 14)
+  , Color (hex 0xC8161D) (Translate 1.5 (-1) (star 5))
   , Color (hex 0x17100B) (Pictures [rect (-3) 14 6 2.5])
   ]
 

@@ -33,6 +33,8 @@ executable borrowed-light
                     Font
                     Hud
                     Platform
+                    Propaganda
+                    Hanzi
                     Render
                     Station
                     Title

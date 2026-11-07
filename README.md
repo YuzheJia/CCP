@@ -157,6 +157,21 @@ Each `stepGame` tick notes fresh presses, advances the current step or wave, end
 
 ## Art direction
 
+**The propaganda theme.** The past is the station's glorious era, painted like a 1960s Chinese propaganda poster, and the present is the same building after the glory has expired.
+
+- **Past:** red floors with gold star inlays, cream walls and red brick faces. Slogan banners run along the top and bottom walls, one character per wall cell: 光属于人民 ("the light belongs to the people") and 举报违规黑暗 ("report unauthorised darkness"). Couplets hang down the side walls: 灯塔万岁 ("long live the lighthouse") and 超额发光 ("overfulfil the glow quota"). Flags, hammer-and-sickle roundels and red stars are scattered over the rest of the wall, and lanterns hang over the rooms. The keeper wears a red scarf, the power cell carries a red star, and the side panel is a small sunburst poster.
+- **Present:** nothing Chinese at all, to catch the player out. The station is a shut-down British seaside attraction, the Harrow Point Lighthouse Experience: the same wall spots now hold its sagging blue banner, hazard tape with DANGER and KEEP OUT signs, CCTV signs and graffiti, bare flagpoles with gulls on them, FOR SALE boards and a GIFT SHOP sign. Crisp packets and cans litter the floor, the side panel is a tourist-board sign with a CLOSED sticker, and the win is a grand reopening.
+
+Decorations only go on wall that is solid in both eras, so every banner, flag and emblem in the past has its counterpart in the same spot in the present. [app/Station.hs](app/Station.hs) `decorPlan` places them on every map automatically. Emblems, flags and stars are drawn in [app/Propaganda.hs](app/Propaganda.hs).
+
+Chinese characters are 32 x 32 pixel bitmaps in the generated [app/Hanzi.hs](app/Hanzi.hs), because Gloss cannot draw system fonts. To use a new character, add it to `wanted` in [tools/hanzi.swift](tools/hanzi.swift) and to the list in `Propaganda.runs`, then regenerate on a Mac:
+
+```bash
+swift tools/hanzi.swift > app/Hanzi.hs
+```
+
+The original art direction below still describes the shapes, the shift and the dressed fixture level.
+
 **Harrow Point Light Station**, a coastal lighthouse facility seen from above, at two times.
 
 - **Past: kept.** Warm plaster, brick and polished brass, a red runner down the hall, lit wall lamps, dust rising in the light, calm teal water.

@@ -193,7 +193,7 @@ world scene level g fx = Pictures
     -- At the win the keeper steps aside, so the tower they relit can be seen.
     asideK = if gPhase g == Won then smooth (fromIntegral (fxEnd fx) / 26) else 0
     actor = at (fst playerAt + 42 * asideK, snd playerAt + 6 - 26 * asideK)
-               (Scale jumpK jumpK (keeper (if asideK > 0.5 then DirLeft else gFacing g)
+               (Scale jumpK jumpK (keeper (eraOf (gCell g)) (if asideK > 0.5 then DirLeft else gFacing g)
                        (if gPhase g == Won then (if asideK < 1 then asideK * 2 else 0) else stepPhase)))
 
     -- Mirrors stand in their own era, and their light only shows there.
@@ -423,6 +423,6 @@ overlays :: Scene -> Game -> Fx -> Picture
 overlays scene g fx = case gPhase g of
   Paused -> pausedScreen (gEra g) (smooth (fromIntegral (fxPaused fx) / 8))
   Won -> wonScreen (scHasNext scene) (smooth ((end - 70) / 30)) (gRemaining g)
-  Lost -> lostScreen (smooth (end / 24))
+  Lost -> lostScreen (gEra g) (smooth (end / 24))
   _ -> Blank
   where end = fromIntegral (fxEnd fx) :: Float

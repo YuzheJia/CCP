@@ -517,6 +517,6 @@ plateHeldText :: String
 plateHeldText = "The door is open. But you cannot stay here."
 
 victoryText, failureText :: String
-victoryText = "You brought the light back"
+victoryText = "The light is back on"
 failureText = "The light stayed out"
 
