@@ -90,8 +90,7 @@ data Feedback = Feedback
   , fbLeft :: !Int
   } deriving (Eq, Show)
 
--- | What actions cost, in seconds of a level's budget. Plain data, so a level (or
--- later a run's relics) can change the prices without touching the rules.
+-- | Per-level action settings. Costs are in seconds of the level's budget.
 data Rules = Rules
   { ruStepCost          :: !Int
   , ruShiftCost         :: !Int
@@ -100,13 +99,16 @@ data Rules = Rules
   , ruEchoLength        :: !Int  -- ^ footprints kept, counting the player's own spot;
                                  --   0 means this level has no echo at all
   , ruJumpCost          :: !Int  -- ^ stepping through a mirror, however far it carries you
+  , ruPushInPresent     :: !Bool
+  , ruMoveMirrors       :: !Bool
   } deriving (Eq, Show)
 
 -- | A switch is dearer than a step, so where and how often to switch is a real
 -- choice. Even prices keep a half refund in whole seconds.
 baseRules :: Rules
 baseRules = Rules { ruStepCost = 2, ruShiftCost = 6, ruUndoRefundPercent = 50
-                  , ruEchoCost = 4, ruEchoLength = 0, ruJumpCost = 4 }
+                  , ruEchoCost = 4, ruEchoLength = 0, ruJumpCost = 4
+                  , ruPushInPresent = False, ruMoveMirrors = False }
 
 -- | The levels that teach the echo: five footprints, the player's own included.
 echoRules :: Rules
@@ -144,6 +146,7 @@ data Snapshot = Snapshot
   , snCell    :: !Cell
   , snHasCell :: !Bool
   , snCrates  :: !(Set Cell)
+  , snMirrors :: !(Map Cell (Era, Dir))
   , snFilled  :: !(Set Cell)
   , snFacing  :: !Dir
   , snTrail   :: ![Spot]
@@ -158,12 +161,13 @@ data Game = Game
   , gHasCell      :: !Bool
   , gRemaining    :: !Int          -- ^ seconds of budget left; only actions spend it
   , gCrates       :: !(Set Cell)
+  , gMirrors      :: !(Map Cell (Era, Dir))
   , gFilled       :: !(Set Cell)   -- ^ pits a crate has been pushed into
   , gTrail        :: ![Spot]       -- ^ where the player has stood, newest first, their
                                    --   own spot included; an echo walks it back
   , gEcho         :: !(Maybe Spot) -- ^ where the echo stands, holding down any plate
   , gHistory      :: ![Snapshot]   -- ^ accepted actions, newest first, for undo
-  , gPushing      :: !(Maybe Cell) -- ^ where this step's crate is going; only for drawing
+  , gPushing      :: !(Maybe Cell) -- ^ where the object being pushed is going, for drawing
   , gAttempt      :: !Int          -- ^ counts starts and restarts
   , gMotion       :: !Motion
   , gFacing       :: !Dir          -- ^ which way the keeper looks; no rule reads it

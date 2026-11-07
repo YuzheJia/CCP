@@ -51,8 +51,8 @@ Three levels, sized for a three-minute demo, each adding one idea:
 
 | # | Level | Idea | Par | Budget |
 |---|---|---|---|---|
-| 1 | Through the Glass | Stand in a mirror's light and the key toward it steps through; how far depends on where you stand | 22 | 42 |
-| 2 | Rust in the Beam | A crate rusted into the present's light can be moved in the past | 34 | 50 |
+| 1 | Clear the Way | Push a crate into a recess in either era, then switch eras to cross two blocked passages | 36 | 56 |
+| 2 | Two Alignments | Clear a launch cell, then reposition the same mirror for two separate jumps | 80 | 96 |
 | 3 | One Way In | A mirror is a one-way door: open the way out, a door the crate holds, before stepping in | 42 | 54 |
 
 Earlier levels are kept in `extraLevels` in `src/Game/Level.hs`: First Light, the two echo levels, and the crate levels (First Push, The Plug, The Buried Lamp, The Held Door, The Bridge, The Wrong Way First). They are not played or checked, because a player standing on a plate can now change their pars.
@@ -68,6 +68,8 @@ A mirror stands in one era, solid there, and throws light out of its face in a s
 - **Price:** 4 seconds, however far. Z takes it back for half, like any action.
 
 The light, the reflection and the jump are all worked out from the board by one function, `mirrorAhead`, so what is drawn cannot disagree with what happens. Jumping is an ordinary move, so the solver needed no new action.
+
+In Two Alignments, press a direction toward the side or back of a mirror to slide it one cell. A push costs 2 seconds, keeps the mirror's facing, and moves its beam and reflection with it. A press from the front uses the normal mirror jump. Z restores the mirror's previous position.
 
 ### The echo (not in the campaign)
 
@@ -87,7 +89,7 @@ Corner ticks under the keeper's feet mean you can switch era right here. Holding
 
 ### Crates and pits
 
-A crate has one position, shared by both eras, so it only goes where both have room: it can't be pushed into a cell that is a wall in the present. In the past, walking into it pushes it one cell, and it can never be pulled. In the present it is rusted solid. You can't stand on its cell in either era, so a crate on a cell that is open in both closes that crossing, and moving it can open one. Holding a direction walks up to a crate and stops: a push needs a fresh press, so a walk can't shove one into a dead end.
+A crate has one position, shared by both eras, so it only goes where both have room. Pressing toward it pushes it one cell in the past. Clear the Way and Two Alignments also allow pushes in the present. A crate occupies its cell in both eras, so moving it can open a crossing. Holding a direction walks up to a crate and stops: a push needs a fresh press.
 
 A pit (`~` on the past map) blocks the past until a crate is pushed in. The crate is used up and the cell becomes past floor, even if the present is a wall there, which makes it a bridge. If the present is open too, it is also a new crossing.
 
@@ -262,8 +264,8 @@ search: 255 reachable states, 0 dead ends
 search: cheapest route costs 108 s, 42 actions, 6 of them shifts
 search: W W W W D Space D D S S S S D D Space D D W W W W D Space A S S S S Space A A A A W W W W Space A A A Space
 route:  intended route takes 373 ticks, ends StateKey {skEra = Present, skCell = (2,2), skHasCell = True, skPhase = Won, skCrates = fromList [], skFilled = fromList []}
-level:  Through the Glass: par 22, budget 42, 6 actions, 2 shifts, 15 states, 0 dead, 77% shared
-level:  Rust in the Beam: par 34, budget 50, 12 actions, 2 shifts, 76 states, 9 dead, 28% shared
+level:  Clear the Way: par 36, budget 56, 14 actions, 2 shifts, 47 states, 0 dead, 71% shared
+level:  Two Alignments: par 80, budget 96, 29 actions, 4 shifts, 13011 states, 10513 dead, 69% shared
 level:  One Way In: par 42, budget 54, 15 actions, 2 shifts, 46 states, 12 dead, 29% shared
-275 passed, 0 failed
+279 passed, 0 failed
 ```

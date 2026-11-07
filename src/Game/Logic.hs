@@ -67,6 +67,7 @@ initialGame level = Game
   , gHasCell      = False
   , gRemaining    = lvBudget level
   , gCrates       = lvCrates level
+  , gMirrors      = lvMirrors level
   , gFilled       = Set.empty
   , gTrail        = take (ruEchoLength (lvRules level)) [(Present, lvSpawn level)]
   , gEcho         = Nothing
@@ -212,7 +213,7 @@ charge cost g = g
   where
     before = Snapshot
       { snEra = gEra g, snCell = gCell g, snHasCell = gHasCell g
-      , snCrates = gCrates g, snFilled = gFilled g
+      , snCrates = gCrates g, snMirrors = gMirrors g, snFilled = gFilled g
       , snFacing = gFacing g, snTrail = gTrail g, snEcho = gEcho g, snCost = cost }
 
 -- | Note where the player now stands, keeping only as many footprints as the level
@@ -232,7 +233,7 @@ undo level g = case gHistory g of
         remaining = gRemaining g + snCost s * ruUndoRefundPercent rules `div` 100
     in (quiet g)
          { gEra = snEra s, gCell = snCell s, gHasCell = snHasCell s
-         , gCrates = snCrates s, gFilled = snFilled s, gFacing = snFacing s
+         , gCrates = snCrates s, gMirrors = snMirrors s, gFilled = snFilled s, gFacing = snFacing s
          , gTrail = snTrail s, gEcho = snEcho s
          , gRemaining = remaining, gHistory = rest
          , gMotion = Settled, gPushing = Nothing, gFeedback = Nothing, gBump = 0
@@ -268,7 +269,8 @@ tryShift level g
 -- filled so far, minus wherever the crates are. A crate has one position, so it
 -- blocks that cell in both eras.
 openCell :: Level -> Game -> Era -> Cell -> Bool
-openCell level g era cell = cell `Set.notMember` gCrates g && (onMap || filled || door)
+openCell level g era cell =
+  cell `Set.notMember` gCrates g && mirrorAt g era cell == Nothing && (onMap || filled || door)
   where
     onMap = walkable level era cell
     filled = era == Past && cell `Set.member` gFilled g
@@ -284,14 +286,24 @@ crossings level g =
 
 -- | The doors open while something rests on every plate. This is worked out from
 -- where things are, not stored, so undo, restart and the solver need nothing new, and
--- a door can never disagree with its plates. Nothing can leave a plate while the
--- player stands in a door: crates only move while the player is in the past, the
--- player is not on a plate while in a door, and the echo cannot be sent from one.
+-- a door can never disagree with its plates. The parser keeps plates away from
+-- doorways, and an echo cannot be sent from a doorway.
 doorsOpen :: Level -> Set.Set Cell -> Bool
 doorsOpen level held = not (Set.null plates) && plates `Set.isSubsetOf` held
   where plates = lvPlates level
 
 -- Mirrors ----------------------------------------------------------------------
+
+mirrorAt :: Game -> Era -> Cell -> Maybe Dir
+mirrorAt g era cell = case Map.lookup cell (gMirrors g) of
+  Just (e, face) | e == era -> Just face
+  _ -> Nothing
+
+opposite :: Dir -> Dir
+opposite DirUp    = DirDown
+opposite DirDown  = DirUp
+opposite DirLeft  = DirRight
+opposite DirRight = DirLeft
 
 -- | Whether light crosses this cell in this era: anywhere you could stand, and an
 -- open pit. Walls, crates, shut doors and mirrors stop it.
@@ -302,7 +314,7 @@ lightPasses level g era cell =
 -- | The light a mirror throws out of its face, up to whatever stops it. Only in the
 -- mirror's own era.
 beamCells :: Level -> Game -> Cell -> [Cell]
-beamCells level g mirror = case Map.lookup mirror (lvMirrors level) of
+beamCells level g mirror = case Map.lookup mirror (gMirrors g) of
   Just (era, face) -> takeWhile (lightPasses level g era) (drop 1 (iterate (stepCell face) mirror))
   Nothing -> []
 
@@ -322,16 +334,11 @@ mirrorAhead level g dir = look (1 :: Int) (stepCell dir (gCell g))
     era = gEra g
     look n c
       | lightPasses level g era c = look (n + 1) (stepCell dir c)
-      | otherwise = case Map.lookup c (lvMirrors level) of
-          Just (e, face) | e == era && face == opposite dir ->
+      | otherwise = case mirrorAt g era c of
+          Just face | face == opposite dir ->
             let target = iterate (stepCell dir) c !! n
             in Just (Jump c target (openCell level g era target))
           _ -> Nothing
-    opposite d = case d of
-      DirUp -> DirDown
-      DirDown -> DirUp
-      DirLeft -> DirRight
-      DirRight -> DirLeft
 
 -- | Where pressing @dir@ would jump the player to, if it would.
 jumpTarget :: Level -> Game -> Dir -> Maybe Cell
@@ -389,12 +396,13 @@ tryEcho level g
 -- board half done. Only a fresh press pushes: holding a key walks up to a crate and
 -- stops, so a walk can never shove one into a dead end. A crate exists in both eras,
 -- so it can only go where both have room: never into a wall in the present. A pit
--- is the exception, because the crate is used up there and nothing is left standing.
+-- in the past is the exception, because the crate is used up there.
 tryStep :: Level -> Bool -> Dir -> Game -> Game
 tryStep level isFresh dir g
   | gMotion g /= Settled = g
   | Just target <- jumpTarget level g dir = jumpTo target
   | to `Set.member` gCrates g = pushOrRefuse
+  | Just face <- mirrorAt g (gEra g) to = pushMirror face
   | not (openCell level g (gEra g) to) = refused
   | gRemaining g < cost = g { gFacing = dir }
   | otherwise = (walked (charge cost g)) { gFacing = dir, gMotion = Stepping to stepTicks }
@@ -412,13 +420,26 @@ tryStep level isFresh dir g
     to = stepCell dir (gCell g)
     beyond = stepCell dir to
     refused = g { gFacing = dir, gBump = if isFresh then bumpTicks else gBump g }
-    pit = beyond `Set.member` lvPits level && beyond `Set.notMember` gFilled g
+    pit = gEra g == Past && beyond `Set.member` lvPits level && beyond `Set.notMember` gFilled g
     freeInPast = openCell level g Past beyond
-    freeInPresent = walkable level Present beyond
+    freeInPresent = walkable level Present beyond && mirrorAt g Present beyond == Nothing
     moved = Set.delete to (gCrates g)
     hinted kind = refused { gFeedback = Just (Feedback kind hintFeedbackTicks) }
+    pushMirror face
+      | not (ruMoveMirrors (lvRules level)) || dir == opposite face = refused
+      | not (walkable level (gEra g) beyond) || not (openCell level g (gEra g) beyond) = refused
+      | Map.member beyond (gMirrors g) = refused
+      | not isFresh = hinted PushNeedsPress
+      | gRemaining g < cost = g { gFacing = dir }
+      | otherwise = (walked (charge cost g))
+          { gFacing = dir
+          , gMotion = Stepping to stepTicks
+          , gPushing = Just beyond
+          , gMirrors = Map.insert beyond (gEra g, face) (Map.delete to (gMirrors g))
+          }
     pushOrRefuse
-      | gEra g /= Past = if isFresh then hinted CrateRusted else refused
+      | gEra g == Present && not (ruPushInPresent (lvRules level)) =
+          if isFresh then hinted CrateRusted else refused
       | not isFresh = if pit || (freeInPast && freeInPresent) then hinted PushNeedsPress else refused
       | not pit && not freeInPast = refused
       | not pit && not freeInPresent =
@@ -488,7 +509,7 @@ pushBlockedDetail :: String
 pushBlockedDetail = "In the present, there is a wall here."
 
 pushAgainText :: String
-pushAgainText = "Press the key again to push the crate."
+pushAgainText = "Press the key again to push."
 
 rustedText :: String
 rustedText = "Rusted solid here. It only moves in the past."

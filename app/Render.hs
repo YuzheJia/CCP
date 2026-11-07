@@ -198,12 +198,12 @@ world scene level g fx = Pictures
 
     -- Mirrors stand in their own era, and their light only shows there.
     mirrors = Pictures
-      [ at (cellPos c) (mirrorArt e face clock)
-      | (c, (e, face)) <- Map.toList (lvMirrors level), eraOf c == e ]
+      [ at (objectPos c) (mirrorArt e face clock)
+      | (c, (e, face)) <- Map.toList (gMirrors g), eraOf c == e ]
     beams = Pictures
       [ beamLight e clock (edge c face) (if null cells then edge c face else edge (last cells) face)
       | wave == Nothing, gPhase g /= Menu
-      , (c, (e, face)) <- Map.toList (lvMirrors level), e == era
+      , (c, (e, face)) <- Map.toList (gMirrors g), e == era, Just c /= gPushing g
       , let cells = beamCells level g c ]
     edge c face = let (x, y) = cellPos c; (ux, uy) = screenDir face in (x + half * ux, y + half * uy)
 
@@ -245,18 +245,19 @@ world scene level g fx = Pictures
       Nothing -> era
       Just w -> eraOfCellDuring w era c
 
-    -- A crate being pushed moves with the keeper, from the cell they are stepping
-    -- onto to the cell it was sent to. In a pit, it finishes the journey before the
-    -- pit shows as filled.
-    pushedCrate = case (gPushing g, gMotion g) of
+    -- Pushed objects slide with the keeper. A crate that fills a pit is still
+    -- drawn during the slide, even though it has left the crate set.
+    pushedObject = case (gPushing g, gMotion g) of
       (Just c, Stepping to left) -> Just (c, to, smooth (1 - fromIntegral left / fromIntegral stepTicks))
       _ -> Nothing
+    objectPos c@(cx, cy) = case pushedObject of
+      Just (target, (x, y), e) | target == c ->
+        cellVec (lerp e (fromIntegral x) (fromIntegral cx)) (lerp e (fromIntegral y) (fromIntegral cy))
+      _ -> cellPos c
     crates = Pictures $
-      [ at (cellPos c) (crate (eraOf c))
-      | c <- Set.toList (gCrates g), Just c /= fmap (\(moving, _, _) -> moving) pushedCrate ] ++
-      [ at (cellVec (lerp e (fromIntegral fx0) (fromIntegral cx)) (lerp e (fromIntegral fy0) (fromIntegral cy)))
-           (crate (eraOf (cx, cy)))
-      | Just ((cx, cy), (fx0, fy0), e) <- [pushedCrate] ]
+      [ at (objectPos c) (crate (eraOf c)) | c <- Set.toList (gCrates g) ] ++
+      [ at (objectPos c) (crate (eraOf c))
+      | Just (c, _, _) <- [pushedObject], fillingNow c ]
     -- Only under the keeper's feet: "you can switch era right here".
     crossingMarks = Pictures
       [ at (cellPos c) (crossingMark (eraOf c)) | c <- markedCells ]
@@ -357,6 +358,8 @@ world scene level g fx = Pictures
             hintBand era (clamp01 (fromIntegral left / 30)) jumpAgainText
           _ -> case currentHint level g of
             Just h -> hintBand era 1 (hintText h)
+            Nothing | ruMoveMirrors (lvRules level) && gPhase g == Playing ->
+              hintBand era 1 "Push mirrors from the sides or back."
             Nothing -> Blank
 
     waveFront = case wave of

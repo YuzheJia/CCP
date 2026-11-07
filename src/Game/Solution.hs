@@ -98,13 +98,14 @@ data StateKey = StateKey
   , skHasCell :: !Bool
   , skPhase   :: !Phase
   , skCrates  :: !(Set.Set Cell)
+  , skMirrors :: !(Map.Map Cell (Era, Dir))
   , skFilled  :: !(Set.Set Cell)
   , skTrail   :: ![Spot]
   , skEcho    :: !(Maybe Spot)
   } deriving (Eq, Ord, Show)
 
 stateKey :: Game -> StateKey
-stateKey g = StateKey (gEra g) (gCell g) (gHasCell g) (gPhase g) (gCrates g) (gFilled g)
+stateKey g = StateKey (gEra g) (gCell g) (gHasCell g) (gPhase g) (gCrates g) (gMirrors g) (gFilled g)
                       (gTrail g) (gEcho g)
 
 data SearchResult = SearchResult
