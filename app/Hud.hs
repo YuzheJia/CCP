@@ -124,8 +124,11 @@ controls rules sk = Pictures
       , ("TAB", "Look  free")
       , ("R", "Restart  free")
       , ("P", "Pause")
+      , ("ESC", "Level hall")
       ]
-    gap = if length keys > 6 then 27 else 30
+    gap | length keys > 7 = 22
+        | length keys > 6 = 27
+        | otherwise = 30
     row y key what = Pictures
       [ Translate (panelX - 92) y (keyCap sk key)
       , Color (skInk sk) (Translate (panelX - 10) (y + 2) (textL 12 what))
@@ -283,7 +286,7 @@ pausedScreen era k = Pictures
   [ Color (hexA 0x05080A (0.55 * k)) (rect mapLeft mapBottom (mapRight - mapLeft) (mapTop - mapBottom))
   , wide 10 136 k (hexA 0x0B1014 0.93) (skRule (skin era))
   , Color (fade k (skInk (skin era))) (Translate centreOfMap 18 (weightedC 40 5 "PAUSED"))
-  , Color (fade k (skDim (skin era))) (Translate centreOfMap (-30) (textC 14 "P resume   *   R restart"))
+  , Color (fade k (skDim (skin era))) (Translate centreOfMap (-30) (textC 14 "P resume   *   R restart   *   ESC level hall"))
   ]
 
 -- | The plate over the map when a level is won, knowing whether another follows.
@@ -297,7 +300,7 @@ wonScreen hasNext k remaining = Pictures
   where
     next
       | hasNext = "Enter next level   *   R play again"
-      | otherwise = "Every lamp is lit   *   Enter returns to the title"
+      | otherwise = "Every lamp is lit   *   Enter returns to the level hall"
 
 lostScreen :: Float -> Picture
 lostScreen k = Pictures
@@ -305,7 +308,7 @@ lostScreen k = Pictures
   , wide 10 150 k (hexA 0x0B1014 0.95) (hex 0xFF8A5C)
   , Color (fade k (hex 0xE6EDEE)) (Translate centreOfMap 22 (weightedC 32 4 failureText))
   , Color (fade k (hex 0x9AA9AE)) (Translate centreOfMap (-10) (textC 13 "Out of time. The station stays dark."))
-  , Color (fade k (hex 0xE6EDEE)) (Translate centreOfMap (-40) (textC 13 "Z rewinds   *   Enter or R starts over"))
+  , Color (fade k (hex 0xE6EDEE)) (Translate centreOfMap (-40) (textC 13 "Z rewinds   *   Enter or R starts over   *   ESC level hall"))
   ]
 
 

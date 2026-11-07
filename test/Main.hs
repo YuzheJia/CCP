@@ -22,12 +22,13 @@ check = Check
 press :: Dir -> TickInput
 press d = noInput { tiDir = Just d }
 
-space, enter, restartKey, pauseKey, undoKey :: TickInput
+space, enter, restartKey, pauseKey, undoKey, lobbyKey :: TickInput
 space      = noInput { tiShift = True }
 enter      = noInput { tiEnter = True }
 restartKey = noInput { tiRestart = True }
 pauseKey   = noInput { tiPause = True }
 undoKey    = noInput { tiUndo = True }
+lobbyKey   = noInput { tiLobby = True }
 
 run :: Level -> [TickInput] -> Game -> Game
 run level inputs g = foldl' (flip (stepGame level)) g inputs
@@ -835,7 +836,7 @@ echoChecks fixture =
 -- Mirrors. ---------------------------------------------------------------------
 
 levelNamed :: String -> Level
-levelNamed name = head [l | Right ls <- [campaign], l <- ls, lvName l == name]
+levelNamed name = head [l | Right ls <- [campaign, extraLevels], l <- ls, lvName l == name]
 
 glass, twoAlignments, oneWay :: Level
 -- A past mirror facing down at (6,4), with the cell two spaces behind it.
@@ -946,11 +947,12 @@ campaignChecks = case campaign of
                    && gRemaining pushed == gRemaining g - ruStepCost (lvRules first)
                    && gCell blockedByWall == gCell pushed && gCrates blockedByWall == gCrates pushed
           in gEra beside == Present && gEra past == Past && all canPush [beside, past]
-      , check "run: Enter on a won level starts the next, fresh, with the key spent" $
+      , check "run: Enter on a won level unlocks and starts the next, fresh" $
           let won = (runGame (startRun levels 0)) { gPhase = Won, gAttempt = 7 }
-              next = stepRun levels enter (Run 0 won)
+              next = stepRun levels enter (Run 0 0 0 InLevel won)
               held = stepRun levels enter next
           in runIndex next == 1 && gPhase (runGame next) == Playing
+             && runMode next == InLevel && runCompleted next == 1 && runUnlocked next == 1
              && gRemaining (runGame next) == lvBudget (levels !! 1)
              && gCell (runGame next) == lvSpawn (levels !! 1)
              && gCrates (runGame next) == lvCrates (levels !! 1)
@@ -958,15 +960,15 @@ campaignChecks = case campaign of
              && runIndex held == 1 && gPhase (runGame held) == Playing
       , check "run: R on a won level plays it again" $
           let won = (runGame (startRun levels 0)) { gPhase = Won }
-              again = stepRun levels restartKey (Run 0 won)
+              again = stepRun levels restartKey (Run 0 0 0 InLevel won)
           in runIndex again == 0 && gPhase (runGame again) == Playing
-      , check "run: Enter after the last level returns to the title, and stays there if held" $
+      , check "run: Enter after the last level returns to the lobby" $
           let lastOne = length levels - 1
               won = (runGame (startRun levels lastOne)) { gPhase = Won }
-              back = stepRun levels enter (Run lastOne won)
+              back = stepRun levels enter (Run lastOne lastOne (length levels) InLevel won)
               held = stepRun levels enter back
-          in runIndex back == 0 && gPhase (runGame back) == Menu
-             && runIndex held == 0 && gPhase (runGame held) == Menu
+          in runIndex back == lastOne && runMode back == Lobby && gPhase (runGame back) == Menu
+             && runMode held == Lobby
       , check "dead ends: pushing the Plug's crate the obvious way is known to be lost" $
           let plug = head [l | Right extra <- [extraLevels], l <- extra, lvName l == "The Plug"]
               actions = [Go DirDown, Go DirRight, Go DirRight, Go DirRight, ShiftEra, Go DirRight]
@@ -978,15 +980,42 @@ campaignChecks = case campaign of
              && stateKey (startPlaying plug) `Set.notMember` dead
       , check "campaign: none of it uses the original station's hand-placed dressing" $
           not (any lvDressed levels)
+      , check "campaign: all three are crate-and-era alternatives with no later mechanics" $
+          length levels == 3
+          && not (Set.null (lvCrates (levels !! 0))) && Map.null (lvMirrors (levels !! 0))
+          && not (Set.null (lvCrates (levels !! 1))) && Map.null (lvMirrors (levels !! 1))
+          && not (Set.null (lvCrates (levels !! 2))) && Map.null (lvMirrors (levels !! 2))
+          && all Set.null (map lvPlates levels) && all Set.null (map lvDoors levels)
+          && all (not . null . lvLesson) levels
       , check "run: Enter while lost retries the same level" $
           let lost = (runGame (startRun levels 1)) { gPhase = Lost, gRemaining = 0 }
-              again = stepRun levels enter (Run 1 lost)
+              again = stepRun levels enter (Run 1 1 1 InLevel lost)
           in runIndex again == 1 && gPhase (runGame again) == Playing
              && gRemaining (runGame again) == lvBudget (levels !! 1)
-      , check "run: starting at a level shows its title screen with its budget" $
-          let r = startRun levels 2
-          in runIndex r == 2 && gPhase (runGame r) == Menu
+      , check "run: restored progress opens the title on the saved level" $
+          let r = startRunWithProgress levels 2 2
+          in runIndex r == 2 && runUnlocked r == 2 && runMode r == Title
+             && gPhase (runGame r) == Menu
              && gRemaining (runGame r) == lvBudget (levels !! 2)
+      , check "run: the lobby cannot select a locked level" $
+          let title = startRun levels 0
+              lobby = stepRun levels enter title
+              released = stepRun levels noInput lobby
+              r = stepRun levels (press DirDown) released
+          in runIndex r == 0 && runUnlocked r == 0 && runMode r == Lobby
+      , check "run: title, lobby and level form a reversible presentation flow" $
+          let title = startRunWithProgress levels 1 1
+              lobby = stepRun levels enter title
+              ready = stepRun levels noInput lobby
+              playing = stepRun levels enter ready
+              released = stepRun levels noInput playing
+              back = stepRun levels lobbyKey released
+              backReleased = stepRun levels noInput back
+              titleAgain = stepRun levels lobbyKey backReleased
+          in runIndex playing == 1 && runMode playing == InLevel
+             && gPhase (runGame playing) == Playing
+             && runIndex back == 1 && runMode back == Lobby
+             && gPhase (runGame back) == Menu && runMode titleAgain == Title
       ]
     , concatMap levelChecks levels
     ]
@@ -1336,6 +1365,8 @@ inputAdapter level =
   , check "input: Z undoes and Tab peeks" $
       tiUndo (tickInput (keyDown KUndo noKeys)) && tiPeek (tickInput (keyDown KPeek noKeys))
       && not (tiUndo (tickInput noKeys)) && not (tiPeek (tickInput noKeys))
+  , check "input: the level-hall key is carried into a tick" $
+      tiLobby (tickInput (keyDown KLobby noKeys)) && not (tiLobby (tickInput noKeys))
   ]
 
 -- Effects. ---------------------------------------------------------------------

@@ -49,6 +49,8 @@ module Game.Logic
   , echoInDoorwayText
   , plateHeldText
   , jumpAgainText
+  , mirrorPushText
+  , mirrorFrontText
   ) where
 
 import Control.Applicative ((<|>))
@@ -67,12 +69,14 @@ initialGame level = Game
   , gHasCell      = False
   , gRemaining    = lvBudget level
   , gCrates       = lvCrates level
-  , gMirrors      = lvMirrors level
   , gFilled       = Set.empty
+  , gMirrors      = lvMirrors level
+  , gMovableMirrors = lvMovableMirrors level
   , gTrail        = take (ruEchoLength (lvRules level)) [(Present, lvSpawn level)]
   , gEcho         = Nothing
   , gHistory      = []
   , gPushing      = Nothing
+  , gPushingMirror = Nothing
   , gAttempt      = 0
   , gMotion       = Settled
   , gFacing       = DirDown
@@ -161,7 +165,8 @@ advanceMotion level g = case gMotion g of
     | left <= 1 -> g { gMotion = Settled }
     | otherwise -> g { gMotion = Shifting (left - 1) }
   Stepping to left
-    | left <= 1 -> touchCell level g { gMotion = Settled, gCell = to, gPushing = Nothing }
+    | left <= 1 -> touchCell level g
+        { gMotion = Settled, gCell = to, gPushing = Nothing, gPushingMirror = Nothing }
     | otherwise -> g { gMotion = Stepping to (left - 1) }
 
 -- | The one place pickup and victory happen. Runs when a step lands and when an
@@ -207,13 +212,14 @@ charge cost g = g
   , gHistory = before : gHistory g
   , gFeedback = case gFeedback g of
       -- Advice about pushing has done its job once the player moves.
-      Just (Feedback kind _) | kind `elem` [PushNeedsPress, CrateRusted] -> Nothing
+      Just (Feedback kind _) | kind `elem` [PushNeedsPress, CrateRusted, MirrorNeedsPress, MirrorFrontBlocked] -> Nothing
       other -> other
   }
   where
     before = Snapshot
       { snEra = gEra g, snCell = gCell g, snHasCell = gHasCell g
-      , snCrates = gCrates g, snMirrors = gMirrors g, snFilled = gFilled g
+      , snCrates = gCrates g, snFilled = gFilled g
+      , snMirrors = gMirrors g, snMovableMirrors = gMovableMirrors g
       , snFacing = gFacing g, snTrail = gTrail g, snEcho = gEcho g, snCost = cost }
 
 -- | Note where the player now stands, keeping only as many footprints as the level
@@ -233,10 +239,12 @@ undo level g = case gHistory g of
         remaining = gRemaining g + snCost s * ruUndoRefundPercent rules `div` 100
     in (quiet g)
          { gEra = snEra s, gCell = snCell s, gHasCell = snHasCell s
-         , gCrates = snCrates s, gMirrors = snMirrors s, gFilled = snFilled s, gFacing = snFacing s
+         , gCrates = snCrates s, gFilled = snFilled s, gFacing = snFacing s
+         , gMirrors = snMirrors s, gMovableMirrors = snMovableMirrors s
          , gTrail = snTrail s, gEcho = snEcho s
          , gRemaining = remaining, gHistory = rest
-         , gMotion = Settled, gPushing = Nothing, gFeedback = Nothing, gBump = 0
+         , gMotion = Settled, gPushing = Nothing, gPushingMirror = Nothing
+         , gFeedback = Nothing, gBump = 0
          , gPhase = if remaining < ruStepCost rules then Lost else Playing
          }
 
@@ -401,8 +409,8 @@ tryStep :: Level -> Bool -> Dir -> Game -> Game
 tryStep level isFresh dir g
   | gMotion g /= Settled = g
   | Just target <- jumpTarget level g dir = jumpTo target
+  | to `Set.member` gMovableMirrors g = pushMirrorOrRefuse
   | to `Set.member` gCrates g = pushOrRefuse
-  | Just face <- mirrorAt g (gEra g) to = pushMirror face
   | not (openCell level g (gEra g) to) = refused
   | gRemaining g < cost = g { gFacing = dir }
   | otherwise = (walked (charge cost g)) { gFacing = dir, gMotion = Stepping to stepTicks }
@@ -424,18 +432,28 @@ tryStep level isFresh dir g
     freeInPast = openCell level g Past beyond
     freeInPresent = walkable level Present beyond && mirrorAt g Present beyond == Nothing
     moved = Set.delete to (gCrates g)
+    mirrorSpec = Map.lookup to (gMirrors g)
+    mirrorDestinationOpen = openCell level g (gEra g) beyond
+    movedMirrors = case mirrorSpec of
+      Just spec -> Map.insert beyond spec (Map.delete to (gMirrors g))
+      Nothing   -> gMirrors g
+    movedMirrorCells = Set.insert beyond (Set.delete to (gMovableMirrors g))
+    mirrorFront = case mirrorSpec of
+      Just (_, face) -> gCell g == stepCell face to
+      Nothing        -> False
     hinted kind = refused { gFeedback = Just (Feedback kind hintFeedbackTicks) }
-    pushMirror face
-      | not (ruMoveMirrors (lvRules level)) || dir == opposite face = refused
-      | not (walkable level (gEra g) beyond) || not (openCell level g (gEra g) beyond) = refused
-      | Map.member beyond (gMirrors g) = refused
-      | not isFresh = hinted PushNeedsPress
+    pushMirrorOrRefuse
+      | Just (mirrorEra, _) <- mirrorSpec, mirrorEra /= gEra g = refused
+      | mirrorFront = if isFresh then hinted MirrorFrontBlocked else refused
+      | not isFresh = if mirrorDestinationOpen then hinted MirrorNeedsPress else refused
+      | not mirrorDestinationOpen = refused
       | gRemaining g < cost = g { gFacing = dir }
       | otherwise = (walked (charge cost g))
           { gFacing = dir
           , gMotion = Stepping to stepTicks
-          , gPushing = Just beyond
-          , gMirrors = Map.insert beyond (gEra g, face) (Map.delete to (gMirrors g))
+          , gPushingMirror = Just beyond
+          , gMirrors = movedMirrors
+          , gMovableMirrors = movedMirrorCells
           }
     pushOrRefuse
       | gEra g == Present && not (ruPushInPresent (lvRules level)) =
@@ -510,6 +528,12 @@ pushBlockedDetail = "In the present, there is a wall here."
 
 pushAgainText :: String
 pushAgainText = "Press the key again to push."
+
+mirrorPushText :: String
+mirrorPushText = "Press again to push the mirror from this unlit side."
+
+mirrorFrontText :: String
+mirrorFrontText = "The light holds this side. Push the mirror from behind or beside it."
 
 rustedText :: String
 rustedText = "Rusted solid here. It only moves in the past."

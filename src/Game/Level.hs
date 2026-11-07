@@ -46,12 +46,13 @@ theLevel :: Either String Level
 theLevel = (\l -> l { lvName = "Harrow Point Light Station", lvDressed = True, lvPar = 108 })
   <$> parseLevel 128 pastRows presentRows
 
--- | Every level in play order, or the reason one is malformed. A level's budget is
--- its par, which a test re-derives with the solver, plus slack that shrinks as the
--- game goes on. Short on purpose: it is played in about three minutes.
+-- | The remote branch's first two rooms, followed by the local large finale.
 campaign :: Either String [Level]
-campaign = sequence
-  [ room (baseRules { ruPushInPresent = True }) "Clear the Way" 36 20
+campaign = sequence [clearTheWay, twoAlignments, grandStation]
+
+clearTheWay :: Either String Level
+clearTheWay = withLesson "Push the crate into its recess in either era, then use both timelines."
+  <$> room (baseRules { ruPushInPresent = True }) "Clear the Way" 36 20
       -- Push the crate into its recess in either era. The passage above has
       -- alternating gaps: cross the first in the present and the second in
       -- the past, where the power cell waits below the lighthouse landing.
@@ -75,15 +76,16 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
-  , room (baseRules { ruPushInPresent = True, ruMoveMirrors = True }) "Two Alignments" 80 16
-      -- Aim the past mirror at the battery alcove and clear its launch cell.
-      -- Return through the present mirror, then aim the first mirror again
-      -- to reach the lighthouse footing across a separate gap.
+
+twoAlignments :: Either String Level
+twoAlignments = withLesson "Clear the launch cell, then reposition the same mirror for two jumps."
+  <$> room (baseRules { ruPushInPresent = True, ruMoveMirrors = True }) "Two Alignments" 80 16
+      -- The lowercase mirror is movable under the local per-mirror rule.
       [ "#############"
       , "#############"
       , "#######B#.###"
       , "####..#######"
-      , "####.v....###"
+      , "####.d....###"
       , "####......###"
       , "######.C..###"
       , "#############"
@@ -99,31 +101,49 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
-  , room baseRules "One Way In" 42 12
-      -- The past mirror is the only way into the cell's room, and the room's only way
-      -- out is the present mirror, whose light a shut door stops. Step through first
-      -- and you are shut in: the crate has to reach the plate before you go.
-      [ "#############"
-      , "#############"
-      , "#############"
-      , "######.B#####"
-      , "######..#####"
-      , "######v######"
-      , "##.....######"
-      , "##.CP..######"
-      , "#############"
+
+-- | A three-wing station. Each wing hides the next part of the route outside the
+-- camera. In each wing a crate must leave a mirror's beam and hold a pressure
+-- plate; two movable mirrors must then be lowered into the cleared crossing lanes.
+-- Once all plates are held, the present-day doors form the long route home.
+grandStation :: Either String Level
+grandStation = withLesson "Clear each beam with its crate, hold every plate, then move or use the mirror."
+  <$> room baseRules "Level 3 - The Long Reflection" 224 76
+      [ "#########################"
+      , "#########################"
+      , "#####...###...#####..B###"
+      , "###.....#.......###..C..#"
+      , "###.#..l#####..l###^...##"
+      , "###...C.#.....C.#......##"
+      , "#####P..###.#..####..v..#"
+      , "##...##.###....####..C..#"
+      , "##...##.######P####...###"
+      , "##C.....#.......#..P#####"
+      , "##...##.###d#.######.####"
+      , "####....#.......#....####"
+      , "###.....###...###....####"
+      , "#########################"
+      , "#########################"
       ]
-      [ "#############"
-      , "#############"
-      , "#############"
-      , "#############"
-      , "#.G.>D.######"
-      , "#############"
-      , "###S.########"
-      , "###..########"
-      , "#############"
+      [ "#########################"
+      , "#########################"
+      , "##.G.####################"
+      , "###.#..#############..###"
+      , "###.#.###################"
+      , "###.#..#######..#########"
+      , "###.#.#######..####..####"
+      , "###.#########..####...###"
+      , "###.#########..####..####"
+      , "##..###############..####"
+      , "###.################.####"
+      , "#.......D.......D....####"
+      , "###S#####################"
+      , "#########################"
+      , "#########################"
       ]
-  ]
+
+withLesson :: String -> Level -> Level
+withLesson lesson level = level { lvLesson = lesson }
 
 -- | The echo levels, kept to build on.
 echoLevels :: [Either String Level]
@@ -223,6 +243,48 @@ extraLevels = sequence $ firstLight : echoLevels ++
       , "#############"
       , "#############"
       , "#############"
+      , "#############"
+      ]
+  , room baseRules "Rust in the Beam" 34 16
+      [ "#############"
+      , "#############"
+      , "#####.B.#####"
+      , "#####...#####"
+      , "#####C....###"
+      , "#####.#######"
+      , "#############"
+      , "#############"
+      , "#############"
+      ]
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "#...#########"
+      , "#.G.>....S###"
+      , "#...#.#######"
+      , "#############"
+      , "#############"
+      , "#############"
+      ]
+  , room baseRules "One Way In" 42 12
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "######.B#####"
+      , "######..#####"
+      , "######v######"
+      , "##.....######"
+      , "##.CP..######"
+      , "#############"
+      ]
+      [ "#############"
+      , "#############"
+      , "#############"
+      , "#############"
+      , "#.G.>D.######"
+      , "#############"
+      , "###S.########"
+      , "###..########"
       , "#############"
       ]
   , room baseRules "The Plug" 56 12
@@ -341,8 +403,9 @@ room rules name par slack past present =
                     , lvPast = floorUnderMirrors l Past (lvPast l)
                     , lvPresent = floorUnderMirrors l Present (lvPresent l) }
     floorUnderMirrors l era floorCells
-      | ruMoveMirrors rules = floorCells `Set.union` Map.keysSet (Map.filter ((== era) . fst) (lvMirrors l))
-      | otherwise = floorCells
+      = floorCells `Set.union` Set.filter belongsToEra (lvMovableMirrors l)
+      where
+        belongsToEra c = maybe False ((== era) . fst) (Map.lookup c (lvMirrors l))
 
 walkable :: Level -> Era -> Cell -> Bool
 walkable level era cell = cell `Set.member` cells
@@ -378,12 +441,20 @@ scanMap name width height allowed rows
 mirrorMarks :: String
 mirrorMarks = "^v<>"
 
+-- | Lowercase mirrors have the same faces, but may be pushed left or right.
+movableMirrorMarks :: String
+movableMirrorMarks = "udlr"
+
 mirrorFace :: Char -> Maybe Dir
 mirrorFace c = case c of
   '^' -> Just DirUp
+  'u' -> Just DirUp
   'v' -> Just DirDown
+  'd' -> Just DirDown
   '<' -> Just DirLeft
+  'l' -> Just DirLeft
   '>' -> Just DirRight
+  'r' -> Just DirRight
   _   -> Nothing
 
 exactlyOne :: String -> Char -> [(Char, Cell)] -> Either String Cell
@@ -405,14 +476,16 @@ parseLevel budget past present = do
     [w] | w > 0 -> Right w
     _           -> Left "past: rows are empty or of different widths"
   let height = length past
-  pastMarks    <- scanMap "past" width height ("#.BC~P" ++ mirrorMarks) past
-  presentMarks <- scanMap "present" width height ("#.GSD" ++ mirrorMarks) present
+  pastMarks    <- scanMap "past" width height ("#.BC~P" ++ mirrorMarks ++ movableMirrorMarks) past
+  presentMarks <- scanMap "present" width height ("#.GSD" ++ mirrorMarks ++ movableMirrorMarks) present
   powerCell <- exactlyOne "past" 'B' pastMarks
   goal      <- exactlyOne "present" 'G' presentMarks
   spawn     <- exactlyOne "present" 'S' presentMarks
   let open marks = Set.fromList [c | (m, c) <- marks, m `notElem` ("#~D" ++ mirrorMarks)]
       mirrorsIn era marks = [ (c, (era, face)) | (m, c) <- marks, Just face <- [mirrorFace m] ]
       mirrors = Map.fromList (mirrorsIn Past pastMarks ++ mirrorsIn Present presentMarks)
+      movableMirrors = Set.fromList
+        [c | (m, c) <- pastMarks ++ presentMarks, m `elem` movableMirrorMarks]
       marked mark marks = Set.fromList [c | (m, c) <- marks, m == mark]
       pits = marked '~' pastMarks
       crates = marked 'C' pastMarks
@@ -444,8 +517,8 @@ parseLevel budget past present = do
       , lvPast = open pastMarks, lvPresent = open presentMarks
       , lvSpawn = spawn, lvPowerCell = powerCell, lvGoal = goal
       , lvCrates = crates, lvPits = pits, lvPlates = plates, lvDoors = doors
-      , lvMirrors = mirrors
+      , lvMirrors = mirrors, lvMovableMirrors = movableMirrors
       , lvBudget = budget, lvRules = baseRules
-      , lvName = "", lvPar = budget, lvDressed = False
+      , lvName = "", lvLesson = "", lvPar = budget, lvDressed = False
       }
     else Left ("border is open at " ++ show leaks)

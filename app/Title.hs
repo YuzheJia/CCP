@@ -126,7 +126,7 @@ labels = Pictures
   , Translate 4 (-4) (Pictures
       [Color (hex 0xFFF3D6) (Translate (-74) wordY (ws 68 8.6 "BORROWED"))
       , Color (hex 0xE8F0F2) (Translate 204 wordY (wl 68 8.6 "LIGHT"))])
-   
+
     -- Premise and controls, on the water.
   , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Borrow a power cell from the past to light the present"))
   , Color (hex 0xFFE2A8) (Translate 0 (-258) (textC 14 "Every action spends time."))
