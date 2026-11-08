@@ -11,6 +11,7 @@ import Game.Level
 import Game.Logic
 import Game.Run
 import Game.Solution
+import Game.Sound
 import Game.Types
 import System.Exit (exitFailure)
 
@@ -22,12 +23,13 @@ check = Check
 press :: Dir -> TickInput
 press d = noInput { tiDir = Just d }
 
-space, enter, restartKey, pauseKey, undoKey :: TickInput
+space, enter, restartKey, pauseKey, undoKey, lobbyKey :: TickInput
 space      = noInput { tiShift = True }
 enter      = noInput { tiEnter = True }
 restartKey = noInput { tiRestart = True }
 pauseKey   = noInput { tiPause = True }
 undoKey    = noInput { tiUndo = True }
+lobbyKey   = noInput { tiLobby = True }
 
 run :: Level -> [TickInput] -> Game -> Game
 run level inputs g = foldl' (flip (stepGame level)) g inputs
@@ -83,8 +85,15 @@ report level = do
   case campaign of
     Left _ -> pure ()
     Right levels -> mapM_ reportLevel levels
+  reportDuo
   putStrLn ""
   where
+    reportLevel l | Just known <- knownRoute l =
+      putStrLn ("level:  " ++ lvName l ++ ": par " ++ show (lvPar l)
+                ++ ", budget " ++ show (lvBudget l) ++ ", "
+                ++ show (length known) ++ " actions, "
+                ++ show (length (filter (== ShiftEra) known)) ++ " shifts, too big to search here, "
+                ++ show (sharedPercent l) ++ "% shared")
     reportLevel l =
       let r = search l (\_ _ -> True) (startPlaying l)
           shifts = maybe 0 (length . filter (== ShiftEra) . snd) (srGoal r)
@@ -121,6 +130,11 @@ allChecks level = concat
   , determinism level
   , inputAdapter level
   , fxChecks level
+  , finaleChecks
+  , duoChecks
+  , cornerChecks
+  , twoKeepersChecks
+  , soundChecks level
   ]
 
 -- 1. ---------------------------------------------------------------------------
@@ -835,20 +849,41 @@ echoChecks fixture =
 -- Mirrors. ---------------------------------------------------------------------
 
 levelNamed :: String -> Level
-levelNamed name = head [l | Right ls <- [campaign], l <- ls, lvName l == name]
+levelNamed name = head [l | Right ls <- [campaign, extraLevels], l <- ls, lvName l == name]
 
--- | "Through the Glass": a past mirror at (6,4) facing down, the cell at (6,2).
-glass, rust, oneWay :: Level
-glass = levelNamed "Through the Glass"
-rust = levelNamed "Rust in the Beam"
+glass, twoAlignments, oneWay :: Level
+-- A past mirror facing down at (6,4), with the cell two spaces behind it.
+glass = either error id $ parseLevel 42
+  [ "########"
+  , "########"
+  , "######B#"
+  , "######.#"
+  , "######v#"
+  , "######.#"
+  , "######.#"
+  , "######.#"
+  , "########"
+  ]
+  [ "########"
+  , "########"
+  , "######G#"
+  , "########"
+  , "########"
+  , "########"
+  , "########"
+  , "######S#"
+  , "########"
+  ]
+twoAlignments = levelNamed "Two Alignments"
 oneWay = levelNamed "One Way In"
 
 mirrorChecks :: [Check]
 mirrorChecks =
   [ check "parser: a mirror belongs to the era it is drawn in, and is solid there" $
-      Map.lookup (6, 4) (lvMirrors glass) == Just (Past, DirDown)
+      Map.lookup (6, 4) (lvMirrors glass) == Just (Mirror Past DirDown False Nothing)
         && not (walkable glass Past (6, 4))
-        && Map.lookup (4, 4) (lvMirrors rust) == Just (Present, DirRight)
+        && Map.lookup (5, 2) (lvMirrors twoAlignments) == Just (Mirror Present DirRight True Nothing)
+        && not (openCell twoAlignments (startPlaying twoAlignments) Present (5, 2))
   , check "mirror: in its light and facing it, the key steps through, as far behind as in front" $
       let g0 = at glass Past (6, 6) False
           g = walk glass DirUp g0
@@ -864,12 +899,33 @@ mirrorChecks =
   , check "mirror: only the key that faces it steps through" $
       jumpTarget glass (at glass Past (6, 6) False) DirDown == Nothing
   , check "mirror: it only works in its own era" $
-      let open g = g { gCrates = Set.empty }
-      in jumpTarget rust (open (at rust Present (6, 4) False)) DirLeft == Just (2, 4)
-         && jumpTarget rust (open (at rust Past (6, 4) False)) DirLeft == Nothing
+      jumpTarget twoAlignments (at twoAlignments Present (7, 2) False) DirLeft == Just (3, 2)
+        && jumpTarget twoAlignments (at twoAlignments Past (7, 2) False) DirLeft == Nothing
   , check "mirror: a crate in the light stops it" $
-      let g = at rust Present (6, 4) False
-      in mirrorAhead rust g DirLeft == Nothing && gCell (walk rust DirLeft g) == (6, 4)
+      let l = twoAlignments
+          g = (at l Past (7, 6) False)
+                { gCrates = Set.singleton (7, 5)
+                , gMirrors = Map.insert (7, 4) (Mirror Past DirDown True Nothing) (Map.delete (5, 4) (lvMirrors l)) }
+      in beamCells l g (7, 4) == [] && mirrorAhead l g DirUp == Nothing
+  , check "mirror: side and rear pushes preserve the face, and undo restores the position" $
+      let l = twoAlignments
+          side = at l Past (4, 4) False
+          moved = walk l DirRight side
+          rear = walk l DirDown (at l Past (5, 3) False)
+          front = walk l DirUp (at l Past (5, 5) False)
+          rewound = run l [undoKey, noInput] moved
+      in gCell moved == (5, 4) && Map.lookup (6, 4) (gMirrors moved) == Just (Mirror Past DirDown True Nothing)
+         && Map.notMember (5, 4) (gMirrors moved) && gRemaining moved == gRemaining side - 2
+         && Map.lookup (5, 5) (gMirrors rear) == Just (Mirror Past DirDown True Nothing)
+         && gCell front == (5, 3) && gMirrors front == lvMirrors l
+         && gCell rewound == gCell side && gMirrors rewound == gMirrors side
+  , check "two alignments: the past clears the mirror's launch cell; the crate is rusted now" $
+      let l = twoAlignments
+          shove era = walk l DirLeft (at l era (8, 6) False)
+      in gCrates (shove Past) == Set.singleton (6, 6) && gCrates (shove Present) == lvCrates l
+  , check "two alignments: with its mirrors fixed, the level cannot be won" $
+      let l = twoAlignments { lvMirrors = Map.map (\m -> m { mMovable = False }) (lvMirrors twoAlignments) }
+      in srGoal (search l (\_ _ -> True) (startPlaying l)) == Nothing
   , check "mirror: a shut door stops the light, and one held open lets it through" $
       let shut = at oneWay Present (6, 4) True
           held = shut { gCrates = Set.fromList [(4, 7)] }
@@ -884,21 +940,35 @@ mirrorChecks =
       let g = foldl' (flip (applyAction oneWay)) (startPlaying oneWay)
                 [ShiftEra, Go DirRight, Go DirRight, Go DirRight, Go DirUp]
       in gCell g == (6, 4) && stateKey g `Set.member` deadStates oneWay
-  ]
+  ] ++ movableMirrorChecks
 
 -- The campaign. -----------------------------------------------------------------
 campaignChecks :: [Check]
 campaignChecks = case campaign of
   Left err -> [check ("campaign: parses: " ++ err) False]
-  Right levels -> concat
-    [ [ check "campaign: slack only ever shrinks" $
-          let slacks = map (\l -> lvBudget l - lvPar l) levels
-          in slacks == reverse (sort slacks)
-      , check "run: Enter on a won level starts the next, fresh, with the key spent" $
+  Right levels@(first : _) -> concat
+    [ [ check "campaign: slack only ever shrinks, as a share of par" $
+          -- A big level needs more seconds of slack than a small one, but less of its
+          -- par. Compared by cross-multiplying, so no fractions are rounded.
+          let tighter a b = (lvBudget b - lvPar b) * lvPar a <= (lvBudget a - lvPar a) * lvPar b
+          in and (zipWith tighter levels (drop 1 levels))
+      , check "tutorial: the crate goes into its recess in the past, and is rusted in the present" $
+          let beside = walk first DirRight (startPlaying first)
+              past = applyAction first ShiftEra beside
+              pushed = walk first DirRight past
+              blockedByWall = walk first DirRight pushed
+              rusted = walk first DirRight beside
+          in gEra beside == Present && gEra past == Past
+             && gCell pushed == (4, 5) && gCrates pushed == Set.singleton (5, 5)
+             && gRemaining pushed == gRemaining past - ruStepCost (lvRules first)
+             && gCell blockedByWall == gCell pushed && gCrates blockedByWall == gCrates pushed
+             && gCrates rusted == lvCrates first && gCell rusted == gCell beside
+      , check "run: Enter on a won level unlocks and starts the next, fresh" $
           let won = (runGame (startRun levels 0)) { gPhase = Won, gAttempt = 7 }
-              next = stepRun levels enter (Run 0 won)
+              next = stepRun levels enter (Run 0 0 0 InLevel won)
               held = stepRun levels enter next
           in runIndex next == 1 && gPhase (runGame next) == Playing
+             && runMode next == InLevel && runCompleted next == 1 && runUnlocked next == 1
              && gRemaining (runGame next) == lvBudget (levels !! 1)
              && gCell (runGame next) == lvSpawn (levels !! 1)
              && gCrates (runGame next) == lvCrates (levels !! 1)
@@ -906,15 +976,15 @@ campaignChecks = case campaign of
              && runIndex held == 1 && gPhase (runGame held) == Playing
       , check "run: R on a won level plays it again" $
           let won = (runGame (startRun levels 0)) { gPhase = Won }
-              again = stepRun levels restartKey (Run 0 won)
+              again = stepRun levels restartKey (Run 0 0 0 InLevel won)
           in runIndex again == 0 && gPhase (runGame again) == Playing
-      , check "run: Enter after the last level returns to the title, and stays there if held" $
+      , check "run: Enter after the last level returns to the lobby" $
           let lastOne = length levels - 1
               won = (runGame (startRun levels lastOne)) { gPhase = Won }
-              back = stepRun levels enter (Run lastOne won)
+              back = stepRun levels enter (Run lastOne lastOne (length levels) InLevel won)
               held = stepRun levels enter back
-          in runIndex back == 0 && gPhase (runGame back) == Menu
-             && runIndex held == 0 && gPhase (runGame held) == Menu
+          in runIndex back == lastOne && runMode back == Lobby && gPhase (runGame back) == Menu
+             && runMode held == Lobby
       , check "dead ends: pushing the Plug's crate the obvious way is known to be lost" $
           let plug = head [l | Right extra <- [extraLevels], l <- extra, lvName l == "The Plug"]
               actions = [Go DirDown, Go DirRight, Go DirRight, Go DirRight, ShiftEra, Go DirRight]
@@ -926,21 +996,58 @@ campaignChecks = case campaign of
              && stateKey (startPlaying plug) `Set.notMember` dead
       , check "campaign: none of it uses the original station's hand-placed dressing" $
           not (any lvDressed levels)
+      , check "campaign: every level states the rule it introduces" $
+          all (not . null . lvLesson) levels
       , check "run: Enter while lost retries the same level" $
           let lost = (runGame (startRun levels 1)) { gPhase = Lost, gRemaining = 0 }
-              again = stepRun levels enter (Run 1 lost)
+              again = stepRun levels enter (Run 1 1 1 InLevel lost)
           in runIndex again == 1 && gPhase (runGame again) == Playing
              && gRemaining (runGame again) == lvBudget (levels !! 1)
-      , check "run: starting at a level shows its title screen with its budget" $
-          let r = startRun levels 2
-          in runIndex r == 2 && gPhase (runGame r) == Menu
+      , check "run: restored progress opens the title on the saved level" $
+          let r = startRunWithProgress levels 2 2
+          in runIndex r == 2 && runUnlocked r == 2 && runMode r == Title
+             && gPhase (runGame r) == Menu
              && gRemaining (runGame r) == lvBudget (levels !! 2)
+      , check "run: the lobby cannot select a locked level" $
+          let title = startRun levels 0
+              lobby = stepRun levels enter title
+              released = stepRun levels noInput lobby
+              r = stepRun levels (press DirDown) released
+          in runIndex r == 0 && runUnlocked r == 0 && runMode r == Lobby
+      , check "run: title, lobby and level form a reversible presentation flow" $
+          let title = startRunWithProgress levels 1 1
+              lobby = stepRun levels enter title
+              ready = stepRun levels noInput lobby
+              playing = stepRun levels enter ready
+              released = stepRun levels noInput playing
+              back = stepRun levels lobbyKey released
+              backReleased = stepRun levels noInput back
+              titleAgain = stepRun levels lobbyKey backReleased
+          in runIndex playing == 1 && runMode playing == InLevel
+             && gPhase (runGame playing) == Playing
+             && runIndex back == 1 && runMode back == Lobby
+             && gPhase (runGame back) == Menu && runMode titleAgain == Title
       ]
     , concatMap levelChecks levels
     ]
+  Right [] -> [check "campaign: contains a tutorial" False]
 
 -- | What every level must prove through the real rules.
 levelChecks :: Level -> [Check]
+levelChecks l | Just known <- knownRoute l =
+  -- Too big to search on every run: its pinned route is replayed instead. The full
+  -- search found that route, and par, once.
+  let played n = run l (routeInputs known) (startPlaying l) { gRemaining = n }
+      named what = check ("level " ++ lvName l ++ ": " ++ what)
+  in [ named "it has slack to spare" $ lvBudget l > lvPar l
+     , named "its pinned route costs exactly par" $
+         let end = foldl' (flip (applyAction l)) (startPlaying l) known
+         in gPhase end == Won && lvBudget l - gRemaining end == lvPar l
+     , named "its pinned route wins, tick by tick, on exactly par" $
+         gPhase (played (lvPar l)) == Won && gRemaining (played (lvPar l)) == 0
+     , named "and cannot win with one step less" $
+         gPhase (played (lvPar l - 2)) /= Won
+     ]
 levelChecks l =
   [ named "the solver confirms its par" $ fmap fst goal == Just (lvPar l)
   , named "it has slack to spare" $ lvBudget l > lvPar l
@@ -954,9 +1061,13 @@ levelChecks l =
       not (Set.null (lvCrates l)) || ruEchoLength (lvRules l) > 0 || null (srDeadEnds result)
   , named "its crates matter: it cannot be won without pushing one, if it has any" $
       Set.null (lvCrates l) || srGoal (search l noPushing start) == Nothing
-  , named "its search stays small enough to run" $ Map.size (srStates result) <= 20000
+  -- A level of several rooms may reach more states, but its one-way gates keep them
+  -- a sum over rooms rather than a product.
+  , named "its search stays small enough to run" $
+      Map.size (srStates result) <= (if roomOf (lvWidth l - 1, lvHeight l - 1) == (0, 0) then 20000 else 250000)
+  -- A pit a crate has filled is past floor, so another crate may stand on it.
   , named "no crate is ever inside a wall, in either era" $
-      all (\k -> all (\c -> walkable l Past c && walkable l Present c) (skCrates k))
+      all (\k -> all (\c -> (walkable l Past c || c `Set.member` skFilled k) && walkable l Present c) (skCrates k))
         (Map.keys (srStates result))
   , named "nobody ever stands in a shut door" $ nobodyInShutDoor l
   , named "the winning route never passes through a state called dead" $
@@ -1283,6 +1394,8 @@ inputAdapter level =
   , check "input: Z undoes and Tab peeks" $
       tiUndo (tickInput (keyDown KUndo noKeys)) && tiPeek (tickInput (keyDown KPeek noKeys))
       && not (tiUndo (tickInput noKeys)) && not (tiPeek (tickInput noKeys))
+  , check "input: the level-hall key is carried into a tick" $
+      tiLobby (tickInput (keyDown KLobby noKeys)) && not (tiLobby (tickInput noKeys))
   ]
 
 -- Effects. ---------------------------------------------------------------------
@@ -1304,17 +1417,50 @@ fxChecks level =
       in fmap burstCell (fxBurst (stepFx g (run level [noInput] g) initialFx)) == Just (10, 2)
   , check "fx: pausing freezes effects but lets the start fade finish" $
       let g = run level [pauseKey] (at level Present (2, 6) False)
-          dirty = Fx 100 (Just (Wave 3 Past (1, 1))) Nothing 0 0 0 5 Nothing Nothing
+          dirty = Fx 100 (Just (Wave 3 Past (1, 1))) Nothing 0 0 0 5 Nothing Nothing (0, 0) Nothing [(0, 0)] 0
           fx = stepFx g g dirty
       in fxClock fx == 100 && fmap waveAge (fxWave fx) == Just 3 && fxLevelAge fx == 6
   , check "fx: restart clears every effect" $
       let g = at level Past (9, 2) True
           dirty = Fx 500 (Just (Wave 3 Past (1, 1))) (Just (Burst 3 (1, 1))) 50 9 9 9
                     (Just (CostFloat 3 (-2) (1, 1))) (Just (EchoWalk 2 [(Past, (1, 1)), (Past, (2, 1))]))
+                    (1, 0) (Just (RoomFade 3 (1, 0))) [(0, 0), (1, 0)] 0
       in stepFx g (run level [restartKey] g) dirty == initialFx
+  , check "fx: a restart keeps the board close in, and the first move closes in" $
+      let g = at level Past (9, 2) True
+          closeIn = initialFx { fxFocus = focusTicks }
+          restarted = stepFx g (run level [restartKey] g) closeIn
+          moved = stepFx g (walk level DirDown g) initialFx
+          idle = stepFx g g initialFx
+      in fxFocus restarted == focusTicks && fxFocus moved == 1 && fxFocus idle == 0
+  , check "rooms: a cell's room counts in whole screens of 13 by 9" $
+      map roomOf [(0, 0), (12, 8), (13, 8), (12, 9), (25, 17), (3, 9)]
+        == [(0, 0), (0, 0), (1, 0), (0, 1), (1, 1), (0, 1)]
+  , check "rooms: a one-room level never changes room or fades" $
+      let g = at level Present (2, 6) False
+          g' = run level [press DirUp, noInput, noInput] g
+          fxs = take 40 (iterate (stepFx g' g') (stepFx g g' initialFx))
+      in all (\f -> fxRoom f == (0, 0) && fxRoomFade f == Nothing) fxs
+  , check "rooms: stepping into the next room darkens, swaps halfway, and lightens" $
+      let g0 = at level Present (12, 4) False
+          g1 = g0 { gMotion = Stepping (13, 4) stepTicks }
+          f0 = stepFx g0 g1 initialFx
+          fxs = iterate (stepFx g1 g1) f0
+          halfway = roomFadeTicks `div` 2
+      in fxRoom f0 == (0, 0) && fmap rfRoom (fxRoomFade f0) == Just (1, 0)
+         && fxRoom (fxs !! (halfway - 2)) == (0, 0)
+         && fxRoom (fxs !! halfway) == (1, 0)
+         && roomFadeDark (fxs !! (halfway - 1)) > 0.8
+         && fxRoomFade (fxs !! roomFadeTicks) == Nothing
+         && fxVisited (fxs !! roomFadeTicks) == [(0, 0), (1, 0)]
+  , check "rooms: a restart starts on the spawn's room with nothing to fade" $
+      let g = (at level Present (14, 10) False) { gAttempt = 3 }
+          g' = (at level Present (2, 6) False) { gAttempt = 4 }
+          fx = stepFx g g' initialFx { fxRoom = (1, 1), fxVisited = [(0, 0), (1, 1)] }
+      in fxRoom fx == roomOf (2, 6) && fxRoomFade fx == Nothing && fxVisited fx == [roomOf (2, 6)]
   , check "fx: resuming from a pause is not mistaken for a restart" $
       let g = run level [pauseKey] (startPlaying level)
-          dirty = Fx 500 Nothing Nothing 0 0 3 9 Nothing Nothing
+          dirty = Fx 500 Nothing Nothing 0 0 3 9 Nothing Nothing (0, 0) Nothing [(0, 0)] 0
       in fxClock (stepFx g (run level [noInput, pauseKey] g) dirty) == 501
   , check "fx: undoing a pickup stops its burst" $
       let g = walk level DirRight (at level Past (9, 2) False)
@@ -1336,3 +1482,656 @@ fxChecks level =
       let g = walk level DirUp (at level Present (2, 6) False)
       in fmap cfAmount (fxCost (stepFx g (run level [undoKey] g) initialFx)) == Just 1
   ]
+
+-- | Open floor with a past mirror at (3,2) facing down and a present one at (5,3)
+-- facing up, both movable. A crate at (6,3), a pit at (3,4), and a past mirror set
+-- in the wall at (7,4), facing left.
+mirrorYard :: Level
+mirrorYard = case parseLevel 1000
+  [ "#########"
+  , "#B......#"
+  , "#..s....#"
+  , "#.....C.#"
+  , "#..~...<#"
+  , "#########"
+  ]
+  [ "#########"
+  , "#S......#"
+  , "#.......#"
+  , "#....n..#"
+  , "#.....G.#"
+  , "#########"
+  ] of
+    Right l -> l
+    Left err -> error err
+
+-- | Where the mirrors stand, for comparing.
+mirrorCells :: Game -> [Cell]
+mirrorCells = Map.keys . gMirrors
+
+movableMirrorChecks :: [Check]
+movableMirrorChecks =
+  [ check "parser: a movable mirror stands on floor, in its own era only" $
+      Map.lookup (3, 2) (lvMirrors mirrorYard) == Just (Mirror Past DirDown True Nothing)
+        && Map.lookup (5, 3) (lvMirrors mirrorYard) == Just (Mirror Present DirUp True Nothing)
+        && Map.lookup (7, 4) (lvMirrors mirrorYard) == Just (Mirror Past DirLeft False Nothing)
+        && walkable mirrorYard Past (3, 2) && not (walkable mirrorYard Past (7, 4))
+        && not (openCell mirrorYard (startPlaying mirrorYard) Past (3, 2))
+        && openCell mirrorYard (startPlaying mirrorYard) Present (3, 2)
+  , check "push mirror: from its back it moves one cell, for one step's price" $
+      let g0 = at mirrorYard Past (3, 1) False
+          g = walk mirrorYard DirDown g0
+      in gCell g == (3, 2) && mirrorCells g == [(3, 3), (5, 3), (7, 4)]
+         && gRemaining g == gRemaining g0 - 2
+  , check "push mirror: from its side it moves too, still facing the same way" $
+      let g = walk mirrorYard DirRight (at mirrorYard Past (2, 2) False)
+      in gCell g == (3, 2) && Map.lookup (4, 2) (gMirrors g) == Just (Mirror Past DirDown True Nothing)
+  , check "push mirror: from its face, an open landing means a jump, never a push" $
+      let g = walk mirrorYard DirUp (at mirrorYard Past (3, 3) False)
+      in gCell g == (3, 1) && mirrorCells g == mirrorCells (startPlaying mirrorYard)
+  , check "push mirror: from its face with nowhere to land, nothing moves, it says why, free" $
+      let g0 = (at mirrorYard Past (3, 3) False) { gCrates = Set.fromList [(3, 1)] }
+          g = walk mirrorYard DirUp g0
+      in gCell g == (3, 3) && gMirrors g == gMirrors g0 && gRemaining g == gRemaining g0
+         && fmap fbKind (gFeedback g) == Just MirrorFaceSide
+  , check "push mirror: one set in the wall never moves, and says so" $
+      let g0 = at mirrorYard Past (6, 4) False
+          g = walk mirrorYard DirRight g0
+      in gCell g == (6, 4) && gMirrors g == gMirrors g0 && gRemaining g == gRemaining g0
+         && fmap fbKind (gFeedback g) == Just MirrorFixed
+  , check "push mirror: a crate, a pit or a wall stops it, for free" $
+      let crated = (at mirrorYard Past (2, 2) False) { gCrates = Set.fromList [(4, 2)] }
+          overPit = walks mirrorYard [DirDown] (at mirrorYard Past (3, 1) False)
+          walled = (at mirrorYard Past (2, 1) False)
+                     { gMirrors = Map.insert (1, 1) (Mirror Past DirDown True Nothing)
+                                    (Map.delete (3, 2) (gMirrors (startPlaying mirrorYard))) }
+          stays g0 d = let g = walk mirrorYard d g0
+                       in gMirrors g == gMirrors g0 && gRemaining g == gRemaining g0
+      in stays crated DirRight && stays overPit DirDown && stays walled DirLeft
+  , check "push mirror: it never shares a cell with another mirror, even across eras" $
+      let g0 = (at mirrorYard Past (5, 1) False)
+                 { gMirrors = Map.insert (5, 2) (Mirror Past DirDown True Nothing)
+                                (Map.delete (3, 2) (gMirrors (startPlaying mirrorYard))) }
+          g = walk mirrorYard DirDown g0
+      in gMirrors g == gMirrors g0 && gCell g == (5, 1)
+  , check "push mirror: in the other era its cell is plain floor" $
+      gCell (walk mirrorYard DirRight (at mirrorYard Present (2, 2) False)) == (3, 2)
+  , check "push mirror: a present one moves in the present, though crates rust there" $
+      let g = walk mirrorYard DirUp (at mirrorYard Present (5, 4) False)
+      in gCell g == (5, 3) && Map.member (5, 2) (gMirrors g)
+  , check "push crate: never onto a cell where the other era has a mirror" $
+      let g0 = at mirrorYard Past (7, 3) False
+          g = walk mirrorYard DirLeft g0
+      in gCrates g == gCrates g0 && gCell g == (7, 3) && gRemaining g == gRemaining g0
+  , check "shift: never onto a mirror standing in the other era" $
+      let g = shift mirrorYard (at mirrorYard Present (3, 2) False)
+      in gEra g == Present && fmap fbKind (gFeedback g) == Just (ShiftBlocked (3, 2))
+  , check "push mirror: holding a key walks up to it and stops, saying to press again" $
+      let g = run mirrorYard (replicate 40 (press DirRight)) (at mirrorYard Past (1, 2) False)
+      in gCell g == (2, 2) && mirrorCells g == mirrorCells (startPlaying mirrorYard)
+         && fmap fbKind (gFeedback g) == Just PushNeedsPress
+  , check "push mirror: undo puts it back exactly, for half the price" $
+      let g0 = at mirrorYard Past (2, 2) False
+          g = run mirrorYard [undoKey, noInput] (walk mirrorYard DirRight g0)
+      in gMirrors g == gMirrors g0 && gCell g == (2, 2) && gRemaining g == gRemaining g0 - 1
+  , check "push mirror: its light moves with it" $
+      let g0 = at mirrorYard Past (2, 2) False
+          g = walk mirrorYard DirRight g0
+      in beamCells mirrorYard g0 (3, 2) == [(3, 3), (3, 4)]
+         && beamCells mirrorYard g (4, 2) == [(4, 3), (4, 4)]
+         && beamCells mirrorYard g (3, 2) == []
+  , check "push mirror: the solver tells mirror positions apart" $
+      let g0 = at mirrorYard Past (2, 2) False
+          g = walk mirrorYard DirRight g0
+      in stateKey g /= stateKey g { gMirrors = gMirrors g0 }
+  , check "parser: rejects a movable mirror on a crate's cell" $
+      either (const True) (const False)
+        (parseLevel 100 [ "#####", "#BC.#", "#####" ] [ "#####", "#SnG#", "#####" ])
+  ]
+
+
+-- The way on. --------------------------------------------------------------------
+-- The last listed lamp goes out again, and its light leads to a level the hall
+-- does not list.
+finaleChecks :: [Check]
+finaleChecks = case (levelHall, campaign) of
+  (Right levels, Right listed) ->
+    let third = levels !! 2
+        shown = lastVisible levels
+        -- One shift from lighting the lamp: in the past, on its footing, with the cell.
+        nearWin = (startPlaying third) { gEra = Past, gCell = lvGoal third, gHasCell = True, gPrev = noInput }
+        before = Run 2 shown 2 InLevel nearWin
+        stepAll r inputs = foldl' (flip (stepRun levels)) r inputs
+        lit = stepRun levels space before
+        open = stepAll lit (replicate (revealTicks third) noInput)
+        stageOf r = case runMode r of
+          Ending f -> Just (fnStage f)
+          _ -> Nothing
+        beckoning r = stageOf r == Just Beckon
+        walkedIn = stepAll open (press DirUp : replicate stepTicks noInput)
+        arrived = stepAll walkedIn (rushInputs third ++ replicate arrivalTicks noInput)
+        finaleOf r = case runMode r of
+          Ending f -> Just f
+          _ -> Nothing
+        passage = lvPassage third
+        (gx, gy) = lvGoal third
+        way = finaleRun third
+        dash = dashLevel third
+    in
+    [ check "ending: lighting the last listed lamp starts the ending, not the won plate" $
+        stageOf lit == Just Lit && gPhase (runGame lit) == Won
+        && runCompleted lit == 3 && runIndex lit == 2
+    , check "ending: the hall never lists, selects or unlocks the secret level" $
+        shown == 2 && lvSecret (levels !! 3) && not (any lvSecret listed)
+        && runUnlocked lit == 2
+    , check "ending: Enter does nothing while the lamp burns" $
+        stageOf (stepRun levels enter lit) == Just Lit
+    , check "ending: the keeper walks again once the wall is open, without the cell" $
+        beckoning open && gPhase (runGame open) == Playing
+        && not (gHasCell (runGame open)) && gCell (runGame open) == lvGoal third
+    , check "ending: one tick earlier, the wall is still opening" $
+        stageOf (stepAll lit (replicate (revealTicks third - 1) noInput)) == Just Opening
+    , check "ending: in the opened station there is no shifting, undoing or starting over" $
+        let tried = stepAll open [space, noInput, undoKey, noInput, restartKey, noInput]
+        in beckoning tried && gEra (runGame tried) == Present
+           && gCell (runGame tried) == lvGoal third && gAttempt (runGame tried) == gAttempt (runGame open)
+    , check "ending: stepping into the passage starts the rush, and walking is free" $
+        stageOf walkedIn == Just Rush && gCell (runGame walkedIn) == head passage
+        && gRemaining (runGame walkedIn) == gRemaining (runGame open)
+    , check "ending: the rush ends at the real lighthouse, and the secret level begins" $
+        runIndex arrived == 3 && runMode arrived == InLevel
+        && gPhase (runGame arrived) == Playing && gPartner (runGame arrived) /= Nothing
+        && gCell (runGame arrived) == lvSpawn (levels !! 3)
+    , check "ending: one tick before that, the card is still showing" $
+        stageOf (stepAll walkedIn (rushInputs third ++ replicate (arrivalTicks - 1) noInput)) == Just Arrival
+    , check "ending: Escape at any point goes to the hall, the level cleared" $
+        all (\r -> let out = stepRun levels lobbyKey r
+                   in runMode out == Lobby && runIndex out == 2 && runCompleted out == 3)
+            [lit, open, walkedIn]
+    , check "ending: with nothing beyond it, the same win just shows the plate" $
+        let r = stepRun listed space (Run 2 2 2 InLevel nearWin)
+        in runMode r == InLevel && gPhase (runGame r) == Won
+    , check "secret level: leaving it returns to the hall on a listed level" $
+        let out = stepRun levels lobbyKey (stepRun levels noInput arrived)
+        in runMode out == Lobby && runIndex out == shown
+    , check "secret level: winning it returns to the hall, and unlocks nothing new" $
+        let won = (runGame arrived) { gPhase = Won }
+            out = stepRun levels enter (Run 3 shown 3 InLevel won)
+        in runMode out == Lobby && runIndex out == shown && runUnlocked out == shown
+    , check "secret level: a saved place beyond the hall comes back as its last level" $
+        let r = startRunWithProgress levels 3 4
+        in runIndex r == shown && runUnlocked r == shown && runMode r == Title
+    , check "secret level: asked for by number, it opens straight away" $
+        let r = startRunAt levels 3 3
+        in runIndex r == 3 && runMode r == InLevel && gPhase (runGame r) == Playing
+    , check "secret level: the hall cannot reach it, however far the player has got" $
+        let r = foldl' (flip (stepRun levels)) (startRunWithProgress levels 2 4)
+                  [enter, noInput, press DirDown, noInput, press DirDown]
+        in runIndex r == shown && runMode r == Lobby
+    , check "ending: the passage starts beside the lighthouse and runs west out of the map" $
+        case way of
+          Nothing -> False
+          Just w ->
+            take 1 passage == [(gx, gy - 1)] && frDir w == DirLeft && frEdge w == (0, gy - 1)
+            && all ((== gy - 1) . snd) passage
+            && not (any (\c -> walkable third Past c || walkable third Present c) passage)
+    , check "ending: the light's way across the station is all floor once it is open" $
+        let r = revealedLevel third
+        in wayCells third == [ (x, gy - 1) | x <- [gx, gx - 1 .. 0] ]
+           && all (walkable r Present) (wayCells third)
+           && all (`notElem` wayCells third) (Set.toList (gCrates nearWin))
+    , check "ending: walls break in the order the light reaches them" $
+        let ticks = map (cellOpenTick third) [0 .. length passage - 1]
+        in and (zipWith (<) ticks (drop 1 ticks)) && last ticks < openTicks third
+    , check "ending: the open passage is floor in the present, and nowhere else changes" $
+        let r = revealedLevel third
+        in lvPresent r == Set.union (lvPresent third) (Set.fromList passage)
+           && lvPast r == lvPast third && ruStepCost (lvRules r) == 0
+    , check "ending: stepping onto the way anywhere starts the rush" $
+        let further = stepAll open (press DirUp : replicate stepTicks noInput)
+            stood = (runGame open) { gCell = (8, gy) }
+            fromSide = stepAll (open { runGame = stood }) (press DirUp : replicate stepTicks noInput)
+        in stageOf further == Just Rush && stageOf fromSide == Just Rush
+           && gCell (runGame fromSide) == (8, gy - 1)
+    , check "rush: a keeper who changes era at each barrier gets through, never taken back" $
+        let r = stepAll walkedIn (rushInputs third)
+            shifts = length (filter tiShift (rushInputs third))
+        in stageOf r == Just Arrival && shifts == length barriers
+           && maybe False ((== 0) . dsFails . fnDash) (finaleOf r)
+    , check "rush: a keeper who never changes era is held at the first barrier, and taken back" $
+        let r = stepAll walkedIn (replicate 1500 noInput)
+        in stageOf r == Just Rush
+           && maybe False (\f -> dsFails (fnDash f) > 0 && dsAlong (fnDash f) < 20) (finaleOf r)
+    , check "rush: the era does not change inside the station, nor into a barrier" $
+        case way of
+          Nothing -> False
+          Just w ->
+            let start = head (wayCells third)
+                g0 = (runGame walkedIn) { gPrev = noInput }
+                inside = stepDash w start space g0 restingDash
+                (a, e) = head (barriersFrom w start)
+                atBarrier = restingDash { dsAlong = a, dsScroll = a }
+                into = stepDash w start space g0 { gEra = otherEra e } atBarrier
+            in fmap (gEra . snd) inside == Just Present && fmap (dsRefused . fst) inside == Just 24
+               && fmap (gEra . snd) into == Just (otherEra e)
+    , check "ending: the causeway is open all the way in one era or the other, never both shut" $
+        case way of
+          Nothing -> False
+          Just w ->
+            let (mx, my) = frMouth w
+                (ax, _) = frArrival w
+                line = [ (x, my) | x <- [ax .. mx] ] ++ [frTower w]
+                open' c = walkable dash Present c || walkable dash Past c
+                shutIn era' = [ outFrom w i 0 | (i, e) <- barriers, e == era' ]
+            in all open' line
+               && all (\c -> not (walkable dash Present c) && walkable dash Past c) (shutIn Present)
+               && all (\c -> not (walkable dash Past c) && walkable dash Present c) (shutIn Past)
+    , check "ending: in the opened station the era still shifts, for nothing" $
+        let shifted = stepAll open { runGame = (runGame open) { gCell = (8, gy) } } [space, noInput]
+        in beckoning shifted && gEra (runGame shifted) == Past
+           && gRemaining (runGame shifted) == gRemaining (runGame open)
+    , check "ending: R brings the keeper back to the lamp from any corner" $
+        let stuck = open { runGame = (runGame open) { gCell = (6, 10), gEra = Past } }
+            back = stepRun levels restartKey stuck
+        in beckoning back && gCell (runGame back) == lvGoal third && gEra (runGame back) == Present
+    , check "ending: stepping onto the way in the past does not start the rush" $
+        let past = open { runGame = (runGame open) { gCell = (8, gy), gEra = Past } }
+            r = stepAll past (press DirUp : replicate stepTicks noInput)
+        in beckoning r && gCell (runGame r) == (8, gy - 1)
+    , check "ending: a held key that lands on the way starts the rush there" $
+        let r = stepAll open { runGame = (runGame open) { gCell = (8, gy) } } (replicate (3 * stepTicks) (press DirUp))
+        in stageOf r == Just Rush && gCell (runGame r) == (8, gy - 1) && gMotion (runGame r) == Settled
+    , check "ending: a crate left on the way is broken by the light" $
+        let crated = Run 2 shown 2 InLevel nearWin { gCrates = Set.insert (8, gy - 1) (gCrates nearWin) }
+            r = stepAll (stepRun levels space crated) (replicate (revealTicks third) noInput)
+        in beckoning r && (8, gy - 1) `Set.notMember` gCrates (runGame r)
+           && Set.size (gCrates (runGame r)) == Set.size (gCrates nearWin)
+    , check "ending: the keeper faces the way the light went when they walk again" $
+        gFacing (runGame open) == DirLeft
+    ]
+  (Left err, _) -> [check ("hall: parses: " ++ err) False]
+  (_, Left err) -> [check ("campaign: parses: " ++ err) False]
+
+-- Two keepers. -------------------------------------------------------------------
+
+-- | The first map for two, kept as the fixture for the two-keeper rules: open rooms
+-- where the cell, the lamp and the shared era are easy to reach.
+duoFixture :: Either String Level
+duoFixture = parseLevel 100
+  [ "#############"
+  , "#.....B.....#"
+  , "#.....#.....#"
+  , "#...........#"
+  , "#....#.#....#"
+  , "#....#.#....#"
+  , "#....#.#....#"
+  , "#...........#"
+  , "#############"
+  ]
+  [ "#############"
+  , "#####...#####"
+  , "#.S.#####.T.#"
+  , "#...........#"
+  , "#....###....#"
+  , "#....#G#....#"
+  , "#....#.#....#"
+  , "#...........#"
+  , "#############"
+  ]
+
+duoChecks :: [Check]
+duoChecks = case duoFixture of
+  Right duo ->
+    let start = startPlaying duo
+        wasd d = noInput { tiDir = Just d, tiDir1 = Just d }
+        arrows d = noInput { tiDir = Just d, tiDir2 = Just d }
+        both d1 d2 = noInput { tiDir = Just d1, tiDir1 = Just d1, tiDir2 = Just d2 }
+        partnerAt g = fmap ptCell (gPartner g)
+        moveTo c g = g { gPartner = fmap (\p -> p { ptCell = c }) (gPartner g) }
+        settle = replicate stepTicks noInput
+        budget = lvBudget duo
+    in
+    [ check "two keepers: both start where the map says" $
+        gCell start == lvSpawn duo && partnerAt start == lvSpawn2 duo && lvSpawn2 duo == Just (10, 2)
+    , check "two keepers: W A S D moves only the first" $
+        let g = run duo (wasd DirDown : settle) start
+        in gCell g == (2, 3) && partnerAt g == Just (10, 2) && gRemaining g == budget - 2
+    , check "two keepers: the arrows move only the second" $
+        let g = run duo (arrows DirDown : settle) start
+        in gCell g == (2, 2) && partnerAt g == Just (10, 3) && gRemaining g == budget - 2
+    , check "two keepers: both can walk at once, each paying for their own step" $
+        let g = run duo (both DirDown DirDown : settle) start
+        in gCell g == (2, 3) && partnerAt g == Just (10, 3) && gRemaining g == budget - 4
+    , check "two keepers: one cannot walk into the other" $
+        let g0 = moveTo (10, 3) start { gCell = (9, 3) }
+            g = run duo (wasd DirRight : settle) g0
+            h = run duo (arrows DirLeft : settle) g0
+        in gCell g == (9, 3) && partnerAt h == Just (10, 3)
+    , check "two keepers: one Space takes both into the other era, for one price" $
+        let g = run duo (space : replicate shiftTicks noInput) start
+        in gEra g == Past && gRemaining g == budget - ruShiftCost (lvRules duo)
+           && gCell g == (2, 2) && partnerAt g == Just (10, 2)
+    , check "two keepers: a shift waits for both to have floor in the other era" $
+        let g0 = moveTo (9, 1) start { gEra = Past }
+            g = run duo [space, noInput] g0
+        in gEra g == Past && gRemaining g == gRemaining g0
+           && fmap fbKind (gFeedback g) == Just (ShiftBlocked (9, 1))
+    , check "two keepers: the second keeper picks up the cell, and lights the lamp" $
+        let g0 = moveTo (5, 1) start { gEra = Past }
+            picked = run duo (arrows DirRight : settle) g0
+            atLamp = moveTo (6, 5) picked
+            lit = run duo [space, noInput] atLamp
+        in fmap ptHasCell (gPartner picked) == Just True && not (gHasCell picked)
+           && objectiveText picked == "Bring it to the lighthouse in the present."
+           && gPhase lit == Won
+    , check "two keepers: only one of them can hold the cell" $
+        let g0 = moveTo (5, 1) start { gEra = Past, gHasCell = True }
+            g = run duo (arrows DirRight : settle) g0
+        in fmap ptHasCell (gPartner g) == Just False && gHasCell g
+    , check "two keepers: undo takes back the last step, whoever took it" $
+        let walked = run duo (wasd DirDown : settle ++ arrows DirDown : settle) start
+            once = run duo [undoKey, noInput] walked
+            twice = run duo [undoKey, noInput] once
+        in gCell once == (2, 3) && partnerAt once == Just (10, 2)
+           && gCell twice == (2, 2) && partnerAt twice == Just (10, 2)
+    , check "two keepers: the second keeper pushes a crate by the same rules" $
+        case parseLevel 100 ["########", "#B.C...#", "#......#", "########"]
+                            ["########", "#S.....#", "#G...T.#", "########"] of
+          Left _ -> False
+          Right small ->
+            let g0 = (startPlaying small) { gEra = Past, gPrev = noInput }
+                g1 = g0 { gPartner = fmap (\p -> p { ptCell = (4, 1) }) (gPartner g0) }
+                pushed = run small (arrows DirLeft : settle) g1
+                rusted = run small (arrows DirLeft : settle) g1 { gEra = Present }
+            in gCrates pushed == Set.singleton (2, 1) && fmap ptCell (gPartner pushed) == Just (3, 1)
+               && gCrates rusted == Set.singleton (3, 1)
+    , check "two keepers: the keys reach the right keeper from the keyboard" $
+        let i = tickInput (keyDown KUp (keyDown KD noKeys))
+        in tiDir1 i == Just DirRight && tiDir2 i == Just DirUp && tiDir i == Just DirUp
+    , check "parser: a level has at most two keepers" $
+        case parseLevel 100 ["######", "#B...#", "######"] ["######", "#STTG#", "######"] of
+          Left _ -> True
+          Right _ -> False
+    , check "parser: a level for one has no second keeper" $
+        all (\l -> lvSpawn2 l == Nothing) (either (const []) id campaign)
+    , check "two keepers: undo of one keeper keeps the cell the other just picked up" $
+        let g0 = moveTo (5, 1) start { gEra = Past }
+            both' = run duo (arrows DirRight : wasd DirDown : settle) g0
+            undone = run duo [undoKey, noInput] both'
+        in fmap ptHasCell (gPartner both') == Just True
+           && fmap ptCell (gPartner undone) == Just (6, 1) && fmap ptHasCell (gPartner undone) == Just True
+           && gCell undone == (2, 2)
+    , check "two keepers: scripts and the solver's moves drive the first keeper" $
+        let g = run duo (actionInputs (Go DirDown) ++ [noInput]) start
+        in gCell g == (2, 3) && partnerAt g == Just (10, 2)
+    ]
+  _ -> [check "two keepers: the fixture parses" False]
+
+-- Sound. -------------------------------------------------------------------------
+-- What is heard is worked out by comparing ticks, like the effects, so these play
+-- the real rules and listen.
+
+-- | The run and its effects after each tick, and what that tick sounded.
+traceRun :: [Level] -> Run -> [TickInput] -> [((Run, Fx), [Cue])]
+traceRun levels r0 inputs = zip (drop 1 states) (zipWith (cues levels) states (drop 1 states))
+  where
+    states = scanl tick (r0, initialFx) inputs
+    tick (r, fx) i = let r' = stepRun levels i r in (r', stepFx (runGame r) (runGame r') fx)
+
+-- | What each tick of play in one level sounded.
+playTrace :: Level -> Game -> [TickInput] -> [[Cue]]
+playTrace l g inputs = map snd (traceRun [l] (Run 0 0 0 InLevel g) inputs)
+
+soundChecks :: Level -> [Check]
+soundChecks level =
+  [ check "sound: the route sounds every step and shift, and the pickup and the lamp once each" $
+      let heard = concat (playTrace level (startPlaying level) (routeInputs intendedRoute))
+      in length [ () | CueStep {} <- heard ] == 36
+         && length [ () | CueShift _ <- heard ] == 6
+         && length (filter (== CuePickup) heard) == 1
+         && length (filter (== CueLamp) heard) == 1
+         && CueBump `notElem` heard && CueRefused `notElem` heard
+  , check "sound: standing still is silent" $
+      all null (playTrace level (startPlaying level) (replicate 120 noInput))
+  , check "sound: a footstep sounds the era it is taken in" $
+      let heard = concat (playTrace level (startPlaying level) (actionInputs ShiftEra ++ actionInputs (Go DirRight)))
+      in CueShift Past `elem` heard && [ e | CueStep e _ _ _ <- heard ] == [Past]
+  , check "sound: stepping through a mirror sounds the mirror, not a footstep" $
+      let heard = concat (playTrace glass (at glass Past (6, 6) False) (actionInputs (Go DirUp) ++ [noInput]))
+      in CueJump False `elem` heard && null [ () | CueStep {} <- heard ] && CuePickup `elem` heard
+  , check "sound: pushing a movable mirror sounds its sled, not a crate" $
+      let heard = concat (playTrace twoAlignments (at twoAlignments Past (4, 4) False) (actionInputs (Go DirRight)))
+      in CueMirrorPush `elem` heard && CuePush `notElem` heard
+  , check "sound: undo and restart each sound once, and nothing else" $
+      let moved = walk level DirRight (shift level (startPlaying level))
+      in concat (playTrace level moved [undoKey, noInput]) == [CueUndo]
+         && concat (playTrace level moved [restartKey, noInput]) == [CueRestart]
+  , check "sound: a shift onto a wall is refused aloud" $
+      case [ c | c <- Set.toList (lvPresent level), not (walkable level Past c) ] of
+        c : _ -> CueRefused `elem` concat (playTrace level (at level Present c False) [space, noInput])
+        [] -> False
+  , check "sound: walking into a wall bumps" $
+      case [ (c, d) | c <- Set.toList (lvPresent level), d <- [minBound .. maxBound]
+                    , not (walkable level Present (stepCell d c)) ] of
+        (c, d) : _ -> CueBump `elem` concat (playTrace level (at level Present c False) [press d, noInput])
+        [] -> False
+  ] ++ endingSounds ++ twoKeeperSounds
+
+-- | Level 4, played through by both keepers.
+twoKeeperSounds :: [Check]
+twoKeeperSounds = case levelHall of
+  Right levels | length levels > 3, Just _ <- lvSpawn2 (levels !! 3) ->
+    let four = levels !! 3
+        route = maybe [] snd (drGoal (duoSearch four (const True) (startPlaying four)))
+        inputs = concatMap duoInputs route ++ [noInput]
+        heard = concatMap snd (traceRun levels (Run 3 2 3 InLevel (startPlaying four)) inputs)
+        moves = length [ () | a <- route, a /= ShiftBoth ]
+        steps who = [ () | CueStep _ _ _ w <- heard, w == who ]
+        jumps = [ turned | CueJump turned <- heard ]
+    in
+    [ check "sound: in level 4 every move is heard, each keeper's steps as their own" $
+        not (null route)
+        && length (steps Yellow) + length (steps Red) + length jumps == moves
+        && not (null (steps Yellow)) && not (null (steps Red))
+    , check "sound: level 4's corner mirrors turn the keeper, and sound it" $
+        not (null jumps) && and jumps
+    , check "sound: level 4 sounds its shifts, the pickup and the lamp" $
+        length [ () | CueShift _ <- heard ] == length (filter (== ShiftBoth) route)
+        && length (filter (== CuePickup) heard) == 1
+        && length (filter (== CueLamp) heard) == 1
+    ]
+  _ -> [check "sound: level 4 is a level for two" False]
+
+endingSounds :: [Check]
+endingSounds = case levelHall of
+  Left _ -> [check "sound: the level hall parses" False]
+  Right levels ->
+    let third = levels !! 2
+        nearWin = (startPlaying third) { gEra = Past, gCell = lvGoal third, gHasCell = True, gPrev = noInput }
+        before = Run 2 (lastVisible levels) 2 InLevel nearWin
+        walkIn = space : replicate (revealTicks third) noInput ++ press DirUp : replicate stepTicks noInput
+        whole = traceRun levels before (walkIn ++ rushInputs third ++ replicate arrivalTicks noInput)
+        heard = concatMap snd whole
+        finaleOf r = case runMode r of
+          Ending f -> Just f
+          _ -> Nothing
+        -- The finale after the tick that sounded this.
+        when' c = [ f | ((r, _), cs) <- whole, c `elem` cs, Just f <- [finaleOf r] ]
+        moment c = case c of
+          CueLamp -> True
+          CueFlare -> True
+          CueLampDies -> True
+          CueLightGoes -> True
+          CueWallBreaks _ -> True
+          CueRushBegins -> True
+          CueArrival -> True
+          CueCard -> True
+          _ -> False
+        passage = lvPassage third
+        bedsAt p = [ beds levels r | ((r, _), _) <- whole, Just f <- [finaleOf r], p f ]
+        rushing f = fnStage f == Rush
+    in
+    [ check "sound: the ending's moments sound once each, in order" $
+        filter moment heard
+          == [CueLamp, CueFlare, CueLampDies, CueLightGoes] ++ map CueWallBreaks [0 .. length passage - 1]
+             ++ [CueRushBegins, CueArrival, CueCard]
+    , check "sound: the lamp dies aloud on the tick it goes dark" $
+        map (\f -> (fnStage f, fnAge f)) (when' CueLampDies) == [(Flare, lampDiesAt)]
+    , check "sound: each wall breaks aloud as the light reaches it" $
+        and [ map (\f -> (fnStage f, fnAge f)) (when' (CueWallBreaks k)) == [(Opening, cellOpenTick third k)]
+            | k <- [0 .. length passage - 1] ]
+    , check "sound: every lamp of the corridor catches once, in order, as the keeper passes" $
+        [ n | CueLampCatches n <- heard ] == [0 .. lampCount - 1]
+    , check "sound: a keeper who reads the barriers shifts at each, and is never held up" $
+        length [ () | ((r, _), cs) <- whole, Just f <- [finaleOf r], rushing f, CueShift _ <- cs ]
+          == length barriers
+        && CueBarrier `notElem` heard && CueCaught `notElem` heard
+    , check "sound: a keeper who never shifts is held up, then taken back, and hears both" $
+        let stuck = concatMap snd (traceRun levels before (walkIn ++ replicate 1500 noInput))
+        in CueBarrier `elem` stuck && CueCaught `elem` stuck
+    , check "sound: while the light breaks out, only the light is heard" $
+        all (\b -> b { bdBeam = 0 } == silence) (bedsAt (\f -> fnStage f == Opening))
+        && any ((> 0) . bdBeam) (bedsAt (\f -> fnStage f == Opening))
+    , check "sound: the rush has its beat and its wind, and both fall away at the real lighthouse" $
+        any (\b -> bdPulse b > 0 && bdWind b > 0) (bedsAt rushing)
+        && case reverse (bedsAt ((== Arrival) . fnStage)) of
+             b : _ -> bdPulse b == 0 && bdWind b == 0 && bdSea b == 0 && bdStorm b == 0 && bdDrone b == 0
+             [] -> False
+    ]
+
+-- Corner mirrors. ------------------------------------------------------------------
+
+-- | An open yard with a corner mirror at (5,4), in the present, looking north and
+-- east, and a crate at (8,4) at the end of its east light.
+cornerYard :: Either String Level
+cornerYard = parseLevel 100
+  [ "##########"
+  , "#B.......#"
+  , "#........#"
+  , "#........#"
+  , "#.......C#"
+  , "#........#"
+  , "#........#"
+  , "##########"
+  ]
+  [ "##########"
+  , "#S.......#"
+  , "#........#"
+  , "#........#"
+  , "#....L...#"
+  , "#........#"
+  , "#G.......#"
+  , "##########"
+  ]
+
+cornerChecks :: [Check]
+cornerChecks = case cornerYard of
+  Left err -> [check ("corner mirrors: the yard parses: " ++ err) False]
+  Right yard ->
+    let stand c = at yard Present c False
+    in
+    [ check "parser: L J 7 F are corner mirrors set in the wall, with two faces" $
+        case parseLevel 100 ["#######", "#B....#", "#.....#", "#######"] ["#######", "#SLJ7F#", "#G....#", "#######"] of
+          Left _ -> False
+          Right l ->
+            map (\c -> fmap (\m -> (mFace m, mBend m, mMovable m)) (Map.lookup c (lvMirrors l))) [(2, 1), (3, 1), (4, 1), (5, 1)]
+              == [ Just (DirUp, Just DirRight, False), Just (DirUp, Just DirLeft, False)
+                 , Just (DirDown, Just DirLeft, False), Just (DirDown, Just DirRight, False) ]
+            && not (walkable l Present (2, 1))
+    , check "corner mirrors: light leaves by both faces, until something stops it" $
+        beamsOf yard (stand (1, 1)) (5, 4) == [ (DirUp, [(5, 3), (5, 2), (5, 1)]), (DirRight, [(6, 4), (7, 4)]) ]
+    , check "corner mirrors: two cells up its north light, you come out two cells east" $
+        let g = applyAction yard (Go DirDown) (stand (5, 2))
+        in gCell g == (7, 4) && gRemaining g == lvBudget yard - ruJumpCost (lvRules yard)
+    , check "corner mirrors: and the other way, from the east light out of the north face" $
+        gCell (applyAction yard (Go DirLeft) (stand (7, 4))) == (5, 2)
+    , check "corner mirrors: a landing that is taken shows a cross, and the key only walks" $
+        fmap jOpen (mirrorAhead yard (stand (5, 1)) DirDown) == Just False
+        && gCell (applyAction yard (Go DirDown) (stand (5, 1))) == (5, 2)
+    , check "corner mirrors: its back is a wall that never moves" $
+        let g = applyAction yard (Go DirRight) (stand (4, 4))
+        in gCell g == (4, 4) && fmap fbKind (gFeedback g) == Just MirrorFixed
+    , check "corner mirrors: only in their own era" $
+        mirrorAhead yard (at yard Past (5, 2) False) DirDown == Nothing
+    ]
+
+-- The secret level for two. --------------------------------------------------------
+
+-- | W A S D move yellow, w a s d red (the arrows), @_@ shifts both.
+duoRoute :: String -> [DuoAction]
+duoRoute = map key
+  where
+    key c = case c of
+      'W' -> Go1 DirUp
+      'A' -> Go1 DirLeft
+      'S' -> Go1 DirDown
+      'D' -> Go1 DirRight
+      'w' -> Go2 DirUp
+      'a' -> Go2 DirLeft
+      's' -> Go2 DirDown
+      'd' -> Go2 DirRight
+      _   -> ShiftBoth
+
+-- | Red carries: yellow crosses first, red goes through the vault, yellow pushes
+-- the gate, red comes home by the west mirror.
+redCarries, yellowCarries :: [DuoAction]
+redCarries = duoRoute $ concat
+  [ "DDDWWWWS", "_", "wwawaass", "w", "aaadds", "d", "WWWAA", "DDD", "ssd", "_", "s", "www", "_", "ddwwwd", "_" ]
+-- | Yellow carries, through red's mirror; red pushes the gate.
+yellowCarries = duoRoute $ concat
+  [ "DDDWWWWS", "_", "d", "WWWWAWAASS", "W", "AAADDS", "D", "awaa", "ddd", "SSD", "_", "S", "WWW", "_", "DDWWWD", "_" ]
+
+twoKeepersChecks :: [Check]
+twoKeepersChecks = case secretLevels of
+  Right (l : _) ->
+    let start = startPlaying l
+        full = duoSearch l (const True) start
+        play route = foldl' (flip (applyDuo l)) start route
+        replay route = run l (concatMap duoInputs route ++ [noInput]) start
+        alone c = l { lvSpawn = c, lvSpawn2 = Nothing }
+        onlyYellow a = case a of { Go2 _ -> False; _ -> True }
+        onlyRed a = case a of { Go1 _ -> False; _ -> True }
+    in
+    [ check "two keepers: the secret level is 13 x 9, unlisted, with both keepers on the map" $
+        lvWidth l == 13 && lvHeight l == 9 && lvSecret l
+        && lvSpawn l == (2, 6) && lvSpawn2 l == Just (10, 5)
+    , check "two keepers: a corner mirror in each era, one on each island" $
+        Map.lookup (5, 7) (lvMirrors l) == Just (Mirror Present DirUp False (Just DirRight))
+        && Map.lookup (7, 1) (lvMirrors l) == Just (Mirror Past DirDown False (Just DirLeft))
+    , check "two keepers: two can light it, and the par is the cheapest way" $
+        fmap fst (drGoal full) == Just (lvPar l)
+    , check "two keepers: red alone cannot, nor yellow alone" $
+        srGoal (search (alone (10, 5)) (\_ _ -> True) (startPlaying (alone (10, 5)))) == Nothing
+        && srGoal (search (alone (2, 6)) (\_ _ -> True) (startPlaying (alone (2, 6)))) == Nothing
+    , check "two keepers: nor one, while the other stands still" $
+        drGoal (duoSearch l onlyYellow start) == Nothing && drGoal (duoSearch l onlyRed start) == Nothing
+    , check "two keepers: red can carry the cell" $
+        gPhase (play redCarries) == Won && gPhase (replay redCarries) == Won
+    , check "two keepers: and so can yellow, through red's mirror" $
+        gPhase (play yellowCarries) == Won && gPhase (replay yellowCarries) == Won
+    , check "two keepers: opening the vault door takes the crossing away for good" $
+        let opened = play (take 25 redCarries)
+        in Set.member (5, 2) (gCrates opened) && fmap ptCell (gPartner opened) == Just (4, 2)
+    , check "two keepers: pushing the gate first shuts the vault for good" $
+        let g = play (duoRoute "_waa")
+        in Set.member (7, 4) (gCrates g) && drGoal (duoSearch l (const True) g) == Nothing
+    , check "two keepers: opening the vault before yellow crosses is a dead end" $
+        let g = play (duoRoute "_wwawaasswaaaddsd")
+        in fmap ptCell (gPartner g) == Just (4, 2) && drGoal (duoSearch l (const True) g) == Nothing
+    ]
+  _ -> [check "two keepers: the secret level parses" False]
+
+-- | The secret level's numbers, from the two-keeper search.
+reportDuo :: IO ()
+reportDuo = case secretLevels of
+  Right (l : _) -> do
+    let r = duoSearch l (const True) (startPlaying l)
+    case drGoal r of
+      Nothing -> putStrLn ("level:  " ++ lvName l ++ ": NO ROUTE for two, " ++ show (drStates r) ++ " states")
+      Just (n, route) -> do
+        putStrLn ("level:  " ++ lvName l ++ ": par " ++ show n ++ " for two, budget " ++ show (lvBudget l)
+                  ++ ", " ++ show (length route) ++ " actions, "
+                  ++ show (length (filter (== ShiftBoth) route)) ++ " shifts, "
+                  ++ show (drStates r) ++ " states")
+        putStrLn ("level:  " ++ concatMap duoLabel route)
+  _ -> pure ()

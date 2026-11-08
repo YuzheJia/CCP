@@ -4,6 +4,8 @@ module Game.Level
   , parseLevel
   , theLevel
   , campaign
+  , secretLevels
+  , levelHall
   , extraLevels
   , walkable
   , passageCells
@@ -41,7 +43,7 @@ presentRows =
   ]
 
 -- | The original station, kept as the tests' fixture: its map, route and dressing are
--- pinned there. The campaign opens with a shorter way through the same walls.
+-- pinned there.
 theLevel :: Either String Level
 theLevel = (\l -> l { lvName = "Harrow Point Light Station", lvDressed = True, lvPar = 108 })
   <$> parseLevel 128 pastRows presentRows
@@ -51,77 +53,306 @@ theLevel = (\l -> l { lvName = "Harrow Point Light Station", lvDressed = True, l
 -- game goes on. Short on purpose: it is played in about three minutes.
 campaign :: Either String [Level]
 campaign = sequence
-  [ room baseRules "Through the Glass" 22 20
-      -- Three cells below the mirror, your reflection would land in the wall: walking
-      -- on is all the key does. Two below, it lands by the power cell, and the same
-      -- key steps through.
+  [ withLesson "Crates only move in the past. In the present they are rusted solid."
+    <$> room baseRules "Clear the Way" 48 20
+      -- Push the crate into its recess in the past: in the present it is rusted
+      -- solid, so the first thing to learn is to switch era. The passage above has
+      -- alternating gaps: cross the first in the present and the second in
+      -- the past, where the power cell waits below the lighthouse landing.
       [ "#############"
       , "#############"
-      , "#####.B.#####"
-      , "#####...#####"
-      , "######v######"
-      , "######.######"
-      , "######.######"
-      , "######.######"
-      , "#############"
-      ]
-      [ "#############"
-      , "#############"
-      , "#####...#####"
-      , "#####..G#####"
-      , "#############"
-      , "#############"
-      , "#############"
-      , "######S######"
-      , "#############"
-      ]
-  , room baseRules "Rust in the Beam" 34 16
-      -- The present mirror's light stops at a crate rusted solid. In the past it
-      -- moves, and with it out of the way the light reaches the corridor.
-      [ "#############"
-      , "#############"
-      , "#####.B.#####"
-      , "#####...#####"
-      , "#####C....###"
-      , "#####.#######"
+      , "#########.###"
+      , "#########B###"
+      , "####..#...###"
+      , "##..C.#######"
       , "#############"
       , "#############"
       , "#############"
       ]
       [ "#############"
       , "#############"
-      , "#############"
-      , "#...#########"
-      , "#.G.>....S###"
-      , "#...#.#######"
+      , "#######G..###"
+      , "#########.###"
+      , "####....#.###"
+      , "##S...#######"
       , "#############"
       , "#############"
       , "#############"
       ]
-  , room baseRules "One Way In" 42 12
-      -- The past mirror is the only way into the cell's room, and the room's only way
-      -- out is the present mirror, whose light a shut door stops. Step through first
-      -- and you are shut in: the crate has to reach the plate before you go.
+  , withLesson "Push a mirror from its back or sides. Step into its light to jump through."
+    <$> room baseRules "Two Alignments" 80 16
+      -- Aim the past mirror at the battery alcove and clear its launch cell.
+      -- Return through the present mirror, then aim the first mirror again
+      -- to reach the lighthouse footing across a separate gap.
       [ "#############"
       , "#############"
+      , "#######B#.###"
+      , "####..#######"
+      , "####.s....###"
+      , "####......###"
+      , "######.C..###"
       , "#############"
-      , "######.B#####"
-      , "######..#####"
-      , "######v######"
-      , "##.....######"
-      , "##.CP..######"
       , "#############"
       ]
       [ "#############"
       , "#############"
+      , "###..e..#G###"
+      , "###.#########"
+      , "###.......###"
+      , "####......###"
+      , "######...S###"
       , "#############"
-      , "#############"
-      , "#.G.>D.######"
-      , "#############"
-      , "###S.########"
-      , "###..########"
       , "#############"
       ]
+  , withLesson "Four rooms. A mirror set in the wall never moves: it is a one-way door."
+    . withPassage [(11, 3), (10, 3), (6, 3), (0, 3)]
+    <$> room baseRules "The Long Way Round" 306 40
+      -- Four rooms of 13 by 9, one screen each, and each room has two ways through.
+      -- Hub (top left) -> the west room (bottom left): either keep the present mirror
+      -- low, tuck a crate behind your standing cell and chain three jumps, the last
+      -- one through the fixed mirror into a pocket sealed in the past; or raise the
+      -- mirror, push the crate off the fixed mirror's column and take its long jump
+      -- -> the vault (bottom right): Crowded Track, holding the power cell -> the
+      -- gallery (top right): lift both crates out of the past gallery row, using the
+      -- movable mirror as a door, or standing on its cell in the other era -> push
+      -- the shortcut crate at (12,4) west from (13,4) in the past, which only works
+      -- from that side, and walk home to the lighthouse.
+      [ "##########################"
+      , "#.....####################"
+      , "#.#.#.################.###"
+      , "#.....#...############.###"
+      , "#...........C.####>.C.C.##"
+      , "#.#.#.#...############..##"
+      , "#.....####################"
+      , "#.....####################"
+      , "###.######################"
+      , "###.######################"
+      , "#....#....C.##############"
+      , "#.########.##########B####"
+      , "#..C.#####.########.######"
+      , "#....#####^####.s.C...####"
+      , "##########.######.#.#.####"
+      , "#################.#.#C####"
+      , "##########............####"
+      , "##########################"
+      ]
+      [ "##########################"
+      , "#.....####################"
+      , "#.....################.###"
+      , "#.....#...##########...###"
+      , "#..........G.######....###"
+      , "#.....#...#########v..w.##"
+      , "#.....#############.######"
+      , "#..S..#############.######"
+      , "###.###############.######"
+      , "###.###############.######"
+      , "#....#.###..#######...####"
+      , "####w#####..#########.####"
+      , "#....#...<..#######.######"
+      , "###############.......####"
+      , "##########.######.#.#n####"
+      , "##########.######.#.#.####"
+      , "##########............####"
+      , "##########################"
+      ]
+  ]
+
+-- | Levels the hall never lists. Each is found from the end of the level before it.
+secretLevels :: Either String [Level]
+secretLevels = sequence
+  [ (\l -> l { lvSecret = True })
+    . withLesson "Two keepers, one era. A corner mirror turns you out of its other face, as far as you stood."
+    <$> room baseRules "Two Keepers" 118 60
+      -- Two islands with water (column 6) between, crossed only by corner mirrors, and
+      -- one way only: the far shore never sees their light. Whoever carries the cell
+      -- goes east -> the east mirror (past) into the vault -> pushes its door crate out
+      -- west -> the west mirror (present) onto the east jetty -> walks out once the
+      -- gate crate at (8,4) is pushed into the east mirror's light, home to the lamp.
+      -- It takes two: the gate can only be pushed from the east, after the carrier is
+      -- in the vault (it shuts the vault for good), and the vault door crate lands on
+      -- the one spot that crosses to the east island (5,2), so yellow must cross first.
+      -- Either keeper can carry.
+      [ "#############"
+      , "#B...##7#...#"
+      , "###.C.#....##"
+      , "####..#.#..##"
+      , "#.....#.C...#"
+      , "#.....##.#..#"
+      , "#.....##.#..#"
+      , "#....##..#..#"
+      , "#############"
+      ]
+      [ "#############"
+      , "#########..G#"
+      , "####..##...##"
+      , "#####.###..##"
+      , "#.....#..#..#"
+      , "#.....##.#T.#"
+      , "#.S...##.#..#"
+      , "#....L#..#..#"
+      , "#############"
+      ]
+  ]
+
+-- | Everything the run can reach: the campaign, then its secret levels.
+levelHall :: Either String [Level]
+levelHall = (++) <$> campaign <*> secretLevels
+
+-- | The first four-room level, before levels 3 and 4 were merged. Its west room asks
+-- the player to fill pits with crates, which no earlier level teaches.
+harrowPointBelow :: Either String Level
+harrowPointBelow =
+  withLesson "Four rooms. A mirror set in the wall never moves: it is a one-way door."
+    <$> room baseRules "Harrow Point, Below" 318 40
+      -- Four rooms of 13 by 9, one screen each. Hub (top left) -> the chasm (bottom
+      -- left): push crates into pits to make the one spot two cells from the fixed
+      -- mirror, the only distance that lands -> the vault (bottom right): Crowded
+      -- Track, holding the power cell -> the gallery (top right): stand on a mirror's
+      -- cell in the other era to push the crate beneath it -> push the shortcut crate
+      -- at (12,4) west from (13,4) in the past, which only works from that side, and
+      -- walk home to the lighthouse.
+      [ "##########################"
+      , "#.....####################"
+      , "#.#.#.###########.########"
+      , "#.....#...#######..#######"
+      , "#...........C..##.C.######"
+      , "#.#.#.#...#######~########"
+      , "#.....####################"
+      , "#.....####################"
+      , "###.######################"
+      , "###.######################"
+      , "#....#####################"
+      , "#C##.################B####"
+      , "#.C..##############.######"
+      , "#.#..~~~<#.####.s.C...####"
+      , "#~#..#####.######.#.#.####"
+      , "#.##C#####.######.#.#C####"
+      , "####.#####............####"
+      , "##########################"
+      ]
+      [ "##########################"
+      , "#.....####################"
+      , "#.....###########.########"
+      , "#.....#...#######.########"
+      , "#..........G.#..#e..######"
+      , "#.....#...#######...######"
+      , "#.....#############.######"
+      , "#..S..#############.######"
+      , "###.###############.######"
+      , "###.###############.######"
+      , "#....##############...####"
+      , "#.#..################.####"
+      , "#....##############.######"
+      , "#.#...####.####.......####"
+      , "###..#####.######.#.#n####"
+      , "#.##.#####.######.#.#.####"
+      , "#....#####............####"
+      , "##########################"
+      ]
+
+-- | The team's level 3, from the level-hall branch. A three-wing station: each wing
+-- hides the next part of the route outside the camera. In each wing a crate must
+-- leave a mirror's beam and hold a pressure plate; two movable mirrors must then be
+-- lowered into the cleared crossing lanes. Once all plates are held, the present-day
+-- doors form the long route home. Its movable mirrors, written @l@ and @d@ there,
+-- are @w@ and @s@ here.
+theLongReflection :: Either String Level
+theLongReflection =
+  withLesson "Clear each beam with its crate, hold every plate, then move or use the mirror."
+  -- Under these rules the cheapest route costs 188, not the 224 it was built for;
+  -- the budget is that 224, so the route it was designed around still fits.
+  <$> room baseRules "Level 3 - The Long Reflection" 188 36
+      [ "#########################"
+      , "#########################"
+      , "#####...###...#####..B###"
+      , "###.....#.......###..C..#"
+      , "###.#..w#####..w###^...##"
+      , "###...C.#.....C.#......##"
+      , "#####P..###.#..####..v..#"
+      , "##...##.###....####..C..#"
+      , "##...##.######P####...###"
+      , "##C.....#.......#..P#####"
+      , "##...##.###s#.######.####"
+      , "####....#.......#....####"
+      , "###.....###...###....####"
+      , "#########################"
+      , "#########################"
+      ]
+      [ "#########################"
+      , "#########################"
+      , "##.G.####################"
+      , "###.#..#############..###"
+      , "###.#.###################"
+      , "###.#..#######..#########"
+      , "###.#.#######..####..####"
+      , "###.#########..####...###"
+      , "###.#########..####..####"
+      , "##..###############..####"
+      , "###.################.####"
+      , "#.......D.......D....####"
+      , "###S#####################"
+      , "#########################"
+      , "#########################"
+      ]
+
+-- | Walls that open once the level is won: the way on to the secret level after
+-- it. The first is in the wall beside the lighthouse; the rest lie on one straight
+-- line from there to the outer wall, where the way leaves the map.
+withPassage :: [Cell] -> Level -> Level
+withPassage cells level = level { lvPassage = cells }
+
+withLesson :: String -> Level -> Level
+withLesson lesson level = level { lvLesson = lesson }
+
+-- | The single-screen hard level that the four-room one grew out of; its vault is
+-- this map. Kept to build on.
+crowdedTrack :: Either String Level
+crowdedTrack = room baseRules "Crowded Track" 112 12
+  [ "#############"
+  , "#############"
+  , "########B####"
+  , "######.######"
+  , "##.s.C...####"
+  , "####.#.#.####"
+  , "####.#.#C####"
+  , "####.....####"
+  , "#############"
+  ]
+  [ "#############"
+  , "######G..####"
+  , "########.####"
+  , "######.######"
+  , "##.......####"
+  , "####.#.#n####"
+  , "####.#.#.####"
+  , "####S....####"
+  , "#############"
+  ]
+
+-- | The past mirror is the only way into the cell's room, and the room's only way
+-- out is the present mirror, whose light a shut door stops. Step through first and
+-- you are shut in: the crate has to reach the plate before you go. Kept to build on.
+oneWayIn :: Either String Level
+oneWayIn = room baseRules "One Way In" 42 12
+  [ "#############"
+  , "#############"
+  , "#############"
+  , "######.B#####"
+  , "######..#####"
+  , "######v######"
+  , "##.....######"
+  , "##.CP..######"
+  , "#############"
+  ]
+  [ "#############"
+  , "#############"
+  , "#############"
+  , "#############"
+  , "#.G.>D.######"
+  , "#############"
+  , "###S.########"
+  , "###..########"
+  , "#############"
   ]
 
 -- | The echo levels, kept to build on.
@@ -202,7 +433,7 @@ firstLight = room baseRules "First Light" 48 20
 -- | The earlier campaign, kept to build on. Not played, and not held to the
 -- campaign's checks, since the player's weight on a plate can change their pars.
 extraLevels :: Either String [Level]
-extraLevels = sequence $ firstLight : echoLevels ++
+extraLevels = sequence $ theLongReflection : harrowPointBelow : firstLight : oneWayIn : crowdedTrack : echoLevels ++
   [ room baseRules "First Push" 42 16
       [ "#############"
       , "#############"
@@ -366,16 +597,31 @@ scanMap name width height allowed rows
       | otherwise = Left (name ++ ": unexpected character " ++ show c
                           ++ " at " ++ show (x :: Int, y))
 
--- | A mirror is drawn as the way its face looks: the light goes out that way.
-mirrorMarks :: String
-mirrorMarks = "^v<>"
+-- | A mirror set in the wall is drawn as the way its face looks: the light goes out
+-- that way. A movable one, standing on floor, is the compass letter of that way. A
+-- corner mirror, always set in the wall, is drawn as the corner its two faces make,
+-- as on a pipe map: @L@ looks north and east, @J@ north and west, @7@ south and west,
+-- @F@ south and east.
+fixedMirrorMarks, movableMirrorMarks, mirrorMarks :: String
+fixedMirrorMarks = "^v<>LJ7F"
+movableMirrorMarks = "nsew"
+mirrorMarks = fixedMirrorMarks ++ movableMirrorMarks
 
-mirrorFace :: Char -> Maybe Dir
-mirrorFace c = case c of
-  '^' -> Just DirUp
-  'v' -> Just DirDown
-  '<' -> Just DirLeft
-  '>' -> Just DirRight
+-- | The face a mark looks out of, and a corner mirror's second face.
+mirrorShape :: Char -> Maybe (Dir, Maybe Dir)
+mirrorShape c = case c of
+  '^' -> Just (DirUp, Nothing)
+  'v' -> Just (DirDown, Nothing)
+  '<' -> Just (DirLeft, Nothing)
+  '>' -> Just (DirRight, Nothing)
+  'n' -> Just (DirUp, Nothing)
+  's' -> Just (DirDown, Nothing)
+  'w' -> Just (DirLeft, Nothing)
+  'e' -> Just (DirRight, Nothing)
+  'L' -> Just (DirUp, Just DirRight)
+  'J' -> Just (DirUp, Just DirLeft)
+  '7' -> Just (DirDown, Just DirLeft)
+  'F' -> Just (DirDown, Just DirRight)
   _   -> Nothing
 
 exactlyOne :: String -> Char -> [(Char, Cell)] -> Either String Cell
@@ -389,7 +635,9 @@ exactlyOne name mark marks = case [c | (m, c) <- marks, m == mark] of
 -- one position shared by both eras, written on the past map, on floor in both.
 -- A pit blocks the past until a crate fills it. A plate, on the past map, is floor
 -- in both eras so a crate can rest on it. A door, on the present map, is a wall until
--- every plate holds a crate. The budget
+-- every plate holds a crate. A mirror stands in the era of the map it is on: one set
+-- in the wall (^ v < >) is solid there for good, and a movable one (n s e w) stands
+-- on floor that it leaves behind when pushed. The budget
 -- is in seconds: the cheapest possible cost plus the level's slack.
 parseLevel :: Int -> [String] -> [String] -> Either String Level
 parseLevel budget past present = do
@@ -398,12 +646,18 @@ parseLevel budget past present = do
     _           -> Left "past: rows are empty or of different widths"
   let height = length past
   pastMarks    <- scanMap "past" width height ("#.BC~P" ++ mirrorMarks) past
-  presentMarks <- scanMap "present" width height ("#.GSD" ++ mirrorMarks) present
+  presentMarks <- scanMap "present" width height ("#.GSDT" ++ mirrorMarks) present
   powerCell <- exactlyOne "past" 'B' pastMarks
   goal      <- exactlyOne "present" 'G' presentMarks
   spawn     <- exactlyOne "present" 'S' presentMarks
-  let open marks = Set.fromList [c | (m, c) <- marks, m `notElem` ("#~D" ++ mirrorMarks)]
-      mirrorsIn era marks = [ (c, (era, face)) | (m, c) <- marks, Just face <- [mirrorFace m] ]
+  spawn2    <- case [c | ('T', c) <- presentMarks] of
+    []  -> Right Nothing
+    [c] -> Right (Just c)
+    _   -> Left "present: more than one 'T'; a level has at most two keepers"
+  let open marks = Set.fromList [c | (m, c) <- marks, m `notElem` ("#~D" ++ fixedMirrorMarks)]
+      mirrorsIn era marks = [ (c, Mirror era face (m `elem` movableMirrorMarks) bend)
+                            | (m, c) <- marks, Just (face, bend) <- [mirrorShape m] ]
+      movable = [ c | (c, m) <- Map.toList mirrors, mMovable m ]
       mirrors = Map.fromList (mirrorsIn Past pastMarks ++ mirrorsIn Present presentMarks)
       marked mark marks = Set.fromList [c | (m, c) <- marks, m == mark]
       pits = marked '~' pastMarks
@@ -414,9 +668,13 @@ parseLevel budget past present = do
       besideDoors = [ p | p <- Set.toList plates, d <- [minBound .. maxBound]
                         , stepCell d p `Set.member` doors ]
       leaks = filter onBorder (Set.toList (open pastMarks) ++ Set.toList (open presentMarks)
-                               ++ Set.toList pits ++ Set.toList doors)
-  if spawn `Set.member` crates
+                               ++ Set.toList pits ++ Set.toList doors ++ Map.keys mirrors)
+  if maybe False (`Set.member` crates) spawn2
+    then Left ("a crate stands on the second spawn at " ++ show spawn2)
+  else if spawn `Set.member` crates
     then Left ("a crate stands on the spawn at " ++ show spawn)
+  else if any (`Set.member` crates) movable
+    then Left "a movable mirror stands on a crate's cell"
   else if not (crates `Set.isSubsetOf` open presentMarks)
     then Left ("a crate stands in a present wall at "
                ++ show (Set.toList (crates `Set.difference` open presentMarks)))
@@ -438,6 +696,7 @@ parseLevel budget past present = do
       , lvCrates = crates, lvPits = pits, lvPlates = plates, lvDoors = doors
       , lvMirrors = mirrors
       , lvBudget = budget, lvRules = baseRules
-      , lvName = "", lvPar = budget, lvDressed = False
+      , lvName = "", lvLesson = "", lvPar = budget, lvDressed = False
+      , lvSpawn2 = spawn2, lvPassage = [], lvSecret = False
       }
     else Left ("border is open at " ++ show leaks)

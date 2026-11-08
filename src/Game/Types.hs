@@ -8,7 +8,9 @@ module Game.Types
   , Motion (..)
   , Feedback (..), FeedbackKind (..)
   , Rules (..), baseRules, echoRules
+  , Mirror (..), mirrorFaces, exitFace
   , Level (..)
+  , Partner (..)
   , Snapshot (..)
   , Spot
   , Game (..)
@@ -56,12 +58,20 @@ data TickInput = TickInput
   , tiPeek    :: !Bool
   , tiEcho    :: !Bool
   ,tiInstructions :: Bool
+  , tiLobby   :: !Bool          -- ^ leave a level and return to level select
   , tiDirRevealed :: !Bool     -- ^ no direction went down this tick, so if 'tiDir'
                                --   changed, a newer key was let go of, not a press
+    -- In a level for two, each keeper has their own keys: W A S D for the first,
+    -- the arrows for the second. 'tiDir' above is either set, for one player.
+  , tiDir1    :: !(Maybe Dir)  -- ^ the W A S D keys alone
+  , tiDir1Revealed :: !Bool
+  , tiDir2    :: !(Maybe Dir)  -- ^ the arrow keys alone
+  , tiDir2Revealed :: !Bool
   } deriving (Eq, Show)
 
 noInput :: TickInput
-noInput = TickInput { tiDir = Nothing, tiShift = False, tiEnter = False, tiRestart = False, tiPause = False, tiUndo = False, tiPeek = False, tiEcho = False, tiInstructions = False, tiDirRevealed = False }
+noInput = TickInput Nothing False False False False False False False False False False
+                    Nothing False Nothing False
 
 -- | The player does exactly one of these at a time. Being a sum type, "walking
 -- while shifting" cannot be represented at all.
@@ -84,6 +94,8 @@ data FeedbackKind
   | EchoNeedsSteps      -- ^ E with no footprints behind the player to walk back along
   | EchoInDoorway       -- ^ E while standing in a door: a new echo could shut it on you
   | JumpNeedsPress      -- ^ holding a key walks up a mirror's light; jumping takes a new press
+  | MirrorFaceSide      -- ^ pressed into a mirror's face with nowhere to land: faces never push
+  | MirrorFixed         -- ^ pressed against a mirror set in the wall, which never moves
   deriving (Eq, Show)
 
 data Feedback = Feedback
@@ -113,6 +125,35 @@ baseRules = Rules { ruStepCost = 2, ruShiftCost = 6, ruUndoRefundPercent = 50
 echoRules :: Rules
 echoRules = baseRules { ruEchoLength = 5 }
 
+-- | A mirror stands in one era and throws light out of its face. A fixed one is set
+-- in the wall; a movable one stands on floor and can be pushed from its back or sides.
+data Mirror = Mirror
+  { mEra     :: !Era
+  , mFace    :: !Dir
+  , mMovable :: !Bool
+  , mBend    :: !(Maybe Dir)  -- ^ a corner mirror's second face, at right angles to
+                              --   the first; it turns the light, and whoever steps through
+  } deriving (Eq, Ord, Show)
+
+-- | Every way a mirror throws light: one face, or two for a corner mirror.
+mirrorFaces :: Mirror -> [Dir]
+mirrorFaces m = mFace m : maybe [] pure (mBend m)
+
+-- | Stepping into a mirror while moving @dir@: the way you come out. Straight on,
+-- behind it, for a flat mirror; out of the other face for a corner one.
+exitFace :: Mirror -> Dir -> Dir
+exitFace m dir = case mBend m of
+  Nothing -> dir
+  Just b
+    | b == reverseDir dir -> mFace m
+    | otherwise -> b
+  where
+    reverseDir d = case d of
+      DirUp -> DirDown
+      DirDown -> DirUp
+      DirLeft -> DirRight
+      DirRight -> DirLeft
+
 -- | Both eras of the one location. Anything not in a walkable set is solid, so
 -- out-of-bounds cells need no special case.
 data Level = Level
@@ -127,13 +168,31 @@ data Level = Level
   , lvPits     :: !(Set Cell)
   , lvPlates   :: !(Set Cell)   -- ^ in the past: crates resting on all of them open...
   , lvDoors    :: !(Set Cell)   -- ^ ...these, in the present; solid walls otherwise
-  , lvMirrors  :: !(Map Cell (Era, Dir))
-    -- ^ a mirror is solid in its own era, and its face looks out this way
+  , lvMirrors  :: !(Map Cell Mirror)
+    -- ^ where the mirrors start; a mirror is solid in its own era
   , lvBudget   :: !Int          -- ^ seconds available in this level
   , lvRules    :: !Rules
   , lvName     :: !String
+  , lvLesson   :: !String       -- ^ the mechanic this level introduces
   , lvPar      :: !Int          -- ^ the cheapest possible cost; a test re-derives it
   , lvDressed  :: !Bool         -- ^ the original station, with its hand-placed dressing
+  , lvSpawn2   :: !(Maybe Cell) -- ^ where a second keeper starts, in a level for two
+  , lvPassage  :: ![Cell]       -- ^ walls that open once the level is won, from the
+                                --   lighthouse outward: the way on to a hidden level
+  , lvSecret   :: !Bool         -- ^ never listed in the level hall; only found
+  } deriving (Eq, Show)
+
+-- | The second keeper, in a level for two. The fields are the keeper's own half of
+-- 'Game'; the era, the crates, the mirrors and the time are shared.
+data Partner = Partner
+  { ptCell        :: !Cell
+  , ptHasCell     :: !Bool
+  , ptMotion      :: !Motion
+  , ptFacing      :: !Dir
+  , ptPushing     :: !(Maybe Cell)
+  , ptPendingMove :: !(Maybe Dir)
+  , ptArmed       :: !Bool
+  , ptBump        :: !Int
   } deriving (Eq, Show)
 
 -- | A place in time: which era, and which cell of it.
@@ -149,7 +208,9 @@ data Snapshot = Snapshot
   , snFacing  :: !Dir
   , snTrail   :: ![Spot]
   , snEcho    :: !(Maybe Spot)
+  , snMirrors :: !(Map Cell Mirror)
   , snCost    :: !Int
+  , snPartner :: !(Maybe Partner)  -- ^ the second keeper, where they stood
   } deriving (Eq, Show)
 
 data Game = Game
@@ -160,11 +221,12 @@ data Game = Game
   , gRemaining    :: !Int          -- ^ seconds of budget left; only actions spend it
   , gCrates       :: !(Set Cell)
   , gFilled       :: !(Set Cell)   -- ^ pits a crate has been pushed into
+  , gMirrors      :: !(Map Cell Mirror) -- ^ where every mirror stands now
   , gTrail        :: ![Spot]       -- ^ where the player has stood, newest first, their
                                    --   own spot included; an echo walks it back
   , gEcho         :: !(Maybe Spot) -- ^ where the echo stands, holding down any plate
   , gHistory      :: ![Snapshot]   -- ^ accepted actions, newest first, for undo
-  , gPushing      :: !(Maybe Cell) -- ^ where this step's crate is going; only for drawing
+  , gPushing      :: !(Maybe Cell) -- ^ where this step's crate or mirror is going; only for drawing
   , gAttempt      :: !Int          -- ^ counts starts and restarts
   , gMotion       :: !Motion
   , gFacing       :: !Dir          -- ^ which way the keeper looks; no rule reads it
@@ -178,6 +240,7 @@ data Game = Game
   , gArmed        :: !Bool         -- ^ the held direction was freshly pressed in this
                                    --   screen, so it may repeat
   , gShowInstructions :: Bool
+  , gPartner      :: !(Maybe Partner) -- ^ the second keeper, in a level for two
   } deriving (Eq, Show)
 
 ticksPerSecond :: Int

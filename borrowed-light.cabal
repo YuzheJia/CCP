@@ -22,31 +22,38 @@ library
                     Game.Fx
                     Game.Solution
                     Game.Run
+                    Game.Sound
   build-depends:    base >=4.18 && <5, containers >=0.6 && <0.8
 
 executable borrowed-light
   import:           shared
   hs-source-dirs:   app
   main-is:          Main.hs
-  other-modules:    Draw
+  other-modules:    Audio
+                    Draw
                     Figures
                     Font
                     Hud
+                    Lobby
                     Platform
                     Render
+                    Save
                     Station
+                    Synth
                     Title
-  build-depends:    base >=4.18 && <5, borrowed-light, containers, gloss ==1.13.*
+  build-depends:    base >=4.18 && <5, array, borrowed-light, bytestring, containers, directory, filepath, gloss ==1.13.*
   ghc-options:      "-with-rtsopts=-A32m"
+  -- The sound mixer. It plays through winmm on Windows and is silent elsewhere.
+  c-sources:        cbits/audio.c
+  cc-options:       -O2
+  if os(windows)
+    extra-libraries: winmm
   -- The game runs no Haskell threads. On Windows it uses the single-threaded
   -- runtime, after two unexplained crashes in the threaded one while freeglut called
   -- back into Haskell; elsewhere it keeps the threaded runtime it was tested with.
+  -- Either way GLFW runs on the main OS thread, as it requires.
   if !os(windows)
     ghc-options:    -threaded
-  -- For the window's close button: see app/Platform.hs.
-  if os(darwin)
-    frameworks:     GLUT
-    extra-libraries: objc
 
 test-suite spec
   import:           shared
