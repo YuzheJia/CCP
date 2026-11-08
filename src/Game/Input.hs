@@ -16,7 +16,7 @@ data GameKey
   = KW | KA | KS | KD
   | KUp | KDown | KLeft | KRight
   | KSpace | KEnter | KRestart | KPause | KUndo | KPeek | KEcho
-  | KInstructions| KLobby
+  | KInstructions| KLobby | KCancel
 
   deriving (Eq, Ord, Show)
 
@@ -62,6 +62,7 @@ tickInput keys = TickInput
   , tiEcho    = down KEcho
   , tiInstructions = down KInstructions
   , tiLobby   = down KLobby
+  , tiCancel  = down KCancel
   , tiDirRevealed = null [d | Just d <- map dirOf (kTapped keys)]
   , tiDir1    = firstJust (map dirOf (wasd (kHeld keys ++ kTapped keys)))
   , tiDir1Revealed = null (wasd (kTapped keys))

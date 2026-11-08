@@ -48,10 +48,10 @@ import Game.Fx (roomCols, roomRows, roomOf)
 import Game.Logic
 import Game.Types
 
--- | Where the run is: the title, the opening film, the level hall, a level, or a
--- level's ending. The opening counts ticks since it began, and how long Enter (or
--- Space) has been held down to skip it.
-data RunMode = Title | Intro !Int !Int | Lobby | InLevel | Ending !Finale
+-- | Where the run is: the title, the saves (her orders, see "Game.Orders"), the
+-- opening film, the level hall, a level, or a level's ending. The opening counts
+-- ticks since it began, and how long Enter (or Space) has been held down to skip it.
+data RunMode = Title | Orders | Intro !Int !Int | Lobby | InLevel | Ending !Finale
   deriving (Eq, Ord, Show)
 
 -- | @runCompleted@ is the number of campaign levels cleared. @runUnlocked@ is
@@ -102,6 +102,8 @@ startRunAt levels i completed
 stepRun :: [Level] -> TickInput -> Run -> Run
 stepRun levels input run = case runMode run of
   Title    -> stepTitle
+  -- The orders screen is stepped by "Game.Orders", which knows the saves.
+  Orders   -> run { runGame = g { gPrev = input } }
   Intro age held -> stepIntro age held
   Lobby    -> stepLobby
   InLevel  -> stepLevel

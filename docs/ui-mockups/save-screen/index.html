@@ -1,0 +1,356 @@
+<title>Borrowed Light 存档界面</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&display=swap">
+<style>
+  /* Layout: one reading column; each design is the game's own 1280x800 canvas, with
+     numbered notes laid over it and explained underneath. Single dark look on purpose:
+     it is the game's night palette. */
+  :root {
+    color-scheme: dark;
+    --bg: #0a0f12;
+    --panel: #10181c;
+    --edge: #22313a;
+    --fg: #ece6da;
+    --dim: #97a6ab;
+    --sun: #f6b31c;
+    --warm: #ffe2a8;
+    --red: #e0604f;
+    --cool: #8fb4bf;
+    --ink: #0d0b12;
+    --pixel: "Silkscreen", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --body: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif;
+  }
+  html, body { background: var(--bg); color: var(--fg); }
+  body {
+    margin: 0;
+    font-family: var(--body);
+    font-size: 15px;
+    line-height: 1.75;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 40px 96px;
+  }
+  main { max-width: 1120px; margin: 0 auto; display: grid; gap: 80px; }
+  section { display: grid; gap: 20px; min-width: 0; }
+  .eyebrow { font-family: var(--pixel); font-size: 12px; letter-spacing: 0.14em; color: var(--sun); text-transform: uppercase; }
+  h1 { font-size: clamp(30px, 4.4vw, 46px); line-height: 1.15; margin: 0; text-wrap: balance; letter-spacing: 0.01em; }
+  h2 { font-size: clamp(22px, 2.6vw, 28px); line-height: 1.3; margin: 0; text-wrap: balance; }
+  h3 { font-size: 17px; margin: 0; }
+  p { margin: 0; max-width: 46em; }
+  .lede { color: var(--dim); font-size: 16px; }
+  .head { display: grid; gap: 14px; }
+  .tag { display: inline-block; font-family: var(--pixel); font-size: 11px; letter-spacing: 0.1em; padding: 2px 8px; border: 1px solid currentColor; color: var(--sun); vertical-align: 3px; margin-left: 8px; }
+  .tag.alt { color: var(--cool); }
+
+  /* References */
+  .refs { display: grid; gap: 0; border-top: 1px solid var(--edge); }
+  .ref { display: grid; grid-template-columns: 150px minmax(0, 1fr) minmax(0, 1fr); gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--edge); }
+  .ref b { font-weight: 600; }
+  .ref .what { color: var(--dim); }
+  .ref .ours::before { content: "→ "; color: var(--sun); }
+  .refs-head { display: grid; grid-template-columns: 150px minmax(0, 1fr) minmax(0, 1fr); gap: 20px; padding: 8px 0; font-family: var(--pixel); font-size: 11px; letter-spacing: 0.1em; color: var(--dim); }
+
+  /* Stage */
+  .stage { position: relative; aspect-ratio: 1280 / 800; max-width: 100%; background: #000; outline: 1px solid var(--edge); }
+  .stage canvas { display: block; width: 100%; height: 100%; }
+  .stage canvas:focus-visible { outline: 3px solid var(--sun); outline-offset: 3px; }
+  .pin {
+    position: absolute; transform: translate(-50%, -50%);
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--sun); color: var(--ink);
+    font: 700 13px/26px var(--body); text-align: center;
+    box-shadow: 0 0 0 3px rgba(5, 8, 10, 0.75);
+    pointer-events: none;
+  }
+  .nopins .pin { display: none; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .bar .spacer { flex: 1 1 auto; }
+  button, .toggle {
+    font: 13px/1 var(--body); color: var(--fg);
+    background: var(--panel); border: 1px solid var(--edge);
+    padding: 9px 14px; cursor: pointer; border-radius: 2px;
+  }
+  button:hover { border-color: var(--dim); }
+  button:focus-visible, .toggle:focus-within { outline: 2px solid var(--sun); outline-offset: 2px; }
+  button[aria-pressed="true"] { background: var(--sun); color: var(--ink); border-color: var(--sun); }
+  .toggle { display: inline-flex; gap: 8px; align-items: center; }
+  .keys { display: flex; flex-wrap: wrap; gap: 6px; }
+  .keys button { font-family: var(--pixel); font-size: 12px; min-width: 44px; }
+  .hint { color: var(--dim); font-size: 14px; }
+  kbd { font-family: var(--pixel); font-size: 11px; border: 1px solid var(--dim); padding: 1px 5px; border-radius: 2px; color: var(--fg); }
+
+  /* Notes */
+  .notes { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 32px; counter-reset: n; }
+  .notes li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .notes li::before { counter-increment: n; content: counter(n); width: 26px; height: 26px; border-radius: 50%; background: var(--sun); color: var(--ink); font: 700 13px/26px var(--body); text-align: center; }
+  .notes b { color: var(--warm); font-weight: 600; }
+
+  .proscons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .proscons h3 { font-family: var(--pixel); font-size: 12px; letter-spacing: 0.1em; font-weight: 400; color: var(--dim); margin-bottom: 6px; }
+  .proscons ul { margin: 0; padding-left: 1.2em; }
+
+  /* Flow */
+  .flow { display: grid; gap: 10px; }
+  .step { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 20px; padding: 14px 18px; background: var(--panel); border-left: 3px solid var(--edge); }
+  .step.key { border-left-color: var(--sun); }
+  .step .from { font-family: var(--pixel); font-size: 12px; letter-spacing: 0.06em; color: var(--warm); padding-top: 3px; }
+  .step ul { margin: 0; padding-left: 1.1em; }
+
+  .decide { counter-reset: d; list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  .decide li { padding: 14px 18px; border: 1px solid var(--edge); display: grid; gap: 4px; }
+  .decide li b::before { counter-increment: d; content: counter(d) ". "; color: var(--sun); }
+  .decide span { color: var(--dim); }
+  .impl { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; max-width: 52em; }
+  code { font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; font-size: 13px; color: var(--warm); }
+
+  @media (max-width: 760px) {
+    .ref, .refs-head { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .refs-head { display: none; }
+    .notes, .proscons { grid-template-columns: minmax(0, 1fr); }
+    .step { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+    .pin { width: 20px; height: 20px; font-size: 11px; line-height: 20px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+
+  /* Stills: one frame at exactly the game's size, nothing else. */
+  body.still { padding: 0; margin: 0; background: #000; }
+  body.still main { display: none; }
+  #still { display: none; }
+  body.still #still { display: block; width: 1280px; height: 800px; }
+</style>
+
+<canvas id="still" width="1280" height="800"></canvas>
+
+<main>
+  <header class="head">
+    <div class="eyebrow">Borrowed Light · Save screen · Draft 1</div>
+    <h1>存档界面：Mei 的运单</h1>
+    <p class="lede">每个存档做成 Mei 手里的一张外卖运单小票：送到第几站、路上花了多久、什么时候存的，一张小票全写清楚。画面都按游戏真实的 1280×800 画布画的，用的是游戏里现有的像素字体、笔画字体、标题画、对话框和 Mei 的立绘，没有新素材。方案 A 可以直接用键盘试玩。</p>
+  </header>
+
+  <section aria-labelledby="refs-title">
+    <h2 id="refs-title">从这些游戏里借了什么</h2>
+    <p>好的存档界面都在回答同一组问题：哪个是我的、我上次到哪了、花了多久、要不要开新档、删档会不会误删。下面是每个参考的做法，以及它在本作里变成了什么。</p>
+    <div class="refs" role="table" aria-label="参考游戏">
+      <div class="refs-head" role="row"><span role="columnheader">游戏</span><span role="columnheader">它怎么做</span><span role="columnheader">用在这里</span></div>
+      <div class="ref" role="row"><b role="cell">Hollow Knight</b><span class="what" role="cell">每个存档槽直接显示所在区域、完成度和游戏时长，不用点进去就认得出自己的档。</span><span class="ours" role="cell">每张运单写出下一站的房间名、一条路线进度条、路上时间。</span></div>
+      <div class="ref" role="row"><b role="cell">Celeste</b><span class="what" role="cell">存档是一张张卡片，选中的那张被抽出来；卡片上是有温度的数字（草莓、死亡次数）。</span><span class="ours" role="cell">选中的运单抬起来、投出黄色阴影；记“时空切换次数”这种只有本作才有的数字。</span></div>
+      <div class="ref" role="row"><b role="cell">Persona 5</b><span class="what" role="cell">菜单本身就是世界观的一部分，风格很强，但信息层级依然清楚。</span><span class="ours" role="cell">小票、胶带、红章、条码都是 Mei 世界里的真东西，不是通用面板。</span></div>
+      <div class="ref" role="row"><b role="cell">Destiny 2 等</b><span class="what" role="cell">危险操作要长按一段时间才生效，手滑不会误删。</span><span class="ours" role="cell">删档 = 按住 Enter 沿撕线把运单撕掉。和开场动画“长按跳过”是同一个手势，玩家已经学过。</span></div>
+      <div class="ref" role="row"><b role="cell">主机游戏自动存档</b><span class="what" role="cell">保存时在角落给一个不打断操作的小提示。</span><span class="ours" role="cell">通关回到关卡大厅时，右上角吐出一张“ORDER 1 SAVED”小票，几秒后收回。</span></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="a-title">
+    <h2 id="a-title">方案 A · 外卖运单<span class="tag">推荐</span></h2>
+    <p>标题画面按 Enter 后，三张运单贴在变暗的灯塔画面上。小票是热敏打印纸，所以用像素字体；界面外框（标题、按键）沿用站内铭牌的笔画字体，和关卡大厅一致。</p>
+    <div class="bar" role="group" aria-label="方案 A 的画面">
+      <button type="button" data-preset="select" aria-pressed="true">选择存档</button>
+      <button type="button" data-preset="confirm" aria-pressed="false">删除确认</button>
+      <button type="button" data-preset="print" aria-pressed="false">打印新运单</button>
+      <button type="button" data-preset="hall" aria-pressed="false">关卡大厅 · 已保存</button>
+      <button type="button" data-preset="hallfail" aria-pressed="false">保存失败</button>
+      <span class="spacer"></span>
+      <label class="toggle"><input type="checkbox" id="pins-a" checked> 标注</label>
+    </div>
+    <div class="stage" id="stage-a">
+      <canvas id="canvas-a" tabindex="0" aria-label="方案 A 可试玩画面：点一下画面后用键盘操作"></canvas>
+    </div>
+    <div class="bar">
+      <p class="hint">点一下画面后可用键盘试玩：<kbd>A</kbd><kbd>D</kbd> 或方向键选择，<kbd>Enter</kbd> 继续或开新运单，<kbd>Delete</kbd> 取消运单（再按住 <kbd>Enter</kbd> 撕掉），<kbd>Esc</kbd> 返回。</p>
+      <div class="keys" role="group" aria-label="触屏按键">
+        <button type="button" data-key="ArrowLeft" aria-label="左">◀</button>
+        <button type="button" data-key="ArrowRight" aria-label="右">▶</button>
+        <button type="button" data-key="Enter">Enter</button>
+        <button type="button" data-key="Delete">Del</button>
+        <button type="button" data-key="Escape">Esc</button>
+      </div>
+    </div>
+    <ol class="notes" id="notes-a"></ol>
+  </section>
+
+  <section aria-labelledby="b-title">
+    <h2 id="b-title">方案 B · 守塔人日志<span class="tag alt">备选</span></h2>
+    <p>保留整张标题画，三块黄铜铭牌放在海面上。灯塔本身显示选中存档的进度：每通关一个房间亮一扇窗，送达后现在这一半的灯也亮起来；光束转过去照着选中的铭牌。<kbd>A</kbd><kbd>D</kbd> 可以切换看效果。</p>
+    <div class="stage" id="stage-b">
+      <canvas id="canvas-b" tabindex="0" aria-label="方案 B 画面：点一下后用 A D 切换"></canvas>
+    </div>
+    <div class="proscons">
+      <div>
+        <h3>好在哪</h3>
+        <ul>
+          <li>从标题画面过来几乎无缝，氛围最强。</li>
+          <li>“灯塔亮了几扇窗”这个进度，眯着眼都看得懂。</li>
+          <li>光束当选择光标，很有记忆点。</li>
+        </ul>
+      </div>
+      <div>
+        <h3>差在哪</h3>
+        <ul>
+          <li>铭牌空间小，只放得下 3 行字，信息比 A 少。</li>
+          <li>跟 Mei 送货的故事没关系，像是另一个游戏的菜单。</li>
+          <li>灯塔只能同时显示一个存档的进度，三档对比要来回切。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="flow-title">
+    <h2 id="flow-title">在游戏里怎么走</h2>
+    <div class="flow">
+      <div class="step"><span class="from">TITLE · ENTER</span><ul><li><b>还没有任何存档</b>：不进运单界面，直接开 ORDER 1 → 开场动画 → 第 1 关。第一次玩不多一道门。</li><li><b>已有存档</b>：进入运单界面，光标默认停在上次玩的那张，连按两下 Enter 就能接着玩。</li></ul></div>
+      <div class="step key"><span class="from">YOUR ORDERS</span><ul><li>已有运单 + Enter → 关卡大厅（和现在一样）。</li><li>空运单 + Enter → 打印新运单 → 开场动画 → 第 1 关。</li><li>Delete → Mei 说明后果 → 按住 Enter 撕掉；松手就停，Esc 保留。</li><li>Esc → 标题画面。</li></ul></div>
+      <div class="step"><span class="from">LEVEL HALL · ESC</span><ul><li>回到运单界面（现在是回标题）。左上角标着这是哪张运单。</li></ul></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="impl-title">
+    <h2 id="impl-title">审核通过后要改的地方</h2>
+    <ul class="impl">
+      <li>存档文件升级成 v2，三个槽。现在的 <code>progress-v1.save</code> 第一次启动时自动变成 ORDER 1，进度不丢。</li>
+      <li>已有的数据：通关了几间、上次选的关。新记三项：路上时间（在关卡和大厅里累计）、时空切换次数、保存时刻。</li>
+      <li>房间里的进度照旧不存，副标题和大厅底部直接写明“每通关一个房间保存一次”，不让玩家误以为中途退出也能接着来。</li>
+      <li><code>Game/Run.hs</code> 加一个运单模式，<code>app/</code> 下新增一个文件画它，<code>Main.hs</code> 加 Delete / Backspace 键，音效加“打印”和“撕纸”（可用对话框的打字音改）。</li>
+      <li>写盘失败时小票变红写“COULD NOT SAVE”，不假装存好了（见上方“保存失败”）。</li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="decide-title">
+    <h2 id="decide-title">需要你定的</h2>
+    <ol class="decide">
+      <li><b>用 A 还是 B？</b><span>也可以 A 的运单 + B 的“灯塔亮窗”放进运单界面背景里。</span></li>
+      <li><b>三个存档槽够吗？</b><span>游戏三分钟一轮，三个够给朋友各开一档；两个会更简洁。</span></li>
+      <li><b>小票上的第二个数字记什么？</b><span>现在是“时空切换次数”（本作独有），也可以换成“重开次数”（像 Celeste 的死亡数）。</span></li>
+      <li><b>找到隐藏关后，运单上写不写它的名字？</b><span>现在只写“+ HIDDEN STOP FOUND”，不剧透关名。</span></li>
+    </ol>
+  </section>
+</main>
+
+<script src="game-data.js"></script>
+<script src="save-screen.js"></script>
+<script>
+(() => {
+  "use strict";
+  const SS = window.SaveScreen;
+  // Notes per screen: [x, y] in canvas units (origin centre, y up), and the text.
+  const NOTES = {
+    select: [
+      [[-430, 186], "<b>订单号最大</b>：玩家第一眼要找的是“哪个是我的”。"],
+      [[-456, 82], "<b>路线条</b>：灯芯 → 三个房间 → 灯塔。黑格已通关，黄格是下一站，空格还没到。缩小了也看得出进度。"],
+      [[-456, 4], "<b>下一站房间名</b>：回答“我上次到哪了”。"],
+      [[-456, -56], "<b>时长、时空切换次数、保存时间</b>放最后，用点线连到数值，像真的小票。"],
+      [[-330, 300], "<b>选中</b>：抬高、黄色投影（和对话框同一套）、头顶黄箭头（和教学标记同一个）。"],
+      [[330, 70], "<b>空槽 = 新运单</b>，写明会先播开场动画。"],
+      [[60, -358], "<b>底部按键随选中项变</b>：空槽时 Enter 写“New order”，也没有 DEL。"],
+      [[0, 286], "<b>副标题直说存档规则</b>：每通关一个房间保存一次。"],
+      [[60, 70], "<b>送达的运单盖红章</b>，灯塔亮；找到隐藏关多一行红字。"],
+    ],
+    confirm: [
+      [[140, 300], "<b>只留这一张在中间</b>，其它退暗，注意力只在要删的东西上。"],
+      [[-120, -300], "<b>Mei 亲口说后果</b>，具体到“两个房间、14 分钟”，而不是一句“确定删除吗？”。"],
+      [[-30, 177], "<b>按住 Enter 沿撕线撕开</b>：撕口从左往右走，撕线本身就是进度条。"],
+      [[530, -350], "<b>和跳过开场动画同一个手势</b>：“HOLD ENTER”加一条填充条。松手就停，Esc 保留，默认安全。"],
+    ],
+    print: [
+      [[0, -230], "<b>新运单从打印口吐出来</b>，标题先出、逐行往上走，配对话框的打字音。"],
+      [[330, 260], "<b>打完直接进开场动画</b>，然后第 1 关。"],
+    ],
+    hall: [
+      [[-520, 330], "<b>左上角标明这是哪张运单</b>，玩家知道自己在哪个存档里。"],
+      [[500, 290], "<b>通关回到大厅时吐出小票</b>“ORDER 1 SAVED”，约 3 秒后收回，不挡任何操作。"],
+      [[0, -356], "<b>底部写清楚 Esc 回运单界面</b>，以及什么时候会存。"],
+    ],
+    hallfail: [
+      [[500, 290], "<b>写盘失败就直说</b>：小票变红，写“COULD NOT SAVE”，下次通关再试。"],
+    ],
+  };
+
+  const stageA = document.getElementById("stage-a"), cvA = document.getElementById("canvas-a");
+  const notesA = document.getElementById("notes-a");
+  let S = SS.presetA("select"), shown = "select";
+  function placePins(name) {
+    stageA.querySelectorAll(".pin").forEach(p => p.remove());
+    notesA.innerHTML = "";
+    (NOTES[name] || []).forEach(([[x, y], html], i) => {
+      const pin = document.createElement("span");
+      pin.className = "pin"; pin.textContent = i + 1;
+      pin.style.left = ((x + 640) / 1280 * 100) + "%";
+      pin.style.top = ((400 - y) / 800 * 100) + "%";
+      stageA.appendChild(pin);
+      const li = document.createElement("li"); li.innerHTML = html; notesA.appendChild(li);
+    });
+    shown = name;
+  }
+  function viewName(st) {
+    if (st.view === "hall") return st.saveFailed ? "hallfail" : "hall";
+    if (st.view === "confirm" || st.view === "tearing") return "confirm";
+    if (st.view === "printing") return "print";
+    return "select";
+  }
+  function setPressed(name) {
+    document.querySelectorAll("[data-preset]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.preset === name)));
+  }
+  document.querySelectorAll("[data-preset]").forEach(b => b.addEventListener("click", () => {
+    S = SS.presetA(b.dataset.preset); setPressed(b.dataset.preset); placePins(b.dataset.preset); paused = b.dataset.preset !== "select";
+  }));
+  document.getElementById("pins-a").addEventListener("change", e => stageA.classList.toggle("nopins", !e.target.checked));
+
+  // Presets other than the first open still, so the notes line up; any key starts them.
+  let paused = false;
+  function press(key, down) {
+    const used = SS.keyA(S, key, down);
+    if (used) {
+      paused = false;
+      const name = viewName(S);
+      if (name !== shown) { placePins(name); setPressed(name); }
+    }
+    return used;
+  }
+  cvA.addEventListener("keydown", e => { if (e.repeat && e.key === "Enter") { e.preventDefault(); return; } if (press(e.key, true)) e.preventDefault(); });
+  cvA.addEventListener("keyup", e => { press(e.key, false); });
+  cvA.addEventListener("pointerdown", () => cvA.focus());
+  document.querySelectorAll("[data-key]").forEach(b => {
+    b.addEventListener("pointerdown", e => { e.preventDefault(); press(b.dataset.key, true); });
+    const up = () => press(b.dataset.key, false);
+    b.addEventListener("pointerup", up); b.addEventListener("pointerleave", up);
+    b.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (!e.repeat) press(b.dataset.key, true); } });
+    b.addEventListener("keyup", e => { if (e.key === "Enter" || e.key === " ") press(b.dataset.key, false); });
+  });
+
+  const cvB = document.getElementById("canvas-b");
+  const B = SS.freshB();
+  cvB.addEventListener("keydown", e => { if (SS.keyB(B, e.key, true)) e.preventDefault(); });
+  cvB.addEventListener("pointerdown", () => cvB.focus());
+
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function frame() {
+    SS.drawOn(cvA, false, () => SS.renderA(S));
+    SS.drawOn(cvB, false, () => SS.renderLog(B));
+  }
+
+  // Stills: #still-a1 ... #still-b1 draw one frame at the game's own size.
+  const STILLS = { "still-a1": "select", "still-a2": "confirm", "still-a3": "print", "still-a4": "hall", "still-a5": "hallfail" };
+  const hash = location.hash.slice(1);
+  if (hash.startsWith("still-")) {
+    document.body.classList.add("still");
+    const cv = document.getElementById("still");
+    if (hash === "still-b1") { const b = SS.freshB(); SS.drawOn(cv, true, () => SS.renderLog(b)); }
+    else { const st = SS.presetA(STILLS[hash] || "select"); SS.drawOn(cv, true, () => SS.renderA(st)); }
+    return;
+  }
+
+  placePins("select");
+  frame();
+  if (reduce) { window.addEventListener("resize", frame); return; }
+  let last = performance.now(), bank = 0;
+  function loop(now) {
+    bank = Math.min(0.1, bank + (now - last) / 1000); last = now;
+    while (bank >= 1 / 60) { if (!paused) SS.stepA(S); SS.stepB(B); bank -= 1 / 60; }
+    frame();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>

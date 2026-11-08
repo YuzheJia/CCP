@@ -1,17 +1,15 @@
 -- | The title screen: one tower, split down the middle into its two times.
-module Title (titleScreen, instructionsPopup) where
+module Title (titleScreen, titleBackground, instructionsPopup) where
 
 import Draw
 import Font
 import Graphics.Gloss
 
--- | Everything that holds still, drawn once.
-titleArt :: Picture
-titleArt = bake $ Pictures
-  [ headland
-  , tower
-  , labels
-  ]
+-- | Everything that holds still, drawn once: the tower on its headland, and the
+-- words over it.
+towerArt, labelArt :: Picture
+towerArt = bake (Pictures [headland, tower])
+labelArt = bake labels
 
 horizon :: Float
 horizon = -150
@@ -140,11 +138,26 @@ labels = Pictures
 -- | The still art, the turning beam and the rain.
 titleScreen :: Float -> Picture
 titleScreen clock = Pictures
+  [ titleBackground clock
+  , labelArt
+  , prompt
+  ]
+  where
+    glowK = 0.72 + 0.28 * sin (clock * 0.07)
+    prompt = Translate 0 (-350) (Pictures
+      [ Color (hexA 0x000000 0.45) (rectC 300 42 `shift` 6)
+      , Color (fade glowK (hex 0xFFE2A8)) (Translate 0 0 (textC 19 "Press Enter to begin"))
+      ])
+    shift pic dy = Translate 0 dy pic
+
+-- | The title without its words: the split sky and sea, the turning beam, the
+-- tower and the rain. The orders are laid out over it.
+titleBackground :: Float -> Picture
+titleBackground clock = Pictures
   [ backdrop
   , beam
-  , titleArt
+  , towerArt
   , rain
-  , prompt
   ]
   where
     swing = -8 + 7 * sin (clock * 0.012)
@@ -160,12 +173,6 @@ titleScreen clock = Pictures
             y = -400 + wrapTo 800 (800 * rnd i 4 8 - clock * speed)
       ]
     wrapTo size v = v - size * fromIntegral (floor (v / size) :: Int)
-    glowK = 0.72 + 0.28 * sin (clock * 0.07)
-    prompt = Translate 0 (-350) (Pictures
-      [ Color (hexA 0x000000 0.45) (rectC 300 42 `shift` 6)
-      , Color (fade glowK (hex 0xFFE2A8)) (Translate 0 0 (textC 19 "Press Enter to begin"))
-      ])
-    shift pic dy = Translate 0 dy pic
 
 instructionsPopup :: Picture
 instructionsPopup = Pictures

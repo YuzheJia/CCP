@@ -24,6 +24,7 @@ library
                     Game.Run
                     Game.Sound
                     Game.Story
+                    Game.Orders
   build-depends:    base >=4.18 && <5, containers >=0.6 && <0.8
 
 executable borrowed-light
@@ -36,6 +37,7 @@ executable borrowed-light
                     Font
                     Hud
                     Lobby
+                    OrdersScreen
                     PixelFont
                     Platform
                     Portrait
@@ -46,7 +48,7 @@ executable borrowed-light
                     TalkBox
                     Title
                     Video
-  build-depends:    base >=4.18 && <5, array, borrowed-light, bytestring, containers, directory, filepath, gloss ==1.13.*
+  build-depends:    base >=4.18 && <5, array, borrowed-light, bytestring, containers, directory, filepath, gloss ==1.13.*, time
   ghc-options:      "-with-rtsopts=-A32m"
   -- The sound mixer, which plays through winmm on Windows and is silent elsewhere,
   -- and turning off input methods (imm32), which would take the letter keys.

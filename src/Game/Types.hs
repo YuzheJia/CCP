@@ -59,6 +59,7 @@ data TickInput = TickInput
   , tiEcho    :: !Bool
   ,tiInstructions :: Bool
   , tiLobby   :: !Bool          -- ^ leave a level and return to level select
+  , tiCancel  :: !Bool          -- ^ Delete or Backspace: cancel the chosen order
   , tiDirRevealed :: !Bool     -- ^ no direction went down this tick, so if 'tiDir'
                                --   changed, a newer key was let go of, not a press
     -- In a level for two, each keeper has their own keys: W A S D for the first,
@@ -70,7 +71,7 @@ data TickInput = TickInput
   } deriving (Eq, Show)
 
 noInput :: TickInput
-noInput = TickInput Nothing False False False False False False False False False False
+noInput = TickInput Nothing False False False False False False False False False False False
                     Nothing False Nothing False
 
 -- | The player does exactly one of these at a time. Being a sum type, "walking

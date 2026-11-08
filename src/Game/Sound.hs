@@ -62,6 +62,10 @@ data Cue
   | CueTalkNext               -- ^ on to the next line
   | CueTalkBlip !Int          -- ^ a letter typed out: the how-manyth, for its pitch
   | CueTalkClose              -- ^ the talk box goes
+    -- Her orders: the saves.
+  | CuePrint                  -- ^ a row of a new order printed
+  | CueTearing !Int           -- ^ a little more of an order torn, while Enter is held
+  | CueTorn                   -- ^ and torn off: the order is cancelled
   deriving (Eq, Show)
 
 -- | In a level for two: the yellow keeper (W A S D, and the only one in any other
@@ -73,6 +77,11 @@ data Keeper = Yellow | Red
 cues :: [Level] -> (Run, Fx) -> (Run, Fx) -> [Cue]
 cues levels (r, fx) (r', fx') = case (runMode r, runMode r') of
   (Title, Lobby) -> [CueMenuEnter]
+  (Title, Orders) -> [CueMenuEnter]
+  (Orders, Title) -> [CueMenuBack]
+  (Orders, Lobby) -> [CueMenuEnter]
+  (Orders, Intro _ _) -> [CueMenuEnter, CueIntro]
+  (Lobby, Orders) -> [CueMenuBack]
   (Title, Intro _ _) -> [CueMenuEnter, CueIntro]
   (Intro _ _, InLevel) -> [CueIntroEnd]
   (Lobby, Title) -> [CueMenuBack]
@@ -211,6 +220,7 @@ silence = Beds 0 0 0 0 0 1 0 1
 beds :: [Level] -> Run -> Beds
 beds levels r = case runMode r of
   Title -> weather 0.5
+  Orders -> weather 0.45
   -- The film brings its own rain.
   Intro _ _ -> silence
   Lobby -> weather 0.35

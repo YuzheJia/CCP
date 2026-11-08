@@ -14,7 +14,8 @@
 --   --dump-sounds=DIR  write every sound to DIR as a WAV file, and exit
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
 --                    w a s d move, x shift, q echo, W A S D X the press alone, z undo,
---                    T Tab held, e Enter, p pause, r restart, ! Escape, i instructions, . one idle tick
+--                    T Tab held, e Enter, p pause, r restart, ! Escape, i instructions, . one idle tick,
+--                    c Delete (cancel an order), H Enter held for one tick
 --   --after=N        then run N more idle ticks
 --   --fps            print measured frames per second to stdout
 --   --trace          print the game state whenever phase, era, cell or inventory change
@@ -29,6 +30,7 @@ import Game.Fx
 import Game.Input
 import Game.Level
 import Game.Logic (initialGame)
+import Game.Orders
 import Game.Run
 import Game.Solution
 import Game.Sound
@@ -38,6 +40,7 @@ import GHC.Clock (getMonotonicTime)
 import Graphics.Gloss.Interface.Environment (getScreenSize)
 import Graphics.Gloss.Interface.IO.Game
 import qualified Lobby
+import OrdersScreen (hallOverlay, ordersScreen)
 import Platform (exitWhenWindowCloses, keepLetterKeys)
 import qualified Render
 import Save
@@ -56,7 +59,11 @@ data World = World
   , wBank   :: !Double       -- ^ unspent real time, in seconds
   , wScript :: [TickInput]   -- ^ overrides the keyboard while it lasts
   , wFrozen :: !Bool         -- ^ inspection only: no ticks at all
-  , wSaved  :: !Progress     -- ^ last progress successfully offered to the save file
+  , wBook   :: !Book         -- ^ her orders: the saves, the one in play kept up to date
+  , wDesk   :: !Desk         -- ^ the orders screen
+  , wSaved  :: !Book         -- ^ the orders as last written to the save file
+  , wSlipAge :: !(Maybe Int) -- ^ ticks since the hall's saved slip came out, while it is out
+  , wSlipMark :: !Int        -- ^ rooms the order in play had cleared when last slipped or entered
   , wCues   :: [Cue]         -- ^ sounds the ticks since the last frame started, newest first
   , wMuted  :: !Bool
   , wStory  :: !Story        -- ^ the courier's talk
@@ -90,11 +97,18 @@ main = do
       inspect = isJust prepared
       total = length levels
       requested = flag "level" >>= readMaybe
-  saved <- loadProgress total
+  book0 <- loadBook total
   video <- loadVideo
   player <- traverse newPlayer video
-  let startAt = max 0 (min (total - 1) (fromMaybe (savedSelected saved + 1) requested - 1))
-      completedAtStart = max (savedCompleted saved) (if isJust requested then startAt else 0)
+  let savedC = maybe 0 odCompleted (activeOrder book0)
+      savedS = maybe 0 odSelected (activeOrder book0)
+      startAt = max 0 (min (total - 1) (fromMaybe (savedS + 1) requested - 1))
+      completedAtStart = max savedC (if isJust requested then startAt else 0)
+      -- Opening on a level or on the film plays an order, so there must be one.
+      book1
+        | isJust requested = withProgress completedAtStart startAt book0
+        | watchFilm = ensureActive book0
+        | otherwise = book0
       -- The run as it opens: the saved place may be clamped back into the hall.
       start1 = (if isJust requested then startRunAt else startRunWithProgress) levels startAt completedAtStart
       watchFilm = "--intro" `elem` args && isJust video
@@ -124,7 +138,11 @@ main = do
               Nothing -> demoInputs (maybe 0 read (flag "pace")) (drop (runIndex start0) levels)
             else []
         , wFrozen = False
-        , wSaved = saved
+        , wBook = book1
+        , wDesk = closedDesk
+        , wSaved = book0
+        , wSlipAge = Nothing
+        , wSlipMark = savedC
         , wCues = [ CueIntro | watchFilm ]
         , wMuted = "--mute" `elem` args
         , wStory = noStory
@@ -178,10 +196,16 @@ main = do
             talk f = talkLayer (wStory w) f (fxClock (wFx w))
         case runMode run of
           Title -> pure (Render.render (scenes !! i) (levels !! i) g (wFx w) (wWindow w))
+          Orders -> pure (Render.fitted (wWindow w) (ordersScreen levels (wBook w) (wDesk w) (fxClock (wFx w))))
           Intro age held -> do
             frame <- traverse (`frameAt` age) player
             pure (Render.fitted (wWindow w) (introScreen (maybe 2 videoScale video) frame age held))
-          Lobby -> pure (Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w))
+          Lobby ->
+            let order = fromMaybe newOrder (activeOrder (wBook w))
+                saved = durableKey (wSaved w) == durableKey (wBook w)
+                slip = fmap (\age -> (age, saved, order)) (wSlipAge w)
+                over = hallOverlay levels (bkActive (wBook w) + 1) slip
+            in pure (Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) over (wWindow w))
           InLevel -> pure (Render.renderWith talk (scenes !! i) (levels !! i) shown (wFx w) (wWindow w))
           Ending f -> pure (Render.renderEnding (scenes !! i) (levels !! i) (beyond i) f g (wFx w) (wWindow w)))
     (\event (t, w) -> pure (t, onEvent event w))
@@ -201,13 +225,24 @@ main = do
           hFlush stdout
         pure (now, w''))
 
+-- | Write the orders when what they hold changes: at once for progress, a new or
+-- cancelled order, or a change of order; for the time on the road, every ten
+-- seconds of it, and whenever the run is back at the title or the orders. Each
+-- write stamps the order in play with the time. A write that fails is tried again.
 persistWorld :: World -> IO World
 persistWorld world
-  | progress == wSaved world = pure world
+  | not due = pure world
   | otherwise = do
-      saved <- saveProgress progress
-      pure (if saved then world { wSaved = progress } else world)
-  where progress = progressOf (wRun world)
+      now <- nowStamp
+      let book = stampActive now (wBook world)
+      written <- saveBook book
+      pure (if written then world { wBook = book, wSaved = book } else world)
+  where
+    ticksOf = maybe 0 odTicks . activeOrder
+    gap = abs (ticksOf (wBook world) - ticksOf (wSaved world))
+    resting = runMode (wRun world) `elem` [Title, Orders]
+    due = durableKey (wBook world) /= durableKey (wSaved world)
+          || gap >= 10 * ticksPerSecond || (resting && gap > 0)
 
 -- | The solver playing each level through the same keys a player would press.
 demoInputs :: Int -> [Level] -> [TickInput]
@@ -216,9 +251,10 @@ demoInputs pace levels = concat (zipWith3 play starts levels (map Just (drop 1 l
     press = noInput { tiEnter = True }
     pauseTicks = replicate 60 noInput
     paced action = actionInputs action ++ replicate pace noInput
-    -- The first level is started from the title; one after an ending starts itself;
-    -- any other is started from the last one's won plate.
-    starts = Just [press, noInput, press]
+    -- The first level is started from the title, through the orders and the hall
+    -- when there are any; one after an ending starts itself; any other is started
+    -- from the last one's won plate.
+    starts = Just [press, noInput, press, noInput, press]
            : [ if null (lvPassage l) then Just (replicate 150 noInput ++ [press]) else Nothing | l <- levels ]
     play start level next =
       maybe [] id start
@@ -241,9 +277,11 @@ demoInputs pace levels = concat (zipWith3 play starts levels (map Just (drop 1 l
       (_, Just (_, actions)) -> actions
       _ -> []
 
-tickBoth :: [Level] -> (Run, Fx) -> TickInput -> (Run, Fx)
-tickBoth levels (r, fx) input =
-  let r' = stepRun levels input r
+tickBoth :: [Level] -> (Campaign, Fx) -> TickInput -> (Campaign, Fx)
+tickBoth levels (cp, fx) input =
+  let cp' = stepCampaign levels input cp
+      r = cpRun cp
+      r' = cpRun cp'
       fx' = stepFx (runGame r) (runGame r') fx
       -- Coming into a level, from the hall or the level before, introduces it
       -- again; restarting the same level does not.
@@ -251,7 +289,7 @@ tickBoth levels (r, fx) input =
       inLevel x = case runMode x of
         InLevel -> True
         _ -> False
-  in (r', if entered then fx' { fxFocus = 0 } else fx')
+  in (cp', if entered then fx' { fxFocus = 0 } else fx')
 
 -- | Fixed ticks from real time. A long stall is dropped rather than replayed,
 -- so the game never fast-forwards through input the player did not see land.
@@ -278,10 +316,12 @@ oneTick levels w =
       (story0, free)
         | wTalks w = talkTick input (wRun w) (wStory w)
         | otherwise = (wStory w, True)
-      (r0, fx0)
-        | free = tickBoth levels (wRun w, wFx w) input
+      before = Campaign (wBook w) (wDesk w) (wRun w)
+      (after0, fx0)
+        | free = tickBoth levels (before, wFx w) input
         | otherwise = let held = holdRun input (wRun w)
-                      in (held, stepFx (runGame (wRun w)) (runGame held) (wFx w))
+                      in (before { cpRun = held }, stepFx (runGame (wRun w)) (runGame held) (wFx w))
+      r0 = cpRun after0
       -- The film ends the run's opening once it has run its length, and is not
       -- shown again this session. With no film, the opening ends at once.
       (r, fx) = case runMode r0 of
@@ -291,13 +331,30 @@ oneTick levels w =
       story
         | wTalks w = notice levels (wRun w) r story0
         | otherwise = story0
+      book = tally (wRun w) r (cpBook after0)
+      desk = cpDesk after0
       heard = cues levels (wRun w, wFx w) (r, fx) ++ storyCues (wStory w) story
+              ++ deskCues levels book (wDesk w) desk
+      -- The hall prints a slip when it is reached with a room cleared since the
+      -- last one, or since the order was taken up.
+      cleared = maybe 0 odCompleted (activeOrder book)
+      menu m = m `elem` [Title, Orders]
+      (slip, mark)
+        | menu (runMode (wRun w)) && not (menu (runMode r)) = (Nothing, cleared)
+        | runMode r == Lobby && playing (runMode (wRun w)) && cleared > wSlipMark w = (Just 0, cleared)
+        | runMode r == Lobby = (fmap (+ 1) (wSlipAge w), wSlipMark w)
+        | otherwise = (Nothing, wSlipMark w)
   in w { wRun = r, wFx = fx, wScript = script, wKeys = afterTick (wKeys w)
        , wCues = reverse heard ++ wCues w, wStory = story
-       , wIntroLen = if filmOver then 0 else wIntroLen w }
+       , wIntroLen = if filmOver then 0 else wIntroLen w
+       , wBook = book, wDesk = desk, wSlipAge = slip, wSlipMark = mark }
   where
     isIntro m = case m of
       Intro _ _ -> True
+      _ -> False
+    playing m = case m of
+      InLevel -> True
+      Ending _ -> True
       _ -> False
 
 onEvent :: Event -> World -> World
@@ -341,6 +398,8 @@ gameKey key = case key of
   SpecialKey KeyPad0 -> Just KSpace
   SpecialKey KeyTab   -> Just KPeek
   SpecialKey KeyEsc   -> Just KLobby
+  SpecialKey KeyDelete -> Just KCancel
+  SpecialKey KeyBackspace -> Just KCancel
   SpecialKey KeyEnter -> Just KEnter
   -- GLFW names the keypad's keys apart from the main ones; GLUT gave the same keys.
   SpecialKey KeyPadEnter -> Just KEnter
@@ -376,6 +435,8 @@ scriptInputs = concatMap one
       'r' -> [noInput { tiRestart = True }, noInput]
       'z' -> [noInput { tiUndo = True }, noInput]
       '!' -> [noInput { tiLobby = True }, noInput]  -- Escape: skips the film, leaves a level
+      'c' -> [noInput { tiCancel = True }, noInput]  -- Delete: asks to cancel the chosen order
+      'H' -> [noInput { tiEnter = True }]  -- Enter held for this tick, to tear an order
       'i' -> [noInput { tiInstructions = True }, noInput]  -- I: the instructions on the title
       '.' -> [noInput]
       _   -> []
@@ -384,7 +445,7 @@ scriptInputs = concatMap one
 -- end and leaves the rest, and whatever follows, to the keyboard.
 handOver :: Int -> Int -> Level -> [TickInput]
 handOver pace n level =
-  [press, noInput, press] ++ replicate 60 noInput
+  [press, noInput, press, noInput, press] ++ replicate 60 noInput
   ++ concatMap (\a -> actionInputs a ++ replicate pace noInput) (take (length route - n) route)
   ++ [noInput]
   where

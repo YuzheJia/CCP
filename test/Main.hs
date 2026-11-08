@@ -10,6 +10,7 @@ import Game.Fx
 import Game.Input
 import Game.Level
 import Game.Logic
+import Game.Orders
 import Game.Run
 import Game.Solution
 import Game.Sound
@@ -139,6 +140,7 @@ allChecks level = concat
   , soundChecks level
   , introChecks
   , storyChecks
+  , ordersChecks
   ]
 
 -- 1. ---------------------------------------------------------------------------
@@ -2138,6 +2140,124 @@ reportDuo = case secretLevels of
                   ++ show (drStates r) ++ " states")
         putStrLn ("level:  " ++ concatMap duoLabel route)
   _ -> pure ()
+
+-- Her orders: the saves ---------------------------------------------------------
+
+ordersChecks :: [Check]
+ordersChecks = case levelHall of
+  Left err -> [check ("orders: the levels parse: " ++ err) False]
+  Right levels ->
+    let steps cp inputs = foldl' (flip (stepCampaign levels)) cp inputs
+        tap i = [i, noInput]
+        right = noInput { tiDir = Just DirRight }
+        cancelKey = noInput { tiCancel = True }
+        order c s = newOrder { odCompleted = c, odSelected = s, odTicks = 14 * 60 * 60 }
+        book = Book [Just (order 2 2), Just (order 0 0), Nothing] 0
+        title b = Campaign b closedDesk (startRunWithProgress levels 2 2)
+        desk = steps (title book) (tap enter)
+        isIntro cp = case runMode (cpRun cp) of
+          Intro _ _ -> True
+          _ -> False
+        asking cp = case dkStep (cpDesk cp) of
+          Asking _ _ -> True
+          _ -> False
+        held n = replicate n enter
+        cancelling = steps desk (tap cancelKey)
+        torn = steps cancelling (held holdTicks ++ replicate tearTicks noInput)
+        shiftOnce level = let g0 = (startPlaying level) { gPrev = noInput } in (g0, applyAction level ShiftEra g0)
+    in
+    [ check "orders: with no order yet, Enter at the title takes the first one and plays the opening" $
+        let cp = steps (Campaign emptyBook closedDesk (startRun levels 0)) (tap enter)
+        in isIntro cp && bkActive (cpBook cp) == 0 && activeOrder (cpBook cp) /= Nothing
+    , check "orders: with orders, Enter at the title opens the desk on the order last played" $
+        runMode (cpRun desk) == Orders && dkSel (cpDesk desk) == 0
+    , check "orders: while the instructions are open, Enter at the title does nothing" $
+        let shown = (title book) { cpRun = (startRunWithProgress levels 2 2) { runGame = (runGame (startRunWithProgress levels 2 2)) { gShowInstructions = True } } }
+        in runMode (cpRun (steps shown (tap enter))) == Title
+    , check "orders: right chooses the next ticket, and stops at the last" $
+        dkSel (cpDesk (steps desk (tap right))) == 1
+        && dkSel (cpDesk (steps desk (concat (replicate 5 (tap right))))) == slotCount - 1
+    , check "orders: Enter on an order with rooms cleared opens the hall where it was" $
+        let cp = steps desk (tap enter)
+        in runMode (cpRun cp) == Lobby && runCompleted (cpRun cp) == 2 && runIndex (cpRun cp) == 2
+    , check "orders: Enter on an order with nothing cleared plays the opening, and makes it the one in play" $
+        let cp = steps desk (tap right ++ tap enter)
+        in isIntro cp && bkActive (cpBook cp) == 1 && runCompleted (cpRun cp) == 0
+    , check "orders: Enter on an empty slot prints a new order, then plays the opening" $
+        let printingNow = steps desk (concat (replicate 2 (tap right)) ++ tap enter)
+            done = steps printingNow (replicate printTicks noInput)
+        in runMode (cpRun printingNow) == Orders && orderAt 2 (cpBook printingNow) == Nothing
+           && isIntro done && bkActive (cpBook done) == 2 && orderAt 2 (cpBook done) == Just newOrder
+    , check "orders: Escape on the desk goes back to the title" $
+        runMode (cpRun (steps desk (tap lobbyKey))) == Title
+    , check "orders: Escape in the hall goes back to the desk, not the title" $
+        let hall = steps desk (tap enter)
+        in runMode (cpRun (steps hall (tap lobbyKey))) == Orders
+    , check "orders: Delete asks first; a tap of Enter tears nothing" $
+        let tapped = steps cancelling (tap enter ++ replicate 30 noInput)
+        in asking cancelling && asking tapped && orderAt 0 (cpBook tapped) /= Nothing
+    , check "orders: Delete on an empty slot does nothing" $
+        dkStep (cpDesk (steps desk (concat (replicate 2 (tap right)) ++ tap cancelKey))) == Choosing
+    , check "orders: Escape while she asks keeps the order" $
+        let kept = steps cancelling (held 20 ++ tap lobbyKey)
+        in dkStep (cpDesk kept) == Choosing && orderAt 0 (cpBook kept) /= Nothing
+    , check "orders: letting go of Enter takes the tear back" $
+        case dkStep (cpDesk (steps cancelling (held 30 ++ replicate 30 noInput))) of
+          Asking _ h -> h == 0
+          _ -> False
+    , check "orders: Enter already down when she asks does not count towards the tear" $
+        case dkStep (cpDesk (steps (title book) ([enter, enter { tiCancel = True }] ++ held 80))) of
+          Asking _ h -> h == 0
+          _ -> False
+    , check "orders: Enter held long enough tears the order off and says so" $
+        orderAt 0 (cpBook torn) == Nothing && dkNote (cpDesk torn) /= Nothing
+        && dkStep (cpDesk torn) == Choosing && orderAt 1 (cpBook torn) /= Nothing
+    , check "orders: cancelling the order in play leaves the run fresh" $
+        runCompleted (cpRun torn) == 0 && runMode (cpRun torn) == Orders
+    , check "orders: progress made in play is written into the order" $
+        let hall = steps desk (tap enter)
+            won = (cpRun hall) { runMode = InLevel, runIndex = 2, runGame = ((startPlaying (levels !! 2)) { gPhase = Won, gPrev = noInput }) }
+            cp = steps hall { cpRun = won } [noInput]
+        in fmap odCompleted (activeOrder (cpBook cp)) == Just 3
+    , check "orders: time on the road counts in play, not at the title or the desk" $
+        let r = startRun levels 0
+            inLevel = r { runMode = InLevel }
+            b = Book [Just newOrder, Nothing, Nothing] 0
+        in fmap odTicks (activeOrder (tally inLevel inLevel b)) == Just 1
+           && tally r r b == b && tally r r { runMode = Orders } b == b
+    , check "orders: an era shift counts; an undo does not" $
+        let level = levels !! 0
+            (g0, g1) = shiftOnce level
+            playing g = (startRun levels 0) { runMode = InLevel, runGame = g }
+            b = Book [Just newOrder, Nothing, Nothing] 0
+            -- An undo takes the shift back: the era changes and the history shrinks.
+            undoneFrom = g1
+            undone = g0
+        in gEra g1 /= gEra g0 && length (gHistory g1) > length (gHistory g0)
+           && fmap odShifts (activeOrder (tally (playing g0) (playing g1) b)) == Just 1
+           && fmap odShifts (activeOrder (tally (playing undoneFrom) (playing undone) b)) == Just 0
+    , check "orders: the save before the orders becomes the first order" $
+        bookFromProgress 2 1 == Book [Just newOrder { odCompleted = 2, odSelected = 1 }, Nothing, Nothing] 0
+    , check "orders: a book read back is made to fit: three slots, progress in range" $
+        normaliseBook (length levels) (Book [Just newOrder { odCompleted = 99, odSelected = 99, odTicks = -5 }] 7)
+          == Book [Just newOrder { odCompleted = length levels, odSelected = length levels - 1 }, Nothing, Nothing] 2
+    , check "orders: a book survives being written and read" $
+        let b = Book [Just (order 2 1) { odSaved = Just (Stamp 11 8 21 14) }, Nothing, Just newOrder] 2
+        in read (show b) == b
+    , check "orders: she names what a cancel would lose" $
+        let said = cancelLine levels 1 (order 2 2)
+        in "ORDER 1" `isInfixOf` said && "two rooms" `isInfixOf` said && "14 minutes" `isInfixOf` said
+           && "DELIVERED" `isInfixOf` cancelLine levels 2 (order 3 2)
+    , check "orders: the tear is heard as it goes, and when it comes off" $
+        let a = cpDesk (steps cancelling (held 7))
+            b = cpDesk (steps cancelling (held 8))
+            last1 = cpDesk (steps cancelling (held (holdTicks - 1)))
+            off = cpDesk (steps cancelling (held holdTicks))
+        in CueTearing 1 `elem` deskCues levels book a b && CueTorn `elem` deskCues levels book last1 off
+    , check "orders: the desk's moves into and out of play are heard" $
+        CueMenuEnter `elem` cues levels (cpRun (title book), initialFx) (cpRun desk, initialFx)
+        && CueIntro `elem` cues levels (cpRun desk, initialFx) (cpRun (steps desk (tap right ++ tap enter)), initialFx)
+    ]
 
 -- The opening film --------------------------------------------------------------
 

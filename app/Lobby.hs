@@ -7,9 +7,11 @@ import Game.Run
 import Game.Types
 import Graphics.Gloss
 
-renderLobby :: [Level] -> Run -> Float -> (Int, Int) -> Picture
-renderLobby levels run clock (winW, winH) = Pictures
-  [ Scale k k (lobbyScreen levels run clock)
+-- | The hall, with @over@ laid on it in canvas units: whose order it is, and the
+-- slip a save prints.
+renderLobby :: [Level] -> Run -> Float -> Picture -> (Int, Int) -> Picture
+renderLobby levels run clock over (winW, winH) = Pictures
+  [ Scale k k (Pictures [lobbyScreen levels run clock, over])
   , bars
   ]
   where
@@ -33,7 +35,7 @@ lobbyScreen levels run clock = Pictures
   -- A secret level is never listed: it is found, not chosen.
   , Pictures [levelCard i level | (i, level) <- zip [0 ..] levels, not (lvSecret level)]
   , Color (hex 0xDCE6E7) (Translate 0 (-326) (textC 13 "W S OR ARROWS   SELECT       ENTER   PLAY"))
-  , Color (hex 0x89A4AA) (Translate 0 (-355) (textC 11 "ESC TITLE SCREEN       PROGRESS SAVES AUTOMATICALLY"))
+  , Color (hex 0x89A4AA) (Translate 0 (-355) (textC 11 "ESC YOUR ORDERS       SAVED EVERY TIME A ROOM IS CLEARED"))
   ]
   where
     selected = runIndex run

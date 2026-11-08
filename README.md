@@ -26,14 +26,15 @@ cabal run borrowed-light
 
 `cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to select level N in the hall (and unlock it for development); `--level=4` opens the secret level directly. Add `--pace=N` to wait N ticks (60 a second) after each of the demo's moves.
 
-The game opens on its title screen. On a new save, Enter plays the **opening film**
-and goes from it straight into level 1 (see "The courier" below). Once a level is
-cleared, Enter opens the **Level Hall** instead; Escape from the
-hall returns to the title. Use W/S or the arrow keys to choose an unlocked lesson
-and Enter to play it. Escape returns to the hall from any point in a level.
-Clearing a room unlocks the next one. Completed rooms and the selected room are saved
-automatically in the operating system's user-data directory; an unfinished puzzle
-starts fresh when it is entered again.
+The game opens on its title screen. The first time, Enter takes a new order (a new
+save), plays the **opening film** and goes from it straight into level 1 (see "The
+courier" below). Once there is a save, Enter opens **Your orders**, the saves, with
+the one last played already chosen, so Enter twice carries on (see "Her orders"
+below). An order with a room cleared opens the **Level Hall**: use W/S or the arrow
+keys to choose an unlocked lesson and Enter to play it. Escape returns to the hall
+from any point in a level, and from the hall to the orders. Clearing a room unlocks
+the next one, and the order is saved at once; an unfinished puzzle starts fresh when
+it is entered again.
 
 ### Controls
 
@@ -47,9 +48,50 @@ starts fresh when it is entered again.
 | R | Restart |
 | Enter | Start / retry; on with the courier's talk (Space too) |
 | Enter, held | Skip the opening film |
-| Escape | Return to the Level Hall; skip the opening film |
+| Escape | Return to the Level Hall, and from it to the orders; skip the opening film |
+| Delete / Backspace | On the orders: cancel the chosen order (then hold Enter to tear it up) |
 | M | Sound off / on |
 | Window close button | Exit |
+
+### Her orders
+
+Each save is one of Mei's orders, kept on a delivery ticket, and three tickets are
+taped up over the title's lighthouse. Their design was worked out first as mockups,
+in [docs/ui-mockups/save-screen/](docs/ui-mockups/save-screen/), which can also be
+opened as a page and played with the keyboard.
+
+A ticket says, from the top: whose order and whether it is en route or done, the
+order number (the largest thing on it, since a player looks for theirs first), the
+route from the wick through the three rooms to the lamp, with cleared rooms black and
+the next stop yellow, the next stop by name, then the time on the road, how many
+times she changed era, and when it was last saved. A delivered order is stamped, and
+says so if the hidden level has been cleared too, without naming it. An empty slot
+offers a new order, and says the opening film comes first.
+
+A/D or the arrows choose a ticket; the chosen one lifts, with her yellow shadow and
+the talk's arrow over it. Enter continues it, to the hall, or to the opening if
+nothing is cleared yet; on an empty slot a new ticket prints, row by row, and the
+opening plays. Escape goes back to the title.
+
+**Cancelling** is the one thing here that cannot be undone, so it takes two steps.
+Delete (or Backspace) brings the ticket forward and Mei, in her talk box, says what
+would be lost: how many rooms and how many minutes on the road. Enter must then be
+held, as it is to skip the film: the ticket tears along its perforation as it is
+held, and letting go takes the tear back. Held for a second, the lower part drops
+away, and a note says the order is cancelled. Escape keeps it.
+
+**Saving.** The orders are written to `orders-v2.save` in the operating system's
+user-data directory: at once when a room is cleared, an order is taken or cancelled,
+or another order is chosen; the time on the road every ten seconds of play, and on
+returning to the title or the orders. Each write stamps the order in play with the
+time. On arriving in the hall with a room newly cleared, a slip prints at its top
+right, "ORDER 1 SAVED", and is taken back after three seconds; if the file could not
+be written it is red and says so, and the game keeps trying. The save from before
+the orders, `progress-v1.save`, is read as the first order if there is no orders
+file yet, and is left as it was.
+
+The desk is pure and tested, in [src/Game/Orders.hs](src/Game/Orders.hs); it is drawn
+by [app/OrdersScreen.hs](app/OrdersScreen.hs).
 
 ### The courier
 
@@ -362,7 +404,7 @@ as a WAV file and exits, to listen to them outside the game.
 
 ### Development flags
 
-`--intro` opens on the opening film whatever the save says, to watch it again. `--script=KEYS --after=N` runs keys instantly at startup, through the same ticks as the keyboard (talk and film included), and then freezes, to inspect an exact moment; `!` in it is Escape. `--trace` prints state changes, and whether sound is on and the film was found, and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
+`--intro` opens on the opening film whatever the save says, to watch it again. `--script=KEYS --after=N` runs keys instantly at startup, through the same ticks as the keyboard (talk and film included), and then freezes, to inspect an exact moment; `!` in it is Escape, `c` is Delete, and `H` holds Enter for one tick. `--trace` prints state changes, and whether sound is on and the film was found, and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
 
 To try the first-time flow without touching your own save, point `XDG_DATA_HOME` at an empty folder for that run: the save lives under it.
 
