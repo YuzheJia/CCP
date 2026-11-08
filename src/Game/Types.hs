@@ -8,7 +8,7 @@ module Game.Types
   , Motion (..)
   , Feedback (..), FeedbackKind (..)
   , Rules (..), baseRules, echoRules
-  , Mirror (..)
+  , Mirror (..), mirrorFaces, exitFace
   , Level (..)
   , Partner (..)
   , Snapshot (..)
@@ -130,7 +130,28 @@ data Mirror = Mirror
   { mEra     :: !Era
   , mFace    :: !Dir
   , mMovable :: !Bool
+  , mBend    :: !(Maybe Dir)  -- ^ a corner mirror's second face, at right angles to
+                              --   the first; it turns the light, and whoever steps through
   } deriving (Eq, Ord, Show)
+
+-- | Every way a mirror throws light: one face, or two for a corner mirror.
+mirrorFaces :: Mirror -> [Dir]
+mirrorFaces m = mFace m : maybe [] pure (mBend m)
+
+-- | Stepping into a mirror while moving @dir@: the way you come out. Straight on,
+-- behind it, for a flat mirror; out of the other face for a corner one.
+exitFace :: Mirror -> Dir -> Dir
+exitFace m dir = case mBend m of
+  Nothing -> dir
+  Just b
+    | b == reverseDir dir -> mFace m
+    | otherwise -> b
+  where
+    reverseDir d = case d of
+      DirUp -> DirDown
+      DirDown -> DirUp
+      DirLeft -> DirRight
+      DirRight -> DirLeft
 
 -- | Both eras of the one location. Anything not in a walkable set is solid, so
 -- out-of-bounds cells need no special case.

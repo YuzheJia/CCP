@@ -7,8 +7,10 @@
 --                                  of winning it, and hand over the keyboard
 --   borrowed-light --level=N       select level N in the lobby, counting from 1; a secret
 --                                  level, which the lobby never lists, is opened directly
+--   --mute                         start with the sound off; M turns it on and off
 --
 -- Development flags, used to inspect exact moments of the game:
+--   --dump-sounds=DIR  write every sound to DIR as a WAV file, and exit
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
 --                    w a s d move, x shift, q echo, W A S D X the press alone, z undo,
 --                    T Tab held, e Enter, p pause, r restart, . one idle tick
@@ -17,7 +19,8 @@
 --   --trace          print the game state whenever phase, era, cell or inventory change
 module Main (main) where
 
-import Control.Monad (when)
+import Audio
+import Control.Monad (forM_, when)
 import Data.IORef
 import Data.List (foldl', stripPrefix)
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
@@ -26,6 +29,7 @@ import Game.Input
 import Game.Level
 import Game.Run
 import Game.Solution
+import Game.Sound
 import Game.Types
 import GHC.Clock (getMonotonicTime)
 import Graphics.Gloss.Interface.Environment (getScreenSize)
@@ -35,7 +39,7 @@ import Platform (exitWhenWindowCloses)
 import qualified Render
 import Save
 import System.Environment (getArgs)
-import System.Exit (die)
+import System.Exit (die, exitSuccess)
 import System.IO (hFlush, stdout)
 import Text.Read (readMaybe)
 
@@ -48,6 +52,8 @@ data World = World
   , wScript :: [TickInput]   -- ^ overrides the keyboard while it lasts
   , wFrozen :: !Bool         -- ^ inspection only: no ticks at all
   , wSaved  :: !Progress     -- ^ last progress successfully offered to the save file
+  , wCues   :: [Cue]         -- ^ sounds the ticks since the last frame started, newest first
+  , wMuted  :: !Bool
   }
 
 -- | The 1280 x 800 the art is composed for, shrunk to fit a smaller display.
@@ -62,6 +68,9 @@ windowFor (screenW, screenH)
 main :: IO ()
 main = do
   args <- getArgs
+  case listToMaybe (mapMaybe (stripPrefix "--dump-sounds=") args) of
+    Just dir -> dumpSounds dir >> exitSuccess
+    Nothing -> pure ()
   windowSize <- windowFor <$> getScreenSize
   levels <- either (die . ("Level is malformed: " ++)) pure levelHall
   let flag name = listToMaybe (mapMaybe (stripPrefix ("--" ++ name ++ "=")) args)
@@ -78,13 +87,15 @@ main = do
       (run0, fx0) = foldl' (tickBoth levels) (start0, initialFx)
                     (maybe [] id prepared ++ replicate after noInput)
       scenes =
-        [ Render.mkScene (label i l) (i + 1 < shownTotal) l
+        [ Render.mkScene (place i l, lvName l) (i + 1 < shownTotal) (teaches i l) l
         | (i, l) <- zip [0 ..] levels ]
       -- The hall counts only the levels it lists; a secret level gives its number alone.
       shownTotal = lastVisible levels + 1
-      label i l
-        | lvSecret l = show (i + 1) ++ "   " ++ lvName l
-        | otherwise = show (i + 1) ++ " of " ++ show shownTotal ++ "   " ++ lvName l
+      place i l
+        | lvSecret l = show (i + 1)
+        | otherwise = show (i + 1) ++ " of " ++ show shownTotal
+      -- The keys are written under the map for the first two levels only.
+      teaches i l = i < 2 && not (lvSecret l)
       -- What an ending leads into, for the card at its end.
       beyond i
         | i + 1 < total = (show (i + 2), lvName (levels !! (i + 1)))
@@ -98,7 +109,13 @@ main = do
             else []
         , wFrozen = inspect
         , wSaved = saved
+        , wCues = []
+        , wMuted = "--mute" `elem` args
         }
+  -- Every sound is made here, before the window opens.
+  sound <- if inspect then pure False else startAudio
+  when ("--trace" `elem` args) $
+    putStrLn (if sound then "sound on" else "sound off: no output device, or not Windows") >> hFlush stdout
   start <- getMonotonicTime
   counter <- newIORef (start, 0 :: Int)
   firstFrame <- newIORef True
@@ -132,7 +149,13 @@ main = do
     (\_ (t, w) -> do
         now <- getMonotonicTime
         let w' = onFrame levels (now - t) w
-        w'' <- persistWorld w'
+        when sound $ do
+          setMuted (wMuted w')
+          forM_ (reverse (wCues w')) $ \c -> do
+            playCue c
+            when ("--trace" `elem` args) (putStrLn ("sound " ++ show c) >> hFlush stdout)
+          setBeds (beds levels (wRun w'))
+        w'' <- persistWorld w' { wCues = [] }
         let game = runGame (wRun w'')
         when ("--trace" `elem` args && (stateKey game /= stateKey (runGame (wRun w)) || runIndex (wRun w'') /= runIndex (wRun w) || runMode (wRun w'') /= runMode (wRun w))) $ do
           putStrLn ("mode=" ++ show (runMode (wRun w'')) ++ " level=" ++ show (runIndex (wRun w'') + 1) ++ " " ++ show (stateKey game) ++ " remaining=" ++ show (gRemaining game))
@@ -161,12 +184,19 @@ demoInputs pace levels = concat (zipWith3 play starts levels (map Just (drop 1 l
     play start level next =
       maybe [] id start
       ++ pauseTicks
-      ++ concatMap paced (route level) ++ [noInput]
+      ++ moves level ++ [noInput]
       ++ (if not (null (lvPassage level)) && isJust next then ending level else [])
     -- Wait for the wall to open, step into the passage, and run it to the end,
     -- changing era at each barrier as a keeper reading the way ahead would.
     ending level = replicate (revealTicks level + 50) noInput ++ actionInputs (Go DirUp)
              ++ [noInput] ++ rushInputs level ++ replicate (arrivalTicks + 30) noInput
+    -- A level for two is played by the search for two, both keepers' keys.
+    moves level
+      | isJust (lvSpawn2 level) =
+          case drGoal (duoSearch level (const True) (startPlaying level)) of
+            Just (_, actions) -> concatMap (\a -> duoInputs a ++ replicate pace noInput) actions
+            Nothing -> []
+      | otherwise = concatMap paced (route level)
     route level = case (knownRoute level, srGoal (search level (\_ _ -> True) (startPlaying level))) of
       (Just actions, _) -> actions
       (_, Just (_, actions)) -> actions
@@ -174,7 +204,15 @@ demoInputs pace levels = concat (zipWith3 play starts levels (map Just (drop 1 l
 
 tickBoth :: [Level] -> (Run, Fx) -> TickInput -> (Run, Fx)
 tickBoth levels (r, fx) input =
-  let r' = stepRun levels input r in (r', stepFx (runGame r) (runGame r') fx)
+  let r' = stepRun levels input r
+      fx' = stepFx (runGame r) (runGame r') fx
+      -- Coming into a level, from the hall or the level before, introduces it
+      -- again; restarting the same level does not.
+      entered = inLevel r' && (not (inLevel r) || runIndex r' /= runIndex r)
+      inLevel x = case runMode x of
+        InLevel -> True
+        _ -> False
+  in (r', if entered then fx' { fxFocus = 0 } else fx')
 
 -- | Fixed ticks from real time. A long stall is dropped rather than replayed,
 -- so the game never fast-forwards through input the player did not see land.
@@ -198,10 +236,13 @@ oneTick levels w =
         (i : rest) -> (i, rest)
         []         -> (tickInput (wKeys w), [])
       (r, fx) = tickBoth levels (wRun w, wFx w) input
-  in w { wRun = r, wFx = fx, wScript = script, wKeys = afterTick (wKeys w) }
+      heard = cues levels (wRun w, wFx w) (r, fx)
+  in w { wRun = r, wFx = fx, wScript = script, wKeys = afterTick (wKeys w)
+       , wCues = reverse heard ++ wCues w }
 
 onEvent :: Event -> World -> World
 onEvent (EventResize size) w = w { wWindow = size }
+onEvent (EventKey (Char c) Down _ _) w | c `elem` "mM" = w { wMuted = not (wMuted w) }
 onEvent (EventKey key Down _ _) w = withKey key (keyDown) w
 onEvent (EventKey key Up _ _) w = withKey key (keyUp) w
 onEvent _ w = w

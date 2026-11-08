@@ -15,6 +15,13 @@ module Game.Solution
   , deadStates
   , allActions
   , actionLabel
+  , DuoAction (..)
+  , duoActions
+  , duoLabel
+  , applyDuo
+  , duoInputs
+  , DuoResult (..)
+  , duoSearch
   ) where
 
 import Data.List (foldl')
@@ -217,3 +224,92 @@ search level allowed start = SearchResult
     spread done (k : rest) =
       let new = [p | p <- Map.findWithDefault [] k predecessors, not (p `Set.member` done)]
       in spread (foldr Set.insert done new) (new ++ rest)
+
+-- Two keepers -----------------------------------------------------------------
+--
+-- A level for two is checked by its own small search, over the same real
+-- 'stepGame': each action is one keeper's key, or the shared era key. It is only for
+-- the tests, which ask it whether two keepers can light the lamp, and whether one,
+-- with the other standing still, cannot.
+
+data DuoAction = Go1 !Dir | Go2 !Dir | ShiftBoth
+  deriving (Eq, Ord, Show)
+
+duoActions :: [DuoAction]
+duoActions = ShiftBoth : map Go1 [minBound .. maxBound] ++ map Go2 [minBound .. maxBound]
+
+-- | W A S D for the first keeper, w a s d for the second (the arrows), @_@ a shift.
+duoLabel :: DuoAction -> String
+duoLabel a = case a of
+  ShiftBoth -> "_"
+  Go1 d -> actionLabel (Go d)
+  Go2 d -> case d of
+    DirUp -> "w"
+    DirDown -> "s"
+    DirLeft -> "a"
+    DirRight -> "d"
+
+duoPress :: DuoAction -> TickInput
+duoPress a = case a of
+  Go1 d -> noInput { tiDir = Just d, tiDir1 = Just d }
+  Go2 d -> noInput { tiDir = Just d, tiDir2 = Just d }
+  ShiftBoth -> noInput { tiShift = True }
+
+-- | Key states for one action, as 'actionInputs' gives them for one keeper.
+duoInputs :: DuoAction -> [TickInput]
+duoInputs a = case a of
+  ShiftBoth -> duoPress a : replicate shiftTicks noInput
+  _ -> duoPress a : replicate (stepTicks - 1) noInput
+
+-- | Press one key for one tick, then run until both keepers stand still.
+applyDuo :: Level -> DuoAction -> Game -> Game
+applyDuo level a g = settle (stepGame level (duoPress a) g)
+  where
+    settle s
+      | gPhase s == Playing && (gMotion s /= Settled || maybe False ((/= Settled) . ptMotion) (gPartner s))
+          = settle (stepGame level noInput s)
+      | otherwise = s
+
+-- | All a level for two can tell apart once both keepers stand still.
+type DuoKey = (Era, Cell, Bool, Maybe (Cell, Bool), Phase, Set.Set Cell, [(Cell, Mirror)])
+
+duoKey :: Game -> DuoKey
+duoKey g = ( gEra g, gCell g, gHasCell g, fmap (\p -> (ptCell p, ptHasCell p)) (gPartner g)
+           , gPhase g, gCrates g, filter (mMovable . snd) (Map.toList (gMirrors g)) )
+
+data DuoResult = DuoResult
+  { drStates :: !Int                        -- ^ states reached
+  , drGoal   :: !(Maybe (Int, [DuoAction])) -- ^ cheapest cost to win, and a route
+  }
+
+-- | Cheapest-first over the real rules, as 'search' is, with time refilled before
+-- each action. @allowed@ limits which actions may be taken.
+duoSearch :: Level -> (DuoAction -> Bool) -> Game -> DuoResult
+duoSearch level allowed start = go (Set.singleton (0, k0)) (Map.singleton k0 0)
+                                   (Map.singleton k0 start) Map.empty
+  where
+    k0 = duoKey start
+    acts = filter allowed duoActions
+    go queue costs games parents = case Set.minView queue of
+      Nothing -> DuoResult (Map.size costs) Nothing
+      Just ((cost, key), rest)
+        | cost > Map.findWithDefault cost key costs -> go rest costs games parents
+        | phaseOf key == Won -> DuoResult (Map.size costs) (Just (cost, routeTo parents key))
+        | phaseOf key /= Playing -> go rest costs games parents
+        | otherwise ->
+            let g = refill (games Map.! key)
+                step (q, cs, gs, ps) a =
+                  let next = applyDuo level a g
+                      nk = duoKey next
+                      nc = cost + gRemaining g - gRemaining next
+                  in if nk == key || maybe False (<= nc) (Map.lookup nk cs) then (q, cs, gs, ps)
+                     else (Set.insert (nc, nk) q, Map.insert nk nc cs, Map.insert nk next gs, Map.insert nk (key, a) ps)
+                (q', cs', gs', ps') = foldl' step (rest, costs, games, parents) acts
+            in go q' cs' gs' ps'
+    phaseOf (_, _, _, _, p, _, _) = p
+    refill g = g { gRemaining = 1000000, gHistory = [], gFeedback = Nothing, gBump = 0 }
+    routeTo parents = walk []
+      where
+        walk route k = case Map.lookup k parents of
+          Nothing -> route
+          Just (p, a) -> walk (a : route) p

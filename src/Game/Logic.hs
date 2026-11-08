@@ -32,6 +32,7 @@ module Game.Logic
   , opposite
   , jumpTarget
   , beamCells
+  , beamsOf
   , lightPasses
   , crossings
   , Hint (..)
@@ -454,12 +455,17 @@ lightPasses :: Level -> Game -> Era -> Cell -> Bool
 lightPasses level g era cell =
   clearCell level g era cell || (era == Past && cell `Set.member` lvPits level)
 
--- | The light a mirror throws out of its face, up to whatever stops it. Only in the
--- mirror's own era.
-beamCells :: Level -> Game -> Cell -> [Cell]
-beamCells level g mirror = case Map.lookup mirror (gMirrors g) of
-  Just m -> takeWhile (lightPasses level g (mEra m)) (drop 1 (iterate (stepCell (mFace m)) mirror))
+-- | The light a mirror throws out of each face, up to whatever stops it. Only in the
+-- mirror's own era. A corner mirror throws two.
+beamsOf :: Level -> Game -> Cell -> [(Dir, [Cell])]
+beamsOf level g mirror = case Map.lookup mirror (gMirrors g) of
+  Just m -> [ (face, takeWhile (lightPasses level g (mEra m)) (drop 1 (iterate (stepCell face) mirror)))
+            | face <- mirrorFaces m ]
   Nothing -> []
+
+-- | Every cell a mirror lights.
+beamCells :: Level -> Game -> Cell -> [Cell]
+beamCells level g mirror = concatMap snd (beamsOf level g mirror)
 
 -- | The mirror standing on this cell in this era, if there is one.
 mirrorAt :: Game -> Era -> Cell -> Maybe Mirror
@@ -477,13 +483,15 @@ opposite d = case d of
 -- | A mirror the player stands in the light of, facing it.
 data Jump = Jump
   { jMirror :: !Cell
-  , jTarget :: !Cell  -- ^ as far behind the mirror as the player stands in front of it
+  , jTarget :: !Cell  -- ^ as far behind the mirror as the player stands in front of it,
+                      --   or for a corner mirror, as far out of its other face
   , jOpen   :: !Bool  -- ^ whether the player could stand there, so the jump would happen
   } deriving (Eq, Show)
 
 -- | Looking along @dir@ from the player: if the light reaches a mirror in this era
--- whose face looks back at them, that mirror and where it would put them. The
--- player is in its light exactly when nothing stands between them.
+-- with a face looking back at them, that mirror and where it would put them. The
+-- player is in its light exactly when nothing stands between them. A flat mirror
+-- puts them behind it; a corner mirror turns them out of its other face.
 mirrorAhead :: Level -> Game -> Dir -> Maybe Jump
 mirrorAhead level g dir = look (1 :: Int) (stepCell dir (gCell g))
   where
@@ -491,8 +499,8 @@ mirrorAhead level g dir = look (1 :: Int) (stepCell dir (gCell g))
     look n c
       | lightPasses level g era c = look (n + 1) (stepCell dir c)
       | otherwise = case mirrorAt g era c of
-          Just m | mFace m == opposite dir ->
-            let target = iterate (stepCell dir) c !! n
+          Just m | opposite dir `elem` mirrorFaces m ->
+            let target = iterate (stepCell (exitFace m dir)) c !! n
             in Just (Jump c target (openCell level g era target))
           _ -> Nothing
 
@@ -602,7 +610,7 @@ tryStep level isFresh dir g
     -- pit or a door, open or shut, like a crate.
     pushMirror m
       | not (mMovable m) = if isFresh then hinted MirrorFixed else refused
-      | dir == opposite (mFace m) = if isFresh then hinted MirrorFaceSide else refused
+      | opposite dir `elem` mirrorFaces m = if isFresh then hinted MirrorFaceSide else refused
       | not mirrorRoom = refused
       | not isFresh = hinted PushNeedsPress
       | gRemaining g < cost = g { gFacing = dir }

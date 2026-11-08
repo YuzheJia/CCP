@@ -15,6 +15,7 @@ module Figures
   , landingMark
   , heldPlateGlow
   , mirrorArt
+  , bendMirrorArt
   , beamLight
   , jumpArrow
   , blockedLanding
@@ -292,6 +293,32 @@ fixedMirrorArt era face clock = rot (faceAngle face) (Pictures
   , Color (hexA (beamColor era) 0.35) (rect (-half + 4) (half - 6) (cs - 8) 3)
   ])
   where
+    (frame, backing) = case era of
+      Past    -> (hex 0xC2964F, hex 0x56676B)
+      Present -> (hex 0x6E7C82, hex 0x2E3D44)
+
+-- | A corner mirror set in the wall: the glass runs corner to corner, facing the two
+-- sides it throws light out of, and the wall fills the half behind it. Drawn looking
+-- north and east, then turned.
+bendMirrorArt :: Era -> Dir -> Dir -> Float -> Picture
+bendMirrorArt era a b clock = rot turn (Pictures
+  [ Color (hexA 0x000000 0.45) (rect (-half + 2) (-half + 2) (cs - 4) (cs - 4))
+  , Color frame (rect (-half + 5) (-half + 5) (cs - 10) (cs - 10))
+  , Color backing (Polygon [(-half + 11, half - 11), (half - 11, half - 11), (half - 11, -half + 11)])
+  , Color (hexA 0xFFFFFF 0.16) (Polygon [(-6, 14), (4, 14), (14, 4), (14, -6)])
+  , Color (hexA 0xFFFFFF (0.45 + 0.3 * sin (clock * 0.07))) (seg 3 (-half + 13, half - 13) (half - 13, -half + 13))
+  -- The two lit edges: the light leaves by these.
+  , Color (hexA (beamColor era) 0.9) (rect (-half + 13) (half - 15) (cs - 26) 6)
+  , Color (hexA (beamColor era) 0.9) (rect (half - 15) (-half + 13) 6 (cs - 26))
+  , Color (hexA (beamColor era) 0.35) (rect (-half + 4) (half - 6) (cs - 8) 3)
+  , Color (hexA (beamColor era) 0.35) (rect (half - 6) (-half + 4) 3 (cs - 8))
+  ])
+  where
+    turn = case (min a b, max a b) of
+      (DirUp, DirRight) -> 0
+      (DirDown, DirRight) -> 90
+      (DirDown, DirLeft) -> 180
+      _ -> 270
     (frame, backing) = case era of
       Past    -> (hex 0xC2964F, hex 0x56676B)
       Present -> (hex 0x6E7C82, hex 0x2E3D44)

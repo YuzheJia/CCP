@@ -158,33 +158,38 @@ campaign = sequence
   ]
 
 -- | Levels the hall never lists. Each is found from the end of the level before it.
--- A placeholder for now: the level itself is still being designed.
 secretLevels :: Either String [Level]
 secretLevels = sequence
   [ (\l -> l { lvSecret = True })
-    . withLesson "Two keepers. W A S D moves one, the arrows the other. Space shifts both, if both can stand there."
-    <$> room baseRules "Two Keepers" 34 66
-      -- Either keeper can carry the cell, and either can light the lamp. The era is
-      -- shared: a shift takes both, so it waits until both stand where the other era
-      -- has floor. In the past, the top row is open only then.
+    . withLesson "Two keepers, one era. A corner mirror turns you out of its other face, as far as you stood."
+    <$> room baseRules "Two Keepers" 118 60
+      -- Two islands with water (column 6) between, crossed only by corner mirrors, and
+      -- one way only: the far shore never sees their light. Whoever carries the cell
+      -- goes east -> the east mirror (past) into the vault -> pushes its door crate out
+      -- west -> the west mirror (present) onto the east jetty -> walks out once the
+      -- gate crate at (8,4) is pushed into the east mirror's light, home to the lamp.
+      -- It takes two: the gate can only be pushed from the east, after the carrier is
+      -- in the vault (it shuts the vault for good), and the vault door crate lands on
+      -- the one spot that crosses to the east island (5,2), so yellow must cross first.
+      -- Either keeper can carry.
       [ "#############"
-      , "#.....B.....#"
-      , "#.....#.....#"
-      , "#...........#"
-      , "#....#.#....#"
-      , "#....#.#....#"
-      , "#....#.#....#"
-      , "#...........#"
+      , "#B...##7#...#"
+      , "###.C.#....##"
+      , "####..#.#..##"
+      , "#.....#.C...#"
+      , "#.....##.#..#"
+      , "#.....##.#..#"
+      , "#....##..#..#"
       , "#############"
       ]
       [ "#############"
-      , "#####...#####"
-      , "#.S.#####.T.#"
-      , "#...........#"
-      , "#....###....#"
-      , "#....#G#....#"
-      , "#....#.#....#"
-      , "#...........#"
+      , "#########..G#"
+      , "####..##...##"
+      , "#####.###..##"
+      , "#.....#..#..#"
+      , "#.....##.#T.#"
+      , "#.S...##.#..#"
+      , "#....L#..#..#"
       , "#############"
       ]
   ]
@@ -593,22 +598,30 @@ scanMap name width height allowed rows
                           ++ " at " ++ show (x :: Int, y))
 
 -- | A mirror set in the wall is drawn as the way its face looks: the light goes out
--- that way. A movable one, standing on floor, is the compass letter of that way.
+-- that way. A movable one, standing on floor, is the compass letter of that way. A
+-- corner mirror, always set in the wall, is drawn as the corner its two faces make,
+-- as on a pipe map: @L@ looks north and east, @J@ north and west, @7@ south and west,
+-- @F@ south and east.
 fixedMirrorMarks, movableMirrorMarks, mirrorMarks :: String
-fixedMirrorMarks = "^v<>"
+fixedMirrorMarks = "^v<>LJ7F"
 movableMirrorMarks = "nsew"
 mirrorMarks = fixedMirrorMarks ++ movableMirrorMarks
 
-mirrorFace :: Char -> Maybe Dir
-mirrorFace c = case c of
-  '^' -> Just DirUp
-  'v' -> Just DirDown
-  '<' -> Just DirLeft
-  '>' -> Just DirRight
-  'n' -> Just DirUp
-  's' -> Just DirDown
-  'w' -> Just DirLeft
-  'e' -> Just DirRight
+-- | The face a mark looks out of, and a corner mirror's second face.
+mirrorShape :: Char -> Maybe (Dir, Maybe Dir)
+mirrorShape c = case c of
+  '^' -> Just (DirUp, Nothing)
+  'v' -> Just (DirDown, Nothing)
+  '<' -> Just (DirLeft, Nothing)
+  '>' -> Just (DirRight, Nothing)
+  'n' -> Just (DirUp, Nothing)
+  's' -> Just (DirDown, Nothing)
+  'w' -> Just (DirLeft, Nothing)
+  'e' -> Just (DirRight, Nothing)
+  'L' -> Just (DirUp, Just DirRight)
+  'J' -> Just (DirUp, Just DirLeft)
+  '7' -> Just (DirDown, Just DirLeft)
+  'F' -> Just (DirDown, Just DirRight)
   _   -> Nothing
 
 exactlyOne :: String -> Char -> [(Char, Cell)] -> Either String Cell
@@ -642,8 +655,8 @@ parseLevel budget past present = do
     [c] -> Right (Just c)
     _   -> Left "present: more than one 'T'; a level has at most two keepers"
   let open marks = Set.fromList [c | (m, c) <- marks, m `notElem` ("#~D" ++ fixedMirrorMarks)]
-      mirrorsIn era marks = [ (c, Mirror era face (m `elem` movableMirrorMarks))
-                            | (m, c) <- marks, Just face <- [mirrorFace m] ]
+      mirrorsIn era marks = [ (c, Mirror era face (m `elem` movableMirrorMarks) bend)
+                            | (m, c) <- marks, Just (face, bend) <- [mirrorShape m] ]
       movable = [ c | (c, m) <- Map.toList mirrors, mMovable m ]
       mirrors = Map.fromList (mirrorsIn Past pastMarks ++ mirrorsIn Present presentMarks)
       marked mark marks = Set.fromList [c | (m, c) <- marks, m == mark]

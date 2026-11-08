@@ -2,7 +2,8 @@
 module Draw
   ( -- * Layout (a 1280 x 800 canvas centred on the origin)
     canvasW, canvasH, cs, half
-  , mapLeft, mapTop, mapRight, mapBottom, panelX, panelW
+  , mapLeft, mapTop, mapRight, mapBottom
+  , board, onBoard
   , cellPos, cellVec, at
     -- * Colour
   , hex, hexA, fade, mix
@@ -11,6 +12,7 @@ module Draw
   , rot, glow
     -- * Baking
   , bake
+  , fadePicture
     -- * Noise and easing
   , rnd, clamp01, smooth, lerp
   ) where
@@ -38,9 +40,37 @@ mapTop = 342
 mapRight = mapLeft + 13 * cs
 mapBottom = mapTop - 9 * cs
 
-panelX, panelW :: Float
-panelX = 510
-panelW = 228
+-- | The board: the map and everything pinned to it, drawn in the coordinates above
+-- and then set down on the canvas at a scale, so nothing on screen ever covers a
+-- cell. It has two stands. While a level is introduced it stands smaller and to
+-- the right, leaving a column for the watch and the keys; once the keeper acts it
+-- grows and slides to the centre, with the sea around it. @f@ runs from 0, the
+-- introduction, to 1, play, already eased.
+data Stand = Stand
+  { stK :: !Float  -- ^ scale
+  , stX :: !Float  -- ^ where the map's centre lands, across
+  , stY :: !Float  -- ^ and up
+  }
+
+introStand, playStand :: Stand
+introStand = Stand k (canvasW / 2 - 24 - (mapRight + 12 - mapCentreX) * k) 4
+  where k = 0.86
+playStand = Stand 0.96 0 12
+
+mapCentreX :: Float
+mapCentreX = (mapLeft + mapRight) / 2
+
+standAt :: Float -> Stand
+standAt f = Stand (lerp f (stK introStand) (stK playStand))
+                  (lerp f (stX introStand) (stX playStand))
+                  (lerp f (stY introStand) (stY playStand))
+
+board :: Float -> Picture -> Picture
+board f = let Stand k x y = standAt f in Translate (x - mapCentreX * k) y . Scale k k
+
+-- | Where a point of the board lands on the canvas.
+onBoard :: Float -> (Float, Float) -> (Float, Float)
+onBoard f (px, py) = let Stand k x y = standAt f in (px * k + x - mapCentreX * k, py * k + y)
 
 -- | Centre of a cell, with fractional cells allowed for walking between them.
 cellVec :: Float -> Float -> (Float, Float)
@@ -183,6 +213,22 @@ bake = Pictures . regroup . flatten (1, 0, 0, 1, 0, 0) Nothing
       let (same, others) = span ((== c) . fst) rest
           body = Pictures (p : map snd same)
       in maybe body (`Color` body) c : regroup others
+
+-- | A picture at this much of its own opacity: every colour in it is faded, so a
+-- baked picture can come and go without being drawn again.
+fadePicture :: Float -> Picture -> Picture
+fadePicture k pic
+  | k >= 0.999 = pic
+  | k <= 0.001 = Blank
+  | otherwise = go pic
+  where
+    go p = case p of
+      Color c q -> Color (fade k c) (go q)
+      Pictures ps -> Pictures (map go ps)
+      Translate x y q -> Translate x y (go q)
+      Rotate a q -> Rotate a (go q)
+      Scale x y q -> Scale x y (go q)
+      other -> other
 
 -- | Repeatable noise in [0,1) from a position and a salt.
 rnd :: Int -> Int -> Int -> Float

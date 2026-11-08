@@ -45,6 +45,7 @@ starts fresh when it is entered again.
 | R | Restart |
 | Enter | Start / retry |
 | Escape | Return to the Level Hall |
+| M | Sound off / on |
 | Window close button | Exit |
 
 ### Time
@@ -52,6 +53,45 @@ starts fresh when it is entered again.
 Time is a budget, not a clock. A step costs 2 seconds and a shift costs 6, charged when the action is accepted. Standing still, pausing, refused actions and restarting cost nothing. Z restores the board exactly but refunds only half the action's cost, and R refills the budget at the price of walking it all again. With less than one step's price left, the level is lost, though Z still works from the lost screen. The prices live in a plain `Rules` record on each `Level`.
 
 Each option's budget is its verified route target plus enough slack for a first-time player to experiment.
+
+### The keeper's watch
+
+Time is read off a pocket watch beside the map (`app/Hud.hs`). Nothing on screen ever
+covers a cell.
+
+**Two stands.** Entering a level, from the hall or the level before, introduces it:
+the map stands smaller, to the right (0.86), and a column on the left carries the
+watch at full size, the level's place, name and era, and every key with its price.
+The first step, push, jump or shift that takes closes in on the board over about
+three quarters of a second: the column fades, the map grows to 0.96 and slides to
+the centre, and the watch shrinks into the left margin. A refused key does not end
+the introduction, and a restart keeps the closer view (`fxFocus` in `Game.Fx`).
+
+**The sea around it** says which era it is (`seaLife`, `shore` in `app/Station.hs`).
+In the past the shelf around the station is light, the surf calm, the sun glints to
+the east and the real lighthouse's beam sweeps by behind the station every ten
+seconds. In the present the surf is rougher and grey, rain falls across the whole
+screen, and there is no beam. The shelf, rocks and surf belong to the board and move
+with it; the beam, glints, rain and darkened edges belong to the screen.
+
+- **The ring** is the time left out of the level's budget, running back from twelve
+  like a hand. In the past it is brass and glows like the lamp; in the present it is
+  rusted steel and its light is cold.
+- **The number** is the seconds left. The one line under it says the most pressing
+  thing about time: a shift refused for want of time (`shift 6`), a mirror jump on
+  offer and its key (`jump -4`), what the last action spent or an undo gave back, or,
+  when under a fifth of the budget is left, how many steps remain.
+- **Spending** leaves an orange wake on the ring that fades; a jump on offer marks its
+  price as hatching; an undo's refund refills in green; a refused shift outlines the
+  part that is missing.
+- **Low time** turns the ring to embers with a breathing halo, and lights Z and R in
+  the line of keys.
+- **The plate** under the case names the era; **the socket** at four o'clock shows the
+  power cell's outline, lit once it is carried.
+
+In play, the first two levels keep their keys and prices in one line under the map.
+A level for two lists each keeper's keys under the watch instead, and a level of
+several rooms puts its room map there.
 
 ### Current levels
 
@@ -66,7 +106,7 @@ station shown a room at a time.
 
 **Two cameras.** A level built from whole rooms of 13 by 9 (The Long Way Round is 2
 by 2) is shown one room at a time: stepping through a doorway darkens the map, swaps
-the room and lightens again, and a small map in the panel shows the rooms seen so far.
+the room and lightens again, and a small map under the watch shows the rooms seen so far.
 A level of any other size (such as The Long Reflection, kept in `extraLevels`) slides under the map
 instead, keeping the keeper near the centre.
 
@@ -91,8 +131,7 @@ and level 4 begins.
 
 Level 4, "Two Keepers", is secret: the level hall never lists it, never selects it
 and never counts it, however much has been cleared. It is reached from the end of
-level 3, or directly with `--level=4` for development. For now its map is a
-placeholder while the level itself is designed. It is for two players:
+level 3, or directly with `--level=4` for development. It is for two players:
 
 | Keys | Who |
 |---|---|
@@ -104,8 +143,23 @@ Both keepers play by the same rules: either can push crates in the past, step
 through mirrors, carry the power cell and light the lamp. They never share a cell.
 The era is shared, so a shift waits until both stand still, and is refused (with the
 usual outline) unless both have floor in the other era. Time is shared too, and undo
-takes back the last action, whichever keeper took it. The solver knows one keeper
-only, so a level for two is not searched and never told it is a dead end.
+takes back the last action, whichever keeper took it. The game's own solver knows
+one keeper only, so a level for two is never told it is a dead end.
+
+The level is two islands with water between (column 6), crossed only by corner
+mirrors, and only one way, since the far shore never sees their light. The power
+cell is in a vault on the west island that only the east island's mirror (past)
+reaches; the vault's door crate only pushes out, onto the one spot from which the
+west mirror (present) carries a keeper to the east island, so yellow has to cross
+before the vault is opened. Whoever carries the cell comes back east onto a jetty
+shut by a gate crate, which can only be pushed from the east, into the east mirror's
+light, where it shuts the vault for good. So the gate is pushed by the keeper who
+stayed east, after the carrier has gone into the vault. Either keeper can carry.
+
+The tests check this with `duoSearch` in `Game.Solution`, a small search for two
+over the real `stepGame` (yellow's keys, red's keys, the shared Space). It finds the
+par (118), and finds no win for either keeper alone, or while the other stands
+still. It is only for the tests.
 
 The ending lives in `Game.Run` (`Ending` mode, stages `Lit` `Flare` `Opening`
 `Beckon` `Rush` `Arrival`), apart from the rules, so the solver, pars and level
@@ -136,6 +190,10 @@ A movable mirror (`n s e w` on the map, the compass letter of the way its face l
 - You can't switch era onto a mirror's cell. It doesn't hold plates down.
 
 A mirror set in the wall (`^ v < >`) never moves, and says so if you press against it. Each mirror is fixed or movable on its own, so one level can mix both. The mirrors live in the game state (`gMirrors`), so undo, restart, the solver and the dead-end warning all cover them.
+
+#### Corner mirrors
+
+A corner mirror (`L J 7 F` on the map, the corner its two faces make: `L` looks north and east, `J` north and west, `7` south and west, `F` south and east) is set in the wall with its glass running corner to corner, and throws light out of both faces. It turns whoever steps through it: stand in one face's light and press toward it, and you come out of the other face, **as far out as you stood in**. Two cells up its north light puts you two cells east of it. Everything else is as for any mirror: the reflection shows the landing, a taken landing shows a red cross and the key only walks, and it costs a jump's price. Like a flat mirror set in the wall, it carries you across walls; but light does not cross them, so from the far side it cannot be seen, and the crossing is one way. Corner mirrors never move. In code a corner mirror is a `Mirror` with a second face, `mBend`, and `mirrorAhead` turns the jump out of it with `exitFace`.
 
 ### Inactive engine prototype: the echo
 
@@ -179,6 +237,8 @@ A level is two maps of the same size in `campaign` in `src/Game/Level.hs`, seale
 | `G` | Lighthouse, exactly one | Present |
 | `^` `v` `<` `>` | Mirror set in the wall, facing that way | Either: the era it works in |
 | `n` `s` `e` `w` | Movable mirror on floor, facing north, south, east or west; never on a crate's cell | Either: the era it works in |
+| `L` `J` `7` `F` | Corner mirror set in the wall, looking north and east, north and west, south and west, or south and east | Either: the era it works in |
+| `T` | The second keeper's spawn, in a level for two | Present |
 
 Give it a name, a par and a slack, then run the tests. They re-derive the par through the real rules and print it, with the route's actions, the state count and the dead states. The solver proves a level can be won, not that it is any good, so each level should have one idea you can name in a sentence.
 
@@ -189,9 +249,50 @@ With a Chinese input method in Chinese mode, Windows swallows the letter keys be
 - **macOS (tested, arm64):** Apple's GLUT and OpenGL frameworks, which ship with the OS. Both are deprecated by Apple but present.
 - **Windows x64 (the team's target):** Gloss's GLUT backend needs `libfreeglut.dll` beside the executable or on `PATH`. With GHCup's MSYS2 it is in `C:\ghcup\msys64\mingw64\bin`. See "Outstanding".
 
+### Sound
+
+Every sound is synthesised in code at startup, from oscillators, noise and filters in
+[app/Synth.hs](app/Synth.hs). Nothing is loaded from a file, as with the art. Each
+sound is heard in a stereo hall (small for footsteps, large for the lamp and the
+ending); breath, air and water are soft pink or brown noise rather than white noise,
+which hisses; and saw waves are band-limited, so they do not buzz.
+
+| Moment | What is heard |
+|---|---|
+| A step | A footstep: boards and plaster in the past, wet stone in the present, three slightly different feet; in level 4 the red keeper's tread is lighter and higher than the yellow's |
+| A push | A crate scraping one cell and settling; a movable mirror's sled scraping, its glass ringing; a crate falling into a pit |
+| Through a mirror | A shimmer rising into a clear glass ring; through a corner mirror it rings, turns and rises again a fourth higher |
+| A shift | A falling, warm wave into the past; a rising, colder one into the present |
+| The power cell | A quick bright arpeggio over its hum |
+| The lamp | A warm chord swelling, a bell over it |
+| Refused, undone, out of time | A bump, a dull double buzz, a tape run backwards, three falling notes |
+| Behind it all | Quietly, in wide stereo: a calm sea in the past; wind moaning, a distant roll and rain in the present |
+
+Level 3's ending is scored to its picture, tick for tick: the chord of the lit lamp;
+a surge climbing into the white of the flare, cut by the blow and breaking glass as
+the lamp dies and its power runs down into silence; a thin ring as the light leaves
+through the wall, and a crash for each wall it breaks, on the frame the screen
+shakes. While the keeper may walk, a low drone waits. The rush has a beat that
+speeds up with the screen and wind that rises with the keeper's speed; each lamp of
+the corridor catches on the next note of a rising scale, barriers thud, passing one
+whooshes, falling behind drops into the dark, and thunder follows the present's
+lightning. At the real lighthouse the whole chord climbs into the white, strikes at
+its height and rings on as the dark comes down; a low bell names the level beyond.
+
+What plays is worked out like the effects, by comparing each tick with the one
+before: `cues` and `beds` in [src/Game/Sound.hs](src/Game/Sound.hs), pure and tested.
+[app/Audio.hs](app/Audio.hs) turns each cue into a sound at its own loudness and
+pitch, and [cbits/audio.c](cbits/audio.c) mixes and plays them on a thread of its own
+through Windows' `waveOut`, so a slow frame never stutters the sound. The ending's
+sounds are made on a background thread once the game is running. On macOS and Linux
+the mixer is a stub and the game is silent.
+
+`--mute` starts with the sound off. `--dump-sounds=DIR` writes every sound to `DIR`
+as a WAV file and exits, to listen to them outside the game.
+
 ### Development flags
 
-`--script=KEYS --after=N` runs keys instantly at startup and then freezes, to inspect an exact moment. `--trace` prints state changes and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
+`--script=KEYS --after=N` runs keys instantly at startup and then freezes, to inspect an exact moment. `--trace` prints state changes, and whether sound is on, and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
 
 ## How it fits together
 
@@ -204,7 +305,10 @@ src/Game/   pure core: no Gloss, no IO, compiled without a graphics dependency
   Fx        decorative state, derived by comparing successive games
   Solution  the intended route, and cheapest-first search over real stepGame
   Run       which level is being played, and moving between them
-app/        Gloss only: Main (IO), Render, Station, Figures, Hud, Title, Font, Draw, Platform
+  Sound     which sounds a tick starts, and how loud each bed is
+app/        Gloss only: Main (IO), Render, Station, Figures, Hud, Title, Font, Draw, Platform;
+            Synth (making the sounds) and Audio (playing them)
+cbits/      audio.c: the mixer and Windows sound output
 test/       plain assertions over the core
 ```
 
@@ -319,11 +423,12 @@ Toolchain, on macOS 26.5.2 (arm64):
 - **Two taps of one key inside a single tick count as one press.** That needs a stall, and did not appear under load testing.
 - **`Platform.hs` uses deprecated macOS APIs and the Objective-C runtime** because Apple's GLUT disables the close button. It is the only platform-specific code.
 - The optional alternate-era preview key was not added.
-- There is no audio, by design.
+- Sound plays on Windows only. macOS and Linux build and run silently.
+- The sounds have been checked by measurement (length, peaks, clicks, loop seams) and their timing by the tests, not yet by ear on every machine.
 
 ## Asset credits
 
-None. All art and lettering is procedural code in this repository.
+None. All art, lettering and sound is procedural code in this repository.
 
 ## Test results
 
@@ -334,6 +439,8 @@ search: W W W W D Space D D S S S S D D Space D D W W W W D Space A S S S S Spac
 route:  intended route takes 373 ticks, ends StateKey {skEra = Present, skCell = (2,2), skHasCell = True, skPhase = Won, skCrates = fromList [], skFilled = fromList []}
 level:  Clear the Way: par 48, budget 68, 16 actions, 4 shifts, 47 states, 0 dead, 71% shared
 level:  Two Alignments: par 80, budget 96, 29 actions, 4 shifts, 13011 states, 10513 dead, 69% shared
-level:  Crowded Track: par 112, budget 124, 42 actions, 6 shifts, 3175 states, 2611 dead, 86% shared
-279 passed, 0 failed
+level:  The Long Way Round: par 306, budget 346, 109 actions, 18 shifts, 190082 states, 26111 dead, 74% shared
+level:  Two Keepers: par 118 for two, budget 178, 48 actions, 4 shifts, 20500 states
+level:  WWDDDWWSWwWwW_AawaasswADWaaaddsdssd_swww_ddwwwd_
+384 passed, 0 failed
 ```

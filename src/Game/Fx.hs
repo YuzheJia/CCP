@@ -15,6 +15,8 @@ module Game.Fx
   , roomFadeTicks
   , roomFadeDark
   , costLife
+  , focusTicks
+  , focusProgress
   , echoStepTicks
   , echoWalkAt
   , initialFx
@@ -69,11 +71,22 @@ data Fx = Fx
   , fxEchoWalk :: !(Maybe EchoWalk)
   , fxRoom     :: !Cell            -- ^ the room on screen, in rooms, not cells
   , fxRoomFade :: !(Maybe RoomFade)
-  , fxVisited  :: ![Cell]          -- ^ rooms seen so far, for the map in the panel
+  , fxVisited  :: ![Cell]          -- ^ rooms seen so far, for the map under the watch
+  , fxFocus    :: !Int             -- ^ 0 while the level is being introduced; then
+                                   --   ticks since the keeper first acted, up to
+                                   --   'focusTicks'. A restart keeps it.
   } deriving (Eq, Show)
 
 initialFx :: Fx
-initialFx = Fx 0 Nothing Nothing 0 0 0 0 Nothing Nothing (0, 0) Nothing [(0, 0)]
+initialFx = Fx 0 Nothing Nothing 0 0 0 0 Nothing Nothing (0, 0) Nothing [(0, 0)] 0
+
+-- | How long the screen takes to close in on the board once the keeper first acts.
+focusTicks :: Int
+focusTicks = 45
+
+-- | 0 while the level is introduced, 1 once the screen has closed in on the board.
+focusProgress :: Fx -> Float
+focusProgress fx = fromIntegral (min focusTicks (fxFocus fx)) / fromIntegral focusTicks
 
 -- | A level larger than one screen is a grid of rooms this size, and the screen
 -- shows one room at a time. A one-room level is always room (0,0).
@@ -123,7 +136,8 @@ waveProgress w = fromIntegral (waveAge w) / fromIntegral shiftTicks
 stepFx :: Game -> Game -> Fx -> Fx
 stepFx old new fx
   -- A restart, or a new level, starts on the player's room with nothing to fade.
-  | restarted = initialFx { fxRoom = roomOf (gCell new), fxVisited = [roomOf (gCell new)] }
+  | restarted = initialFx { fxRoom = roomOf (gCell new), fxVisited = [roomOf (gCell new)]
+                          , fxFocus = fxFocus fx }
   -- Pausing freezes the world's effects, but the fade-in must still finish.
   | gPhase new == Paused = fx { fxPaused = fxPaused fx + 1, fxLevelAge = fxLevelAge fx + 1 }
   | otherwise = room fx
@@ -136,6 +150,7 @@ stepFx old new fx
       , fxLevelAge = fxLevelAge fx + 1
       , fxCost     = cost
       , fxEchoWalk = echoWalk
+      , fxFocus    = closingIn
       }
   where
     -- The screen follows the room the player is in, or stepping into, so the
@@ -173,6 +188,14 @@ stepFx old new fx
       (before, found : _) -> before ++ [found]
       (before, []) -> before
     restarted = gAttempt new /= gAttempt old
+    -- The introduction lasts until the keeper first does something that takes: a
+    -- step, a push, a jump or a shift. A refused key does not end it.
+    acted = gRemaining new /= gRemaining old || gMotion new /= Settled
+         || maybe False ((/= Settled) . ptMotion) (gPartner new)
+    closingIn
+      | fxFocus fx > 0 = min focusTicks (fxFocus fx + 1)
+      | acted = 1
+      | otherwise = 0
     -- A step is charged before it moves, but the price belongs where it is going.
     floatCell = case (fmap ptMotion (gPartner old), fmap ptMotion (gPartner new)) of
       (Just Settled, Just (Stepping to _)) -> to  -- the second keeper set off

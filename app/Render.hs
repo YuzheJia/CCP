@@ -25,7 +25,15 @@ data Scene = Scene
   , scPastWhole    :: Map.Map Cell Picture            -- ^ by room, one baked picture each
   , scPresentWhole :: Map.Map Cell Picture
   , scRooms        :: (Int, Int)                      -- ^ how many rooms across and down
-  , scPastBack     :: Picture
+  , scPastSea      :: Picture                         -- ^ canvas scale, under the board
+  , scPresentSea   :: Picture
+  , scSeaShade     :: Picture
+  , scPastShore    :: Picture                         -- ^ shelf, rocks, surf: on the board
+  , scPresentShore :: Picture
+  , scPastSurf     :: Picture                         -- ^ the outer surf, breathing
+  , scPresentSurf  :: Picture
+  , scTitle        :: (String, String)
+  , scPastBack     :: Picture                         -- ^ the stone apron, on the board
   , scPresentBack  :: Picture
   , scPastVig      :: Picture
   , scPresentVig   :: Picture
@@ -48,17 +56,26 @@ data EndingArt = EndingArt
   , eaGoal   :: Picture               -- ^ the lighthouse cell again, over the opened wall
   }
 
--- | @title@ names the level above the map; @hasNext@ says whether another follows.
-mkScene :: String -> Bool -> Level -> Scene
-mkScene title hasNext level = Scene
+-- | @title@ is the level's place in the hall and its name, shown above the map;
+-- @hasNext@ says whether another follows; @teach@ writes the keys under the map.
+mkScene :: (String, String) -> Bool -> Bool -> Level -> Scene
+mkScene title hasNext teach level = Scene
   { scPastCells = cells Past
   , scPresentCells = cells Present
   , scPastWhole = whole Past
   , scPresentWhole = whole Present
   , scRooms = ( (lvWidth level + roomCols - 1) `div` roomCols
               , (lvHeight level + roomRows - 1) `div` roomRows )
-  , scPastBack = back Past
-  , scPresentBack = back Present
+  , scPastSea = bake (seaBackdrop Past)
+  , scPresentSea = bake (seaBackdrop Present)
+  , scSeaShade = bake seaShade
+  , scPastShore = bake (shore Past)
+  , scPresentShore = bake (shore Present)
+  , scPastSurf = bake (farSurf Past)
+  , scPresentSurf = bake (farSurf Present)
+  , scTitle = title
+  , scPastBack = bake (foundation Past)
+  , scPresentBack = bake (foundation Present)
   , scPastVig = bake (vignette Past)
   , scPresentVig = bake (vignette Present)
   , scPastCaption = bake (mapCaption title Past)
@@ -72,7 +89,7 @@ mkScene title hasNext level = Scene
   -- The search knows one keeper only, so a level for two is never told it is lost.
   , scDead = if duo || (Set.size (lvCrates level) >= 3 && not (roomedLevel level))
                then Set.empty else deadStates level
-  , scHud = mkHudArt duo (lvRules level)
+  , scHud = mkHudArt duo teach title level
   , scEnding = mkEndingArt level
   }
   where
@@ -85,7 +102,6 @@ mkScene title hasNext level = Scene
     cells era = byRoom (\c -> (c, bake (cellArt level era c)))
     whole era = Map.map (\pics -> bake (Pictures pics))
                         (byRoom (\c -> at (cellPos c) (cellArt level era c)))
-    back era = bake (Pictures [seaBackdrop era, foundation era])
 
 mkEndingArt :: Level -> EndingArt
 mkEndingArt level = EndingArt
@@ -125,7 +141,13 @@ wholeOf s era room = Map.findWithDefault Blank room (case era of
   Past -> scPastWhole s
   Present -> scPresentWhole s)
 
-backOf, vigOf, captionOf :: Scene -> Era -> Picture
+seaOf, shoreOf, surfOf, backOf, vigOf, captionOf :: Scene -> Era -> Picture
+seaOf s Past = scPastSea s
+seaOf s Present = scPresentSea s
+shoreOf s Past = scPastShore s
+shoreOf s Present = scPresentShore s
+surfOf s Past = scPastSurf s
+surfOf s Present = scPresentSurf s
 backOf s Past = scPastBack s
 backOf s Present = scPresentBack s
 vigOf s Past = scPastVig s
@@ -165,12 +187,13 @@ frame scene level g fx = case gPhase g of
   _ -> Pictures
     [ world Nothing scene level (if peeking g fx then peekView g else g) fx
     , hud (scHud scene) level g fx clock
-    , lessonPlate level g fx
-    , overlays scene g fx
+    , board f (lessonPlate level g fx)
+    , board f (overlays scene g fx)
     , startFade
     ]
   where
     clock = fromIntegral (fxClock fx)
+    f = focusOf Nothing fx
     startFade
       | fxLevelAge fx < 26 =
           Color (hexA 0x05080A (1 - smooth (fromIntegral (fxLevelAge fx) / 26))) (rectC canvasW canvasH)
@@ -221,7 +244,32 @@ openedCells level f = case fnStage f of
 
 world :: Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
 world finale scene level g fx = Pictures
-  [ backOf scene shownEra
+  [ seaOf scene era
+  , seaLife era (fromIntegral (fxClock fx))
+  , scSeaShade scene
+  , board (focusOf finale fx) (onTheBoard finale scene level g fx)
+  ]
+  where era = seaEra g fx
+
+-- | 0 while a level is introduced, 1 once the screen has closed in on the board,
+-- eased. An ending is always played close in.
+focusOf :: Maybe Finale -> Fx -> Float
+focusOf finale fx
+  | isJust finale = 1
+  | otherwise = smooth (focusProgress fx)
+
+-- | The sea swings over halfway across, as most of the tiles do.
+seaEra :: Game -> Fx -> Era
+seaEra g fx = case fxWave fx of
+  Just w | waveProgress w < 0.45 -> waveFrom w
+  _ -> gEra g
+
+-- | Everything 'world' draws on the board, in the board's own coordinates.
+onTheBoard :: Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
+onTheBoard finale scene level g fx = Pictures
+  [ surfBreathing
+  , shoreOf scene shownEra
+  , backOf scene shownEra
   , inRoom (Pictures
       [ stationCells scene shownRoom g fx
       , openedArt
@@ -294,9 +342,7 @@ world finale scene level g fx = Pictures
       Just _ -> if era == Past then smooth t else 1 - smooth t
     presentK = 1 - pastK
     -- The sea swings over halfway across, as most of the tiles do.
-    shownEra = case wave of
-      Just w | t < 0.45 -> waveFrom w
-      _ -> era
+    shownEra = seaEra g fx
 
     -- Two keepers in a level for two: the first in yellow, the second in red. The
     -- rules speak of "the player", so the second is drawn from the swapped game.
@@ -403,18 +449,21 @@ world finale scene level g fx = Pictures
       , let e = smooth (1 - fromIntegral left / fromIntegral stepTicks) ]
     mirrors = Pictures
       [ at (maybe (cellPos c) snd (mfilter ((== c) . fst) (lookupPair c pushedMirrors)))
-           (mirrorArt (mMovable m) (mEra m) (mFace m) clock)
+           (case mBend m of
+              Just b -> bendMirrorArt (mEra m) (mFace m) b clock
+              Nothing -> mirrorArt (mMovable m) (mEra m) (mFace m) clock)
       | (c, m) <- Map.toList (gMirrors g), visible c, eraOf c == mEra m ]
     lookupPair c ps = case [ p | p@(c', _) <- ps, c' == c ] of
       (p : _) -> Just p
       [] -> Nothing
     beams = Pictures
-      [ beamLight (mEra m) clock (edge c (mFace m))
-                  (if null cells then edge c (mFace m) else edge (last cells) (mFace m))
+      [ beamLight (mEra m) clock (edge c face)
+                  (if null cells then edge c face else edge (last cells) face)
       | wave == Nothing, gPhase g /= Menu
       , (c, m) <- Map.toList (gMirrors g), visible c, mEra m == era
       , c `notElem` map fst pushedMirrors
-      , let cells = takeWhile visible (beamCells level g c) ]
+      , (face, lit) <- beamsOf level g c
+      , let cells = takeWhile visible lit ]
     edge c face = let (x, y) = cellPos c; (ux, uy) = screenDir face in (x + half * ux, y + half * uy)
 
     -- Standing in a mirror's light: the reflection shows where its key would put
@@ -557,10 +606,21 @@ world finale scene level g fx = Pictures
              ])
       _ -> Blank
 
+    -- While the level is introduced its name stands in the column beside the
+    -- board; the line above the board comes in as the screen closes in.
     caption
       | lampLit = scWonCaption scene
       | isJust finale = scDarkCaption scene
+      | focus < 1 = mapCaptionFaded focus (scTitle scene) (gEra g)
       | otherwise = captionOf scene (gEra g)
+    focus = focusOf finale fx
+
+    -- The outer surf breathes in and out around the apron.
+    surfBreathing =
+      let s = 1 + 0.0035 * sin (clock * 0.035)
+          cy = (mapTop + mapBottom) / 2
+          cx = (mapLeft + mapRight) / 2
+      in Translate cx cy (Scale s s (Translate (negate cx) (negate cy) (surfOf scene shownEra)))
 
     hintLine
       | Just f <- finale = case fnStage f of
@@ -968,7 +1028,7 @@ rushWorld scene level f g fx = case finaleRun level of
         caption = case era of
           Past -> captionOf scene Past
           Present -> scDarkCaption scene
-    in Pictures
+    in Pictures [ seaOf scene era, scSeaShade scene, board 1 (Pictures
          [ backOf scene era
          , Translate (negate (cameraX * cs)) (cameraY * cs) (Pictures
              [ sea
@@ -997,7 +1057,7 @@ rushWorld scene level f g fx = case finaleRun level of
          , vigOf scene era
          , caption
          , rushHint fr start era d
-         ]
+         ]) ]
 
 -- | One line under the map while rushing, only when there is something to say.
 rushHint :: FinaleRun -> Cell -> Era -> Dash -> Picture
@@ -1021,10 +1081,10 @@ endingFrame :: Scene -> Level -> (String, String) -> Finale -> Game -> Fx -> Pic
 endingFrame scene level (number, name) f g fx = Pictures
   [ Color (hex 0x050A0D) (rectC (canvasW + 40) (canvasH + 40))
   , Translate shakeX shakeY scenePic
-  -- Once the keeper walks free, the panel reads the walk as costing nothing.
-  , hudNoted noted (scHud scene) (if stage >= Beckon then revealedLevel level else level) g fx clock
-  , plate
-  , overlays scene g fx `onlyIf` (fnStage f == Beckon)
+  -- Once the keeper walks free, the watch stops: the walk costs nothing.
+  , hudStopped (scHud scene) (if stage >= Beckon then revealedLevel level else level) g fx clock
+  , board 1 plate
+  , board 1 (overlays scene g fx) `onlyIf` (fnStage f == Beckon)
   , flash
   , card
   ]
@@ -1037,10 +1097,6 @@ endingFrame scene level (number, name) f g fx = Pictures
     scenePic
       | stage >= Rush = rushWorld scene level f g fx
       | otherwise = world (Just f) scene level g fx
-    noted
-      | lampBurning f = Nothing
-      | stage >= Rush = Just ("Ahead", "Burning, at the end", "Follow the light to the end of the passage.")
-      | otherwise = Just ("Gone", "Its light went ahead", "The lamp went out. Follow where its light went.")
     -- The last plate of the hall, and then the lamp takes it back.
     plate = case stage of
       Lit -> endedPlate (smooth ((ageF - 70) / 30)) (gRemaining g)
@@ -1080,17 +1136,18 @@ endingFrame scene level (number, name) f g fx = Pictures
       _ -> Blank
 
 -- | Hide the parts of a large station outside the original 13 x 9 map window.
--- The HUD is drawn afterwards, so the right-hand mask also gives it a clean panel.
+-- It is drawn on the board, which is smaller than the canvas, so it reaches a
+-- whole canvas beyond the map on every side.
 viewportMask :: Era -> Picture
 viewportMask = viewportMaskK 1
 
 -- | The same mask, partly drawn, @k@ 0 to 1.
 viewportMaskK :: Float -> Era -> Picture
 viewportMaskK k era = Color (fade k outside) (Pictures
-  [ rect (-canvasW / 2) (-canvasH / 2) (mapLeft + canvasW / 2) canvasH
-  , rect mapRight (-canvasH / 2) (canvasW / 2 - mapRight) canvasH
-  , rect mapLeft mapTop (mapRight - mapLeft) (canvasH / 2 - mapTop)
-  , rect mapLeft (-canvasH / 2) (mapRight - mapLeft) (mapBottom + canvasH / 2)
+  [ rect (mapLeft - canvasW) (mapBottom - canvasH) canvasW (mapTop - mapBottom + 2 * canvasH)
+  , rect mapRight (mapBottom - canvasH) canvasW (mapTop - mapBottom + 2 * canvasH)
+  , rect mapLeft mapTop (mapRight - mapLeft) canvasH
+  , rect mapLeft (mapBottom - canvasH) (mapRight - mapLeft) canvasH
   ])
   where
     outside = case era of

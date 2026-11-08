@@ -8,6 +8,10 @@
 module Station
   ( cellArt
   , seaBackdrop
+  , seaLife
+  , seaShade
+  , shore
+  , farSurf
   , foundation
   , pool
   , lightPools
@@ -516,30 +520,163 @@ presentBreach level = Pictures
 
 -- Outside the walls ------------------------------------------------------------
 
--- | Sea filling the canvas, drawn once per era.
+-- | Sea filling the canvas, drawn once per era. It is drawn at the canvas's own
+-- scale, under the board, so its crests sit anywhere the board leaves open, except
+-- along the bottom edge where the keys are written.
 seaBackdrop :: Era -> Picture
 seaBackdrop era = Pictures $
   [ Color deep (rectC canvasW canvasH) ] ++
-  [ Translate (x - canvasW / 2) (canvasH / 2 - y) (crest i)
-  | i <- [0 .. 69 :: Int]
-  , let x = canvasW * rnd i 3 1
-        y = canvasH * rnd i 4 2
-  , let px = x - canvasW / 2
-        py = canvasH / 2 - y
-  , py > mapTop || py < mapBottom || px < mapLeft ]
+  [ Translate px py (crest i)
+  | i <- [0 .. 119 :: Int]
+  , let px = canvasW * rnd i 3 1 - canvasW / 2
+        py = canvasH / 2 - canvasH * rnd i 4 2
+  , px < left - 30 || px > right + 30 || py > top + 8 || (py < bottom - 8 && py > keysTop) ]
   where
+    (left, bottom) = onBoard 1 (mapLeft - 12, mapBottom - 17)
+    (right, top) = onBoard 1 (mapRight + 12, mapTop + 12)
+    keysTop = negate canvasH / 2 + 38
     deep = case era of
       Past -> hex 0x114552
       Present -> hex 0x0A1418
     crestC = case era of
       Past -> hexA 0xA8E0D8 0.32
-      Present -> hexA 0x7D93A0 0.26
+      Present -> hexA 0x7D93A0 0.28
+    -- The present's sea runs higher and longer.
     crest i =
-      let w = 14 + 26 * rnd i 5 3
-          lift = case era of
-            Past -> 2
-            Present -> 5 * rnd i 6 4
+      let (w, lift) = case era of
+            Past -> (14 + 26 * rnd i 5 3, 2)
+            Present -> (18 + 36 * rnd i 5 3, 2 + 5 * rnd i 6 4)
       in thin crestC [(-w, 0), (-w / 3, lift), (w / 3, -lift / 2), (w, 0)]
+
+-- | The sea moving, at the canvas's scale, under the board. In the past the lamp is
+-- lit: the real lighthouse's beam sweeps by now and then, and the sun glints off
+-- the water to the east. In the present there is no beam, only rain.
+seaLife :: Era -> Float -> Picture
+seaLife Past clock = Pictures [beam, glints]
+  where
+    -- From the real lighthouse, off the bottom left, turning once every ten
+    -- seconds: in sight for about two of them.
+    (ox, oy) = (-900, -580)
+    turn = 2 * pi * clock / 600
+    beam = Pictures [ wedge 7.5 0.09, wedge 3.4 0.2 ]
+    wedge halfDeg alpha = Pictures
+      [ Color (hexA 0xFFEFC4 (alpha * (1 - fromIntegral i / 8)))
+          (Polygon [ around r0 (turn - h), around r1 (turn - h), around r1 (turn + h), around r0 (turn + h) ])
+      | i <- [0 .. 7 :: Int]
+      , let r0 = 2400 * fromIntegral i / 8
+            r1 = 2400 * fromIntegral (i + 1) / 8 ]
+      where h = halfDeg * pi / 180
+    around r t = (ox + r * cos t, oy + r * sin t)
+    glints = Pictures
+      [ Color (hexA 0xF4FBF6 (base * (0.35 + 0.65 * (0.5 + 0.5 * sin (clock * 0.06 + 6 * rnd i 9 5)))))
+          (rect x y (2 + 5 * rnd i 8 5) 1.6)
+      | i <- [0 .. 59 :: Int]
+      , let x = canvasW / 2 * (rnd i 7 5 ** 0.6)
+            y = canvasH * rnd i 6 5 - canvasH / 2
+            base = 0.25 + 0.45 * rnd i 5 5 ]
+seaLife Present clock = Color (hexA 0xB7CEDA 0.2) (Pictures
+  [ Translate x y (Rotate 22 (rectC 1.2 (12 + 8 * rnd i 5 8)))
+  | i <- [0 .. 119 :: Int]
+  , let speed = 6 + 4 * rnd i 2 8
+        x = wrapTo 1320 (1320 * rnd i 1 8 - clock * speed * 0.4) - 660
+        y = wrapTo 840 (840 * rnd i 4 8 - clock * speed) - 420 ])
+  where wrapTo size v = v - size * fromIntegral (floor (v / size) :: Int)
+
+-- | The canvas's edges, darkened, so the eye rests in the middle.
+seaShade :: Picture
+seaShade = Color (hexA 0x000000 0.055) (Pictures [ edges d | d <- [24, 48 .. 144] ])
+  where
+    edges d = Pictures
+      [ rect (-canvasW / 2) (-canvasH / 2) d canvasH
+      , rect (canvasW / 2 - d) (-canvasH / 2) d canvasH
+      , rect (-canvasW / 2) (-canvasH / 2) canvasW d
+      , rect (-canvasW / 2) (canvasH / 2 - d) canvasW d
+      ]
+
+-- | Around the stone apron, on the board's own scale so it moves with the board:
+-- the shelf the station stands on, a few rocks, and surf where the sea meets the
+-- stone. Calm in the past; rougher and greyer in the present.
+shore :: Era -> Picture
+shore era = Pictures [ shelf, rocks, surfLayer era False ]
+  where
+    (x0, y0, x1, y1) = apron
+    (tint, a) = case era of
+      Past -> (hex 0x2A8088, 0.07)
+      Present -> (hex 0x1E3440, 0.06)
+    shelf = Color (fade a tint) (Pictures
+      [ roundRect (x0 - e) (y0 - e) (x1 + e) (y1 + e) (e * 0.9) | i <- [1 .. 7 :: Int], let e = 13 * fromIntegral i ])
+    (body, cap, foam, foamA) = case era of
+      Past -> (hex 0x6B5642, hex 0x9A7F60, hex 0xF3EBD8, 0.4)
+      Present -> (hex 0x1A2226, hex 0x3A464D, hex 0xC9D4D8, 0.35)
+    rocks = Pictures [ rock (x1 + 52) 62 1, rock (x1 + 31) 34 0.65 ]
+    rock x y s = Translate x y (Pictures
+      [ Color (fade foamA foam) (Pictures
+          [ plainSeg 1.6 (ring' t) (ring' (t + 0.32)) | j <- [0 .. 11 :: Int], let t = fromIntegral j * pi / 6 ])
+      , Color body (Polygon [ (px * s, py * s) | (px, py) <- [(-14,-4),(-10,6),(-2,11),(8,9),(15,2),(13,-7),(2,-10),(-9,-9)] ])
+      , Color cap (Polygon [ (px * s, py * s) | (px, py) <- [(-10,6),(-2,11),(8,9),(4,4),(-6,2)] ])
+      ])
+      where ring' t = (19 * s * cos t, -2 * s + 13 * s * sin t)
+
+-- | The outer line of surf, drawn apart so it can breathe in and out.
+farSurf :: Era -> Picture
+farSurf era = surfLayer era True
+
+-- | The stone apron's outline, on the board.
+apron :: (Float, Float, Float, Float)
+apron = (mapLeft - 12, mapBottom - 15, mapRight + 12, mapTop + 12)
+
+-- | Short curling strokes and flecks along each side of the apron: never a line.
+surfLayer :: Era -> Bool -> Picture
+surfLayer era far = Color colour (Pictures (concat (zipWith along [0 ..] sides)))
+  where
+    (x0, y0, x1, y1) = apron
+    (colour, strength, rough) = case era of
+      Past -> (hex 0xF3EBD8, if far then 0.28 else 0.6, 1)
+      Present -> (hex 0xC9D4D8, if far then 0.24 else 0.5, 1.6)
+    -- Each side, walked with the sea on its outer hand: start, end, outward normal.
+    sides = [ ((x0, y0), (x0, y1), (-1, 0)), ((x0, y1), (x1, y1), (0, 1))
+            , ((x1, y1), (x1, y0), (1, 0)), ((x1, y0), (x0, y0), (0, -1)) ]
+    layer = if far then 1 else 0 :: Int
+    along :: Int -> ((Float, Float), (Float, Float), (Float, Float)) -> [Picture]
+    along side ((ax, ay), (bx, by), (nx, ny)) = go 0 (12 * r 0 0)
+      where
+        len = sqrt ((bx - ax) ^ (2 :: Int) + (by - ay) ^ (2 :: Int))
+        (ux, uy) = ((bx - ax) / len, (by - ay) / len)
+        topSide = ny > 0
+        r i k = rnd (side * 977 + i) (layer * 31 + k) 7
+        go :: Int -> Float -> [Picture]
+        go i t
+          | t >= len = []
+          | otherwise = stroke : fleck ++ go (i + 1) (t + seg' + gap)
+          where
+            seg' = (if far then 6 else 9) + r i 1 * (if far then 14 else 22) * rough
+            gap = (if far then 14 else 4) + r i 2 * (if far then 26 else 10)
+            off = (if far then 13 else 3) + r i 3 * (if far then 10 else 6) * rough
+            alpha = strength * (0.45 + 0.75 * r i 4) * (if topSide then 0.55 else 1)
+            width = if far then 1.1 else 1.4 + 1.2 * r i 5
+            bulge = (1.5 + 2.5 * r i 6) * (if r i 7 < 0.5 then 1 else -1)
+            (sx, sy) = (ax + ux * t + nx * off, ay + uy * t + ny * off)
+            (ex, ey) = (sx + ux * seg', sy + uy * seg')
+            (mx, my) = ((sx + ex) / 2 + nx * bulge, (sy + ey) / 2 + ny * bulge)
+            curvePts = [ q s | s <- [0, 0.25, 0.5, 0.75, 1] ]
+            q s = ( (1 - s) * (1 - s) * sx + 2 * (1 - s) * s * mx + s * s * ex
+                  , (1 - s) * (1 - s) * sy + 2 * (1 - s) * s * my + s * s * ey )
+            stroke = Color (fade (min 1 alpha) colour) (Pictures (zipWith (plainSeg width) curvePts (drop 1 curvePts)))
+            fleck
+              | far || r i 8 >= 0.35 = []
+              | otherwise =
+                  let d = 3 + 5 * r i 9
+                  in [ Color (fade (min 1 (alpha * 0.8)) colour)
+                         (Translate (ex + nx * d) (ey + ny * d) (ngon 6 (0.8 + 0.9 * r i 10))) ]
+
+-- | A rectangle with rounded corners, as one convex polygon.
+roundRect :: Float -> Float -> Float -> Float -> Float -> Picture
+roundRect x0 y0 x1 y1 rad = Polygon
+  (corner (x1 - rad) (y1 - rad) 0 ++ corner (x0 + rad) (y1 - rad) 90
+   ++ corner (x0 + rad) (y0 + rad) 180 ++ corner (x1 - rad) (y0 + rad) 270)
+  where
+    corner cx cy a0 = [ (cx + rad * cos t, cy + rad * sin t)
+                      | i <- [0 .. 6 :: Int], let t = (a0 + 15 * fromIntegral i) * pi / 180 ]
 
 -- | The stone apron the station stands on. Dressed blocks, then eroded ones.
 foundation :: Era -> Picture
