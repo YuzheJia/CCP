@@ -273,6 +273,8 @@ gameKey key = case key of
   Char ' ' -> Just KSpace
   Char '\r' -> Just KEnter
   Char '\n' -> Just KEnter
+  Char 'i' -> Just KInstructions
+  Char 'I' -> Just KInstructions
   SpecialKey KeySpace -> Just KSpace
   -- In a level for two, the second keeper can shift from their side of the keyboard.
   SpecialKey KeyShiftR -> Just KSpace

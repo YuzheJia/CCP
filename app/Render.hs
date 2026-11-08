@@ -183,7 +183,11 @@ fitted (winW, winH) pic = Pictures
 
 frame :: Scene -> Level -> Game -> Fx -> Picture
 frame scene level g fx = case gPhase g of
-  Menu -> titleScreen clock
+  Menu -> Pictures
+    [titleScreen clock
+    , if gShowInstructions g then instructionsPopup else Blank
+    ]
+
   _ -> Pictures
     [ world Nothing scene level (if peeking g fx then peekView g else g) fx
     , hud (scHud scene) level g fx clock
