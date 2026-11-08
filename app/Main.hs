@@ -325,14 +325,15 @@ main = do
   -- The sounds of the title, the hall and the levels are made here, before the
   -- window opens; the ending's are made on a thread of their own while the game
   -- runs ('startAudio'). 'sound' is False if there is no output device, or on a
-  -- system other than Windows. Inspection opens no device at all, so it is silent.
+  -- system other than Windows or macOS. Inspection opens no device at all, so it
+  -- is silent.
   sound <- if inspect then pure False else startAudio
   -- 'when' runs an action only if its condition holds, and 'forM_' over a 'Maybe'
   -- runs once for a Just and not at all for Nothing: so if sound is on and there is
   -- a film, its soundtrack is handed to the mixer.
   when sound $ forM_ video (\v -> loadClip (vdAudioRate v) (vdAudio v))
   when ("--trace" `elem` args) $ do
-    putStrLn (if sound then "sound on" else "sound off: no output device, or not Windows")
+    putStrLn (if sound then "sound on" else "sound off: no output device, or unsupported platform")
     putStrLn (maybe "no opening film: assets/intro.blv not found" (\v -> "opening film: " ++ show (videoTicks v) ++ " ticks") video)
     -- Output to a pipe or a file is buffered; flushing makes each line appear at once.
     hFlush stdout

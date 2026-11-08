@@ -6,8 +6,8 @@
  * a thread of this file's own, which never calls back into Haskell, so a slow frame
  * never stutters the sound, and the single-threaded runtime is never re-entered.
  *
- * On Windows it plays through winmm's waveOut, which every Windows has. Elsewhere
- * every function is a no-op, and the game is silent.
+ * On Windows it plays through winmm's waveOut. On macOS it plays through an
+ * AudioQueue. Other systems use no-op functions and are silent.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -248,6 +248,236 @@ void bl_audio_stop(int id)
 }
 
 void bl_audio_mute(int on) { InterlockedExchange(&muted, on ? 1 : 0); }
+
+#elif defined(__APPLE__)
+
+#include <AudioToolbox/AudioQueue.h>
+#include <pthread.h>
+
+#define BL_FRAMES 441   /* 10 ms a buffer */
+#define BL_BUFFERS 5    /* 50 ms queued: the latency, and the slack for a busy machine */
+
+/* This is the same mixer as the Windows side, with pthread locking and an
+   AudioQueue callback supplying the output device. */
+typedef struct { float *left, *right; int len; } Sound;
+typedef struct { int active, sound; double pos; float rate, left, right, fade; } Voice;
+typedef struct { int sound; double pos; float gain, rate, wantGain, wantRate; } Bed;
+
+static Sound sounds[BL_SOUNDS];
+static Voice voices[BL_VOICES];
+static Bed beds[BL_BEDS];
+static float master = 0.6f;
+static int muted = 0;
+
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static AudioQueueRef device;
+static AudioQueueBufferRef buffers[BL_BUFFERS];
+static volatile int running = 0;
+
+static float sampleAt(const Sound *s, const float *data, double pos, int wrap)
+{
+  int i = (int)pos;
+  float frac = (float)(pos - i);
+  int j = i + 1;
+  if (wrap) { i %= s->len; j %= s->len; }
+  else if (j >= s->len) return data[i] * (1 - frac);
+  return data[i] + (data[j] - data[i]) * frac;
+}
+
+static float limit(float x)
+{
+  float a = fabsf(x), y;
+  if (a < 0.6f) return x;
+  y = 0.6f + 0.4f * tanhf((a - 0.6f) / 0.4f);
+  return x < 0 ? -y : y;
+}
+
+static void mix(short *out)
+{
+  float left[BL_FRAMES], right[BL_FRAMES];
+  int v, b, n, mutedNow;
+  memset(left, 0, sizeof left);
+  memset(right, 0, sizeof right);
+  pthread_mutex_lock(&lock);
+  for (v = 0; v < BL_VOICES; v++) {
+    Voice *vc = &voices[v];
+    const Sound *s;
+    if (!vc->active) continue;
+    s = &sounds[vc->sound];
+    for (n = 0; n < BL_FRAMES; n++) {
+      float k = 1;
+      if (vc->pos >= s->len - 1) { vc->active = 0; break; }
+      if (vc->fade > 0) {
+        vc->fade *= 0.99965f;
+        if (vc->fade < 0.001f) { vc->active = 0; break; }
+        k = vc->fade;
+      }
+      left[n] += sampleAt(s, s->left, vc->pos, 0) * vc->left * k;
+      right[n] += sampleAt(s, s->right, vc->pos, 0) * vc->right * k;
+      vc->pos += vc->rate;
+    }
+  }
+  for (b = 0; b < BL_BEDS; b++) {
+    Bed *bd = &beds[b];
+    const Sound *s;
+    if (bd->sound < 0) continue;
+    s = &sounds[bd->sound];
+    if (s->len < 2) continue;
+    if (bd->gain < 0.0005f && bd->wantGain < 0.0005f) { bd->gain = 0; continue; }
+    for (n = 0; n < BL_FRAMES; n++) {
+      bd->gain += (bd->wantGain - bd->gain) * 0.0006f;
+      bd->rate += (bd->wantRate - bd->rate) * 0.0006f;
+      left[n] += sampleAt(s, s->left, bd->pos, 1) * bd->gain;
+      right[n] += sampleAt(s, s->right, bd->pos, 1) * bd->gain;
+      bd->pos += bd->rate;
+      while (bd->pos >= s->len) bd->pos -= s->len;
+    }
+  }
+  mutedNow = muted;
+  pthread_mutex_unlock(&lock);
+  for (n = 0; n < BL_FRAMES; n++) {
+    float k = mutedNow ? 0 : master;
+    out[2 * n] = (short)(limit(left[n] * k) * 32000);
+    out[2 * n + 1] = (short)(limit(right[n] * k) * 32000);
+  }
+}
+
+static void outputCallback(void *userData, AudioQueueRef queue, AudioQueueBufferRef buffer)
+{
+  (void)userData;
+  if (!running) return;
+  mix((short *)buffer->mAudioData);
+  buffer->mAudioDataByteSize = BL_FRAMES * 2 * sizeof(short);
+  AudioQueueEnqueueBuffer(queue, buffer, 0, NULL);
+}
+
+int bl_audio_init(void)
+{
+  AudioStreamBasicDescription fmt;
+  OSStatus status;
+  int i;
+  if (running) return 1;
+  for (i = 0; i < BL_BEDS; i++) { beds[i].sound = -1; beds[i].rate = beds[i].wantRate = 1; }
+  memset(&fmt, 0, sizeof fmt);
+  fmt.mSampleRate = BL_RATE;
+  fmt.mFormatID = kAudioFormatLinearPCM;
+  fmt.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+  fmt.mBytesPerPacket = 4;
+  fmt.mFramesPerPacket = 1;
+  fmt.mBytesPerFrame = 4;
+  fmt.mChannelsPerFrame = 2;
+  fmt.mBitsPerChannel = 16;
+  status = AudioQueueNewOutput(&fmt, outputCallback, NULL, NULL, NULL, 0, &device);
+  if (status != noErr) return 0;
+  running = 1;
+  for (i = 0; i < BL_BUFFERS; i++) {
+    status = AudioQueueAllocateBuffer(device, BL_FRAMES * 2 * sizeof(short), &buffers[i]);
+    if (status != noErr) {
+      running = 0;
+      AudioQueueDispose(device, true);
+      device = NULL;
+      return 0;
+    }
+    memset(buffers[i]->mAudioData, 0, BL_FRAMES * 2 * sizeof(short));
+    buffers[i]->mAudioDataByteSize = BL_FRAMES * 2 * sizeof(short);
+    status = AudioQueueEnqueueBuffer(device, buffers[i], 0, NULL);
+    if (status != noErr) {
+      running = 0;
+      AudioQueueDispose(device, true);
+      device = NULL;
+      return 0;
+    }
+  }
+  status = AudioQueueStart(device, NULL);
+  if (status != noErr) {
+    running = 0;
+    AudioQueueDispose(device, true);
+    device = NULL;
+    return 0;
+  }
+  return 1;
+}
+
+void bl_audio_load(int id, const float *left, const float *right, int len)
+{
+  float *l, *r = NULL, *oldL, *oldR;
+  size_t bytes = sizeof(float) * (size_t)len;
+  if (id < 0 || id >= BL_SOUNDS || len <= 0) return;
+  l = (float *)malloc(bytes);
+  if (!l) return;
+  memcpy(l, left, bytes);
+  if (right) {
+    r = (float *)malloc(bytes);
+    if (!r) { free(l); return; }
+    memcpy(r, right, bytes);
+  }
+  pthread_mutex_lock(&lock);
+  oldL = sounds[id].left;
+  oldR = sounds[id].right;
+  sounds[id].left = l;
+  sounds[id].right = r ? r : l;
+  sounds[id].len = len;
+  pthread_mutex_unlock(&lock);
+  if (oldR != oldL) free(oldR);
+  free(oldL);
+}
+
+void bl_audio_play(int id, float gain, float rate, float pan)
+{
+  int v, slot = -1;
+  float quietest = 1e9f;
+  if (!running || id < 0 || id >= BL_SOUNDS || rate <= 0) return;
+  if (pan < -1) pan = -1;
+  if (pan > 1) pan = 1;
+  pthread_mutex_lock(&lock);
+  if (sounds[id].len < 2) { pthread_mutex_unlock(&lock); return; }
+  for (v = 0; v < BL_VOICES; v++) {
+    float loud;
+    if (!voices[v].active) { slot = v; break; }
+    loud = voices[v].left + voices[v].right;
+    if (loud < quietest) { quietest = loud; slot = v; }
+  }
+  voices[slot].active = 1;
+  voices[slot].sound = id;
+  voices[slot].pos = 0;
+  voices[slot].rate = rate;
+  voices[slot].fade = 0;
+  voices[slot].left = gain * (pan > 0 ? 1 - pan : 1);
+  voices[slot].right = gain * (pan < 0 ? 1 + pan : 1);
+  pthread_mutex_unlock(&lock);
+}
+
+void bl_audio_bed(int slot, int id, float gain, float rate)
+{
+  if (!running || slot < 0 || slot >= BL_BEDS || id < 0 || id >= BL_SOUNDS) return;
+  pthread_mutex_lock(&lock);
+  if (beds[slot].sound != id) {
+    beds[slot].sound = id;
+    beds[slot].pos = 0;
+    beds[slot].gain = 0;
+    beds[slot].rate = rate;
+  }
+  beds[slot].wantGain = gain < 0 ? 0 : gain;
+  beds[slot].wantRate = rate <= 0 ? 1 : rate;
+  pthread_mutex_unlock(&lock);
+}
+
+void bl_audio_stop(int id)
+{
+  int v;
+  if (!running) return;
+  pthread_mutex_lock(&lock);
+  for (v = 0; v < BL_VOICES; v++)
+    if (voices[v].active && voices[v].sound == id && voices[v].fade == 0) voices[v].fade = 1;
+  pthread_mutex_unlock(&lock);
+}
+
+void bl_audio_mute(int on)
+{
+  pthread_mutex_lock(&lock);
+  muted = on ? 1 : 0;
+  pthread_mutex_unlock(&lock);
+}
 
 #else
 

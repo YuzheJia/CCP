@@ -58,13 +58,15 @@ executable borrowed-light
   -- thread making the ending's sounds (see Audio) takes turns with the game loop
   -- for the first few seconds, and a shorter turn keeps frames from waiting long.
   ghc-options:      "-with-rtsopts=-A32m -V0.005 -C0.005"
-  -- The sound mixer, which plays through winmm on Windows and is silent elsewhere,
+  -- The sound mixer, which uses winmm on Windows and AudioToolbox on macOS,
   -- and turning off input methods (imm32), which would take the letter keys.
   c-sources:        cbits/audio.c
                     cbits/ime.c
   cc-options:       -O2
   if os(windows)
     extra-libraries: winmm imm32
+  if os(darwin)
+    frameworks:      AudioToolbox CoreAudio CoreFoundation
   -- The game runs one Haskell thread besides its main loop: Audio's, which makes
   -- the ending's sounds once, after startup. On Windows it uses the single-threaded
   -- runtime, after two unexplained crashes in the threaded one while freeglut called

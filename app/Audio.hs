@@ -2,8 +2,9 @@
 -- | Sound out: hands the synthesised sounds to the mixer in cbits/audio.c, and
 -- turns each 'Cue' into a sound played at its own loudness and pitch.
 --
--- The mixer runs on a thread of its own and plays through Windows' waveOut. On
--- other systems it is silent, and everything here does nothing.
+-- The mixer runs outside the game loop and plays through Windows' waveOut or
+-- macOS AudioQueue. On other systems it is silent, and everything here does
+-- nothing.
 --
 -- What this module does:
 --
@@ -89,8 +90,8 @@ import System.IO (IOMode (WriteMode), withBinaryFile)
 -- sound, are safe; the ones made every frame only take the mixer's lock and change a
 -- few numbers, so they are unsafe.
 --
--- bl_audio_init: open the output and start the mixer's thread. 1 if sound will be
--- heard, 0 if not (no output device, or not Windows).
+-- bl_audio_init: open the output and start the mixer. 1 if sound will be heard,
+-- 0 if not (no output device, or an unsupported platform).
 foreign import ccall safe "bl_audio_init" c_init :: IO CInt
 -- bl_audio_load: put a sound into a slot: the slot, the left samples, the right
 -- samples (or a null pointer for a mono sound, whose left side then plays on both),

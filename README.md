@@ -399,10 +399,10 @@ its height and rings on as the dark comes down; a low bell names the level beyon
 What plays is worked out like the effects, by comparing each tick with the one
 before: `cues` and `beds` in [src/Game/Sound.hs](src/Game/Sound.hs), pure and tested.
 [app/Audio.hs](app/Audio.hs) turns each cue into a sound at its own loudness and
-pitch, and [cbits/audio.c](cbits/audio.c) mixes and plays them on a thread of its own
-through Windows' `waveOut`, so a slow frame never stutters the sound. The ending's
-sounds are made on a background thread once the game is running. On macOS and Linux
-the mixer is a stub and the game is silent.
+pitch, and [cbits/audio.c](cbits/audio.c) mixes and plays them outside the game loop
+through Windows' `waveOut` or macOS AudioQueue, so a slow frame never stutters the
+sound. The ending's sounds are made on a background thread once the game is running.
+Linux currently uses the silent mixer stub.
 
 `--mute` starts with the sound off. `--dump-sounds=DIR` writes every sound to `DIR`
 as a WAV file and exits, to listen to them outside the game.
@@ -548,7 +548,8 @@ Toolchain, on macOS 26.5.2 (arm64):
 - **Two taps of one key inside a single tick count as one press.** That needs a stall, and did not appear under load testing.
 - **`Platform.hs` uses deprecated macOS APIs and the Objective-C runtime** because Apple's GLUT disables the close button. It is the only platform-specific code.
 - The optional alternate-era preview key was not added.
-- Sound plays on Windows only. macOS and Linux build and run silently.
+- Sound plays through `waveOut` on Windows and AudioQueue on macOS. Linux builds
+  and runs silently.
 - The sounds have been checked by measurement (length, peaks, clicks, loop seams) and their timing by the tests, not yet by ear on every machine.
 
 ## Asset credits
