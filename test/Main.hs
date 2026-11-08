@@ -2592,6 +2592,23 @@ ordersChecks = case levelHall of
     , check "orders: while the instructions are open, Enter at the title does nothing" $
         let shown = (title book) { cpRun = (startRunWithProgress levels 2 2) { runGame = (runGame (startRunWithProgress levels 2 2)) { gShowInstructions = True } } }
         in runMode (cpRun (steps shown (tap enter))) == Title
+    , check "title menu: down chooses the next line and goes round from the last to the first" $
+        let down = noInput { tiDir = Just DirDown }
+            chosen n = gTitleChoice (runGame (cpRun (steps (title book) (concat (replicate n (tap down))))))
+        in chosen 1 == titleHowTo && chosen 3 == titleQuit && chosen titleItems == titleStart
+    , check "title menu: Enter on HOW TO PLAY opens the instructions, and Enter shuts them again" $
+        let down = noInput { tiDir = Just DirDown }
+            opened = steps (title book) (tap down ++ tap enter)
+            shut = steps opened (tap enter)
+        in gShowInstructions (runGame (cpRun opened)) && runMode (cpRun opened) == Title
+           && not (gShowInstructions (runGame (cpRun shut))) && runMode (cpRun shut) == Title
+    , check "title menu: Enter on SOUND or QUIT stays on the title and is left to the app" $
+        let down = noInput { tiDir = Just DirDown }
+            on n = steps (title book) (concat (replicate n (tap down)))
+            pressed n = steps (on n) (tap enter)
+        in all (\n -> runMode (cpRun (pressed n)) == Title) [titleSound, titleQuit]
+           && titleChoiceTaken enter (cpRun (on titleQuit)) == Just titleQuit
+           && titleChoiceTaken enter (cpRun (on titleSound)) == Just titleSound
     , check "orders: right chooses the next ticket, and stops at the last" $
         dkSel (cpDesk (steps desk (tap right))) == 1
         && dkSel (cpDesk (steps desk (concat (replicate 5 (tap right))))) == slotCount - 1

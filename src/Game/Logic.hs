@@ -175,6 +175,7 @@ initialGame level = Game
   , gPrev         = noInput
   , gArmed        = False
   , gShowInstructions = False
+  , gTitleChoice  = 0
     -- fmap applies a function inside a Maybe: 'Just' a new second keeper where the
     -- level has a second spawn, 'Nothing' (a level for one) otherwise.
   , gPartner      = fmap newPartner (lvSpawn2 level)

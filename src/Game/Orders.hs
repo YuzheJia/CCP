@@ -342,8 +342,7 @@ stepCampaign levels input (Campaign book desk run) = case runMode run of
     g = runGame run
     prev = gPrev g
     held = run { runGame = g { gPrev = input } }
-    freshKey key = key input && not (key prev)
-    opens = freshKey tiEnter && not (gShowInstructions g) && not (freshKey tiInstructions)
+    opens = titleChoiceTaken input run == Just titleStart
     -- Into an order: the hall, or the opening if nothing is cleared yet. The keys
     -- down now need a fresh press there.
     enterOrder o =

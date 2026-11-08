@@ -29,9 +29,17 @@ On Windows, Alt+F4 closes the game; Escape retains its in-game navigation action
 
 `cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to select level N in the hall (and unlock it for development); `--level=4` opens the secret level directly. Add `--pace=N` to wait N ticks (60 a second) after each of the demo's moves.
 
-The game opens on its title screen. The first time, Enter takes a new order (a new
+The game opens on its title screen: the split lighthouse, BORROWED LIGHT in the
+pixel font of the courier's talk, and a menu on the past's sea. W/S or the arrows
+choose a line and Enter takes it: NEW ORDER (CONTINUE once there is a save), HOW TO
+PLAY (the instructions; I opens them too, and Enter or Escape shuts them), SOUND,
+and QUIT. Its design was worked out first as mockups, in
+[docs/ui-concepts/2026-11-08-title/](docs/ui-concepts/2026-11-08-title/README.md)
+(design A, without the courier at the door).
+
+The first time, NEW ORDER takes a new order (a new
 save), plays the **opening film** and goes from it straight into level 1 (see "The
-courier" below). Once there is a save, Enter opens **Your orders**, the saves, with
+courier" below). Once there is a save, CONTINUE opens **Your orders**, the saves, with
 the one last played already chosen, so Enter twice carries on (see "Her orders"
 below). An order with a room cleared opens the **Level Hall**: use W/S or the arrow
 keys to choose an unlocked lesson and Enter to play it. Escape returns to the hall
@@ -49,12 +57,13 @@ it is entered again.
 | Tab | Hold to look at the other era, for free |
 | P | Pause / resume |
 | R | Restart |
-| Enter | Start / retry; on with the courier's talk (Space too) |
+| W/S, arrows | On the title: choose a menu line |
+| Enter | Take the title's menu line / retry; on with the courier's talk (Space too) |
 | Enter, held | Skip the opening film |
 | Escape | Return to the Level Hall, and from it to the orders; skip the opening film |
 | Delete / Backspace | On the orders: cancel the chosen order (then hold Enter to tear it up) |
 | M | Sound off / on |
-| Window close button | Exit |
+| QUIT on the title, window close button | Exit |
 
 ### Her orders
 

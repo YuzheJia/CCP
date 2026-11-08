@@ -4,15 +4,16 @@
 -- teal sea, a kept red-and-white tower with its lamp lit, and the lamp's beam
 -- swinging slowly out over that side. Right of it is the present: a dark night
 -- over a black, choppy sea, rain, and the same tower rusted, cracked, mossy and
--- dark. The words BORROWED LIGHT stand either side of the tower, PAST and PRESENT
--- in the top corners, and the premise and the way to the instructions on the water.
+-- dark. The words BORROWED LIGHT stand either side of the tower in the pixel font
+-- of the courier's talk, a line under each, and the menu lies on the past's sea.
 --
 -- This module only draws; it knows nothing of keys or saves. "Render" calls
--- 'titleScreen' while the game is in its Menu phase, with the ambient clock, and
--- lays 'instructionsPopup' over it while the instructions are open (the I key opens
--- and shuts them, in stepTitle in "Game.Run"). "Draw" supplies the colours,
--- shapes, noise and baking, and "Font" the lettering. OrdersScreen reuses
--- titleBackground without the lettering or prompt behind its tickets.
+-- 'titleScreen' while the game is in its Menu phase, with the ambient clock; the
+-- app lays 'titleMenu' over it, and 'instructionsPopup' over that while the
+-- instructions are open (stepTitle in "Game.Run" opens and shuts them). "Draw"
+-- supplies the colours, shapes, noise and baking, "PixelFont" the title's
+-- lettering and "Font" the instructions'. OrdersScreen reuses titleBackground
+-- without the lettering behind its tickets.
 --
 -- Units: canvas units, 1280 across and 800 up, with the origin at the centre of
 -- the screen and y growing upwards (Gloss's way, unlike the map's rows). The
@@ -23,13 +24,14 @@
 --
 -- Performance: what never moves (sky, sea, headland, tower and words) is made once,
 -- as top-level values, and flattened with 'bake', so a frame only builds the beam,
--- the rain and the prompt afresh. Every "random" placement uses 'rnd', which gives
+-- the rain and the menu afresh. Every "random" placement uses 'rnd', which gives
 -- the same number for the same inputs, so the baked art is the same every time.
-module Title (titleScreen, titleBackground, instructionsPopup) where
+module Title (titleScreen, titleBackground, titleMenu, instructionsPopup) where
 
 import Draw
 import Font
 import Graphics.Gloss
+import PixelFont (pixelText, pixelW)
 
 -- | Everything that holds still, drawn once: the tower on its headland, and the
 -- words over it.
@@ -226,62 +228,95 @@ tower = Pictures $
     pieceL y0 y1 c = Color (hex c) (Polygon [(-towerW y0, y0), (0, y0), (0, y1), (-towerW y1, y1)])
     pieceR y0 y1 c = Color (hex c) (Polygon [(0, y0), (towerW y0, y0), (towerW y1, y1), (0, y1)])
 
--- | The still words: the era names in the top corners, the title either side of the
--- tower, and three lines on the water. Each is lettered with "Font", which gives
--- uncoloured strokes, inside a 'Color' and a 'Translate' to its place; the
--- position given is the left end, centre or right end of the baseline, depending
--- on whether textL, textC or textR draws it.
+-- | The still words: the title either side of the tower, a line under each half of
+-- it, and the jam's name in the top corner. They are in the pixel font of the
+-- courier's talk and her order tickets, so the title belongs with them: BORROWED in
+-- the past's warm cream on her yellow, LIGHT in the present's cold grey on slate.
+-- Each word hangs from its top edge ('pixelText'), 10 canvas units a pixel, so 70
+-- tall, from y = 104; BORROWED ends 72 left of the seam and LIGHT starts 72 right
+-- of it, with the tower between.
 labels :: Picture
 labels = Pictures
-  [ Color (hex 0xF7DDB2) (Translate (-600) 356 (textL 15 "PAST"))
-  , Color (hex 0xA9B9BF) (Translate 600 356 (textR 15 "PRESENT"))
-    -- Title.
-    -- BORROWED ends at x = -74 and LIGHT starts at x = 204, both on the baseline
-    -- y = 44, 68 units tall with a pen 8.6 wide; then the whole title is nudged 4
-    -- right and 4 down.
-  , Translate 4 (-4) (Pictures
-      [Color (hex 0xFFF3D6) (Translate (-74) wordY (ws 68 8.6 "BORROWED"))
-      , Color (hex 0xE8F0F2) (Translate 204 wordY (wl 68 8.6 "LIGHT"))])
-
-    -- Premise and controls, on the water.
-    -- Three centred lines 14 units tall, 22 apart, below the headland; the middle
-    -- one, about time, in a warmer yellow.
-  , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Borrow a power cell from the past to light the present"))
-  , Color (hex 0xFFE2A8) (Translate 0 (-258) (textC 14 "Every action spends time."))
-  , Color (hex 0xF2E6D0) (Translate 0 (-280) (textC 14 "Press 'I' to see instructions"))
+  [ logoWord "BORROWED" (-72) True 0xFFF3D6 0xF6B31C
+  , logoWord "LIGHT" 72 False 0xC9D6DB 0x33434C
+  -- The lines under the words, 2 units a pixel, 92 below their top.
+  , Color (hex 0xFFE2A8) (Translate (-72 - pw 2 "PICK UP IN THE PAST") 12 (pixelText 2 "PICK UP IN THE PAST"))
+  , Color (hex 0xA9B9BF) (Translate 72 12 (pixelText 2 "DELIVER TO THE PRESENT"))
+  , Color (hexA 0x8C8796 0.75) (Translate (608 - pw 2 "CSS GAMEJAM 2026") 372 (pixelText 2 "CSS GAMEJAM 2026"))
   ]
   where
-    -- The baseline of the two title words.
-    wordY = 44
-    -- ws letters a word with a chosen pen weight and ends it at the origin, a
-    -- right-aligned 'weighted' (textR only has the default weight); wl is plain
-    -- 'weighted', which starts at the origin.
-    ws size w s = Translate (negate (textW size s)) 0 (weighted size w s)
-    wl = weighted
+    -- A logo word: a dark shadow 8 units down and right, a coloured one at 4, then
+    -- the letters; right-aligned on x if @right@, else starting at it.
+    logoWord s x right fill shade =
+      let word = pixelText 10 s
+          left = if right then x - pw 10 s else x
+      in Translate left 104 (Pictures
+           [ Color (hexA 0x05080A 0.55) (Translate 8 (-8) word)
+           , Color (hex shade) (Translate 4 (-4) word)
+           , Color (hex fill) word ])
 
--- | The still art, the turning beam and the rain.
+-- | The width of a line of the pixel font, in canvas units, at @px@ a pixel.
+pw :: Float -> String -> Float
+pw px s = fromIntegral (pixelW s) * px
+
+-- | The still art, the turning beam and the rain, and the words. The menu is drawn
+-- over it by the app ('titleMenu'), and the instructions over that.
 --
--- @clock@ is the ambient tick count (60 a second) as a Float, from "Render". The
--- layers, back to front: the baked sky and sea, the beam, the baked headland, tower
--- (so the tower hides the root of its own beam), the rain, the baked words,
--- and the prompt. Only the beam, the rain and the prompt are built each frame; the
--- rest are top-level values made once.
+-- @clock@ is the ambient tick count (60 a second) as a Float, from "Render".
 titleScreen :: Float -> Picture
-titleScreen clock = Pictures
-  [ titleBackground clock
-  , labelArt
-  , prompt
-  ]
+titleScreen clock = Pictures [titleBackground clock, labelArt]
+
+-- | The title's menu, low on the past's sea: one line a choice, top to bottom as
+-- 'Game.Run.titleStart' and the rest number them.
+--
+-- @choice@ is the chosen line ('gTitleChoice'), @saved@ whether there is an order
+-- to go back to (then the first line continues instead of taking a new order), and
+-- @muted@ whether the sound is off. The chosen line is a plate like the courier's
+-- name tag: ink, her yellow shadow, the letters in rim white, and the talk's arrow
+-- turned to point at it. The others are plain rim white, a little faded. Lines are
+-- 3 units a pixel (21 tall), 40 apart, from y = -214, starting at x = -556.
+titleMenu :: Int -> Bool -> Bool -> Picture
+titleMenu choice saved muted = Pictures (zipWith menuLine [0 ..] items)
   where
-    -- The prompt breathes from alpha 0.44 to 1 over roughly 90 ticks.
-    glowK = 0.72 + 0.28 * sin (clock * 0.07)
-    -- A 300 by 42-unit plate around a 19-unit baseline near the canvas foot.
-    prompt = Translate 0 (-350) (Pictures
-      [ Color (hexA 0x000000 0.45) (rectC 300 42 `shift` 6)
-      , Color (fade glowK (hex 0xFFE2A8)) (Translate 0 0 (textC 19 "Press Enter to begin"))
-      ])
-    -- Used infix to raise the plate six canvas units around its text.
-    shift pic dy = Translate 0 dy pic
+    items =
+      [ if saved then ("CONTINUE", "") else ("NEW ORDER", "opening film first")
+      , ("HOW TO PLAY", "")
+      , (if muted then "SOUND: OFF" else "SOUND: ON", "")
+      , ("QUIT", "") ]
+    x = -556
+    h = 21
+    menuLine :: Int -> (String, String) -> Picture
+    menuLine i (label, note)
+      | i == choice = Pictures
+          [ Color (hex 0xF6B31C) (rect (x - 6) (y - h - 15) (w + 24) (h + 18))
+          , Color (hex 0x0D0B12) (rect (x - 12) (y - h - 9) (w + 24) (h + 18))
+          , Color (hex 0xF4F1EA) (Translate x y (pixelText 3 label))
+          , arrowRight (x - 50) (y - h / 2)
+          , Color (hex 0xF6B31C) (Translate (x + w + 30) (y - 4) (pixelText 2 note)) ]
+      | otherwise = Pictures
+          [ Color (hexA 0xF4F1EA 0.7) (Translate x y (pixelText 3 label))
+          , Color (hexA 0x8C8796 0.9) (Translate (x + w + 18) (y - 4) (pixelText 2 note)) ]
+      where
+        y = -214 - 40 * fromIntegral i
+        w = pw 3 label
+
+-- | The courier's talk arrow, turned to point right: ten columns of 2-unit pixels
+-- from its tail at x to its tip, centred on y, in her yellow with a dark rim.
+-- Each pair is a column's lowest pixel row counted up from the middle, negated,
+-- and how many pixels tall it is.
+arrowRight :: Float -> Float -> Picture
+arrowRight x y = Translate x y (Pictures
+  [ Color (hex 0x05080A) (Pictures
+      [ rect (fromIntegral i * px - px) (negate (fromIntegral (y0 + n + 1)) * px + off) (px * 3) (fromIntegral (n + 2) * px)
+      | (i, (y0, n)) <- cols ])
+  , Color (hex 0xF6B31C) (Pictures
+      [ rect (fromIntegral i * px) (negate (fromIntegral (y0 + n)) * px + off) px (fromIntegral n * px)
+      | (i, (y0, n)) <- cols ])
+  ])
+  where
+    px = 2
+    off = 3.5 * px
+    cols = zip [0 :: Int ..] [(0, 7), (0, 7), (0, 7), (-3, 13), (-2, 11), (-1, 9), (0, 7), (1, 5), (2, 3), (3, 1 :: Int)]
 
 -- | The title without its words: the split sky and sea, the turning beam, the
 -- tower and the rain. The orders are laid out over it.
@@ -331,9 +366,9 @@ titleBackground clock = Pictures
 -- lines, and two columns of keycaps, each followed by what it does: the keys on
 -- the left, the things met in the levels on the right.
 --
--- "Render" draws it over 'titleScreen' while the game's gShowInstructions flag is
--- set. The I key opens and shuts it, and Enter does nothing while it is open (see
--- stepTitle in "Game.Run"). A top-level value, so the picture is made once.
+-- The app draws it over the title and its menu while the game's gShowInstructions
+-- flag is set. HOW TO PLAY or the I key opens it, and Enter, I or Escape shuts it
+-- (see stepTitle in "Game.Run"). A top-level value, so the picture is made once.
 instructionsPopup :: Picture
 instructionsPopup = Pictures
   [Color (hexA 0x7D93A0 0.4) (rectC canvasW canvasH)
@@ -343,6 +378,7 @@ instructionsPopup = Pictures
   , label 0 155 30 "HOW TO PLAY"
   , label 0 100 12 "Bring the power cell from the past to light up the lighthouse"
   , label 0 70 12 "Travel between past and present to solve the puzzles!"
+  , Color (hexA 0xFFF3D6 0.6) (Translate 0 (-200) (textC 12 "Enter or Esc to close"))
 
   , Translate 0 (-100) (Pictures
     -- The keys. The group is lowered 100, so its rows, 40 apart, stand from
