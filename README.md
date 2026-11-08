@@ -279,6 +279,8 @@ The footprints are drawn on the floor and the one the echo would stop on is ring
 
 Corner ticks under the keeper's feet mean you can switch era right here. Holding Tab shows the other era without spending anything. The moment a push makes the level unwinnable, a line under the map says so, using a list of dead states the solver works out for the level. It says nothing about running out of time, because that would give away the par.
 
+The game works those lists out in the background, a few milliseconds of each frame (two in play, six on the title, in the hall and during the opening film), so no frame ever waits for one: the level being played or chosen first, then the ones after it, then the rest. Until a level's list is ready its line simply does not show. The Long Way Round has the most to search (190,082 states, 26,111 of them dead), about a second and a half of work while the game draws, so its list is ready a few seconds after the game opens. The search (`DeadSearch` in `Game.Solution`) needs only which states can reach a win, not what they cost, so it numbers each state once, packs its key into a few machine words and keeps everything in unboxed arrays: a second of work and about 23 MB at its peak, where the cheapest-first `search` takes seven and a half seconds and 220 to 300 MB. The finished list is a packed hash table of about 1.4 MB, which matters because every major garbage collection copies whatever boxed data is alive, and a `Set` of the same keys (29 MB) would be copied each time. `--script` works out the shown level's list before the window opens, so a held moment shows the line exactly as play would.
+
 ### Crates and pits
 
 A crate has one position, shared by both eras, so it only goes where both have room. In the past, walking into it pushes it one cell, and it can never be pulled. In the present it is rusted solid, in every level. A crate occupies its cell in both eras, so moving it can open a crossing. Holding a direction walks up to a crate and stops: a push needs a fresh press.
@@ -362,7 +364,7 @@ as a WAV file and exits, to listen to them outside the game.
 
 ### Development flags
 
-`--intro` opens on the opening film whatever the save says, to watch it again. `--script=KEYS --after=N` runs keys instantly at startup, through the same ticks as the keyboard (talk and film included), and then freezes, to inspect an exact moment; `!` in it is Escape. `--trace` prints state changes, and whether sound is on and the film was found, and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
+`--intro` opens on the opening film whatever the save says, to watch it again. `--script=KEYS --after=N` runs keys instantly at startup, through the same ticks as the keyboard (talk and film included), and then freezes, to inspect an exact moment; `!` in it is Escape. `--trace` prints state changes, whether sound is on and the film was found, and when each level's dead ends become known, and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
 
 To try the first-time flow without touching your own save, point `XDG_DATA_HOME` at an empty folder for that run: the save lives under it.
 
@@ -375,7 +377,8 @@ src/Game/   pure core: no Gloss, no IO, compiled without a graphics dependency
   Logic     stepGame and tryShift: all the rules
   Input     key events into one TickInput per tick
   Fx        decorative state, derived by comparing successive games
-  Solution  the intended route, and cheapest-first search over real stepGame
+  Solution  the intended route, cheapest-first search over real stepGame, and the
+            dead-end search the game runs a slice per frame
   Run       which level is being played, and moving between them, the opening film too
   Sound     which sounds a tick starts, and how loud each bed is
   Story     when the courier talks, what she says and what the board points at

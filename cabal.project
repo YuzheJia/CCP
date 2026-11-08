@@ -1,9 +1,17 @@
 -- Both vendored packages are their Hackage releases with small patches, each marked
 -- "Patched for Borrowed Light" in the source:
 --   gloss-rendering 1.13.2.1: a minimised window (reported as 0x0) no longer aborts.
+--     Faster drawing, the same pixels: OpenGL's colour and matrix mode are no
+--     longer queried at every node; convex polygons are drawn in batches, one
+--     glDrawArrays each, not one glBegin/glEnd per polygon; the convexity test
+--     answers as before in a third of the time; GLU's triangles for non-convex
+--     polygons are kept from one frame to the next.
 --   gloss 1.13.2.2, GLFW backend only: key repeats are ignored, as in its GLUT
 --     backend; letter keys go down and up by position, so they cannot stick on
 --     non-QWERTY layouts; GLUT is initialised once on Linux, not twice.
+--   gloss 1.13.2.2, play: a minor garbage collection after each frame, and a major
+--     one at most once a second, not a major one that copied the whole heap every
+--     frame.
 -- Both directories must be committed with the project, or a clone cannot build.
 packages: . vendor/gloss-rendering-1.13.2.1 vendor/gloss-1.13.2.2
 with-compiler: ghc-9.6.7

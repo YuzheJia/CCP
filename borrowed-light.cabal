@@ -24,7 +24,9 @@ library
                     Game.Run
                     Game.Sound
                     Game.Story
-  build-depends:    base >=4.18 && <5, containers >=0.6 && <0.8
+  -- array (a GHC boot package, like containers) holds the dead-end search's
+  -- unboxed tables, which the garbage collector neither copies nor reads.
+  build-depends:    base >=4.18 && <5, array >=0.5 && <0.6, containers >=0.6 && <0.8
 
 executable borrowed-light
   import:           shared
@@ -47,7 +49,12 @@ executable borrowed-light
                     Title
                     Video
   build-depends:    base >=4.18 && <5, array, borrowed-light, bytestring, containers, directory, filepath, gloss ==1.13.*
-  ghc-options:      "-with-rtsopts=-A32m"
+  -- Runtime options. -A32m: a 32 MB nursery, so a frame's short-lived pictures are
+  -- collected cheaply. -V0.005 -C0.005: the runtime may switch between Haskell
+  -- threads every 5 ms rather than every 20. On the single-threaded runtime the
+  -- thread making the ending's sounds (see Audio) takes turns with the game loop
+  -- for the first few seconds, and a shorter turn keeps frames from waiting long.
+  ghc-options:      "-with-rtsopts=-A32m -V0.005 -C0.005"
   -- The sound mixer, which plays through winmm on Windows and is silent elsewhere,
   -- and turning off input methods (imm32), which would take the letter keys.
   c-sources:        cbits/audio.c
@@ -55,7 +62,8 @@ executable borrowed-light
   cc-options:       -O2
   if os(windows)
     extra-libraries: winmm imm32
-  -- The game runs no Haskell threads. On Windows it uses the single-threaded
+  -- The game runs one Haskell thread besides its main loop: Audio's, which makes
+  -- the ending's sounds once, after startup. On Windows it uses the single-threaded
   -- runtime, after two unexplained crashes in the threaded one while freeglut called
   -- back into Haskell; elsewhere it keeps the threaded runtime it was tested with.
   -- Either way GLFW runs on the main OS thread, as it requires.

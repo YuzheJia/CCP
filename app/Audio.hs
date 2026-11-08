@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-omit-yields #-}
 -- | Sound out: hands the synthesised sounds to the mixer in cbits/audio.c, and
 -- turns each 'Cue' into a sound played at its own loudness and pitch.
 --
@@ -12,7 +13,7 @@ module Audio
   , dumpSounds
   ) where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, yield)
 import Control.Exception (evaluate)
 import Data.List (partition)
 import Control.Monad (forM_, when)
@@ -43,13 +44,21 @@ foreign import ccall unsafe "bl_audio_stop" c_stop :: CInt -> IO ()
 -- False, and silent, if there is no output. The ending's sounds, which take longer
 -- to make and are not wanted until level 3 is won, are made on a thread of their
 -- own once the game is running.
+--
+-- On Windows the game uses the single-threaded runtime, so that thread takes turns
+-- with the game loop on one core, and the runtime switches between them only where
+-- a thread checks in with it. Synth's loops write unboxed arrays without
+-- allocating, and such a loop never checked in, so one long sound (the arrival
+-- takes half a second to make) held the game loop up for its whole length. Synth
+-- and this module are compiled with -fno-omit-yields, which adds those check-ins,
+-- and the thread also yields after each sound.
 startAudio :: IO Bool
 startAudio = do
   ok <- (/= 0) <$> c_init
   when ok $ do
     let (later, now) = partition isEnding [minBound .. maxBound]
     mapM_ load now
-    _ <- forkIO (mapM_ load later)
+    _ <- forkIO (mapM_ ((>> yield) . load) later)
     pure ()
   pure ok
   where

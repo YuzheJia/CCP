@@ -127,6 +127,7 @@ allChecks level = concat
   , echoChecks level
   , mirrorChecks
   , campaignChecks
+  , deadSearchChecks
   , pendingShifts level
   , routeChecks level
   , determinism level
@@ -945,6 +946,51 @@ mirrorChecks =
                 [ShiftEra, Go DirRight, Go DirRight, Go DirRight, Go DirUp]
       in gCell g == (6, 4) && stateKey g `Set.member` deadStates oneWay
   ] ++ movableMirrorChecks
+
+-- The dead-end search the game runs a slice per frame. -------------------------
+--
+-- The game advances each level's 'DeadSearch' a few units a frame, so however the
+-- work is cut up it must find exactly what the full cheapest-first 'search' calls
+-- dead ends. Each campaign level's reference set is worked out once (The Long Way
+-- Round's takes several seconds) and compared with the search advanced one unit, 7
+-- units and 1000 units at a time: cut at every possible point, at uneven points,
+-- and in big pieces, the way a frame's time budget might cut it.
+deadSearchChecks :: [Check]
+deadSearchChecks = case campaign of
+  Left err -> [check ("dead search: campaign parses: " ++ err) False]
+  Right levels -> concat
+    [ [ check ("dead search: " ++ lvName l ++ ", advanced " ++ show k
+               ++ " units at a time, finds exactly the full search's dead ends")
+          (sliced k l == Just reference)
+      | k <- [1, 7, 1000] ]
+    | l <- levels
+    , let reference = Set.fromList (srDeadEnds (search l (\_ _ -> True) (startPlaying l))) ]
+    ++
+    [ check "dead search: one not yet advanced knows nothing, so the game says nothing yet" $
+        let plug = levelNamed "The Plug"
+            lost = foldl' (flip (applyAction plug)) (startPlaying plug)
+                     [Go DirDown, Go DirRight, Go DirRight, Go DirRight, ShiftEra, Go DirRight]
+            fresh = startDeadSearch plug
+        in deadSearchResult fresh == Nothing && not (deadSearchFinished fresh)
+           && not (knownDeadEnd fresh (stateKey lost))
+           && knownDeadEnd (finishDeadSearch fresh) (stateKey lost)
+    , check "dead search: the game's quick lookup agrees with the set on every reachable state" $
+        -- 'knownDeadEnd' looks keys up in the packed result rather than in the set;
+        -- Two Alignments has some ten thousand dead states among thirteen thousand.
+        let l = levels !! 1
+            done = finishDeadSearch (startDeadSearch l)
+            dead = deadStates l
+        in all (\k -> knownDeadEnd done k == (k `Set.member` dead))
+               (Map.keys (srStates (search l (\_ _ -> True) (startPlaying l))))
+    , check "dead search: a key it never met is not dead" $
+        let l = levels !! 1
+            done = finishDeadSearch (startDeadSearch l)
+            stranger = (stateKey (startPlaying l)) { skCell = (-7, 123456789), skPhase = Paused }
+        in not (knownDeadEnd done stranger)
+    ]
+  where
+    -- Advance @k@ units at a time until the search says it is finished.
+    sliced k l = deadSearchResult (until deadSearchFinished (advanceDeadSearch k) (startDeadSearch l))
 
 -- The campaign. -----------------------------------------------------------------
 campaignChecks :: [Check]

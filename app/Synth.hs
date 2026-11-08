@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-omit-yields #-}
 {-# LANGUAGE BangPatterns, FlexibleContexts #-}
 -- | Every sound in the game, made from oscillators, noise and filters at startup.
 -- Like the art, nothing is loaded from a file.

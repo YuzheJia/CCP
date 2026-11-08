@@ -9,7 +9,7 @@ import Font (textC)
 import Game.Fx
 import Game.Logic
 import Game.Run hiding (finale)
-import Game.Solution (StateKey, deadStates, stateKey)
+import Game.Solution (StateKey, stateKey)
 import Game.Types
 import Graphics.Gloss
 import Hud
@@ -42,7 +42,6 @@ data Scene = Scene
   , scWonCaption   :: Picture
   , scDarkCaption  :: Picture
   , scHasNext      :: Bool
-  , scDead         :: Set.Set StateKey  -- ^ worked out once, the first time it is needed
   , scHud          :: HudArt
   , scEnding       :: EndingArt         -- ^ built the first time an ending is drawn
   }
@@ -83,12 +82,6 @@ mkScene title hasNext teach level = Scene
   , scWonCaption = wonCaption title
   , scDarkCaption = darkCaption title
   , scHasNext = hasNext
-  -- Exhaustive dead-state search grows quickly with several pushable objects.
-  -- Keep the level-select transition responsive in the larger rooms. A level of
-  -- whole rooms keeps it: its one-way gates hold its search to the sum of its rooms.
-  -- The search knows one keeper only, so a level for two is never told it is lost.
-  , scDead = if duo || (Set.size (lvCrates level) >= 3 && not (roomedLevel level))
-               then Set.empty else deadStates level
   , scHud = mkHudArt duo teach title level
   , scEnding = mkEndingArt level
   }
@@ -156,14 +149,17 @@ captionOf s Past = scPastCaption s
 captionOf s Present = scPresentCaption s
 
 -- | The picture for the current window: scaled to fit, bars over the remainder.
-render :: Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
-render scene level g fx size = fitted size (frame scene level g fx)
+-- @deadEnd@ says whether a state is known to be one the level can no longer be won
+-- from. It is a function rather than part of the 'Scene' because the answer arrives
+-- later: Main works it out a slice per frame, and until then it is always 'False'.
+render :: (StateKey -> Bool) -> Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
+render deadEnd scene level g fx size = fitted size (frame deadEnd scene level g fx)
 
 -- | As 'render', with more drawn over the frame in canvas units: @ is given the
 -- board's stand, 0 while the level is introduced and 1 once closed in.
-renderWith :: (Float -> Picture) -> Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
-renderWith over scene level g fx size =
-  fitted size (Pictures [frame scene level g fx, over (focusOf Nothing fx)])
+renderWith :: (Float -> Picture) -> (StateKey -> Bool) -> Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
+renderWith over deadEnd scene level g fx size =
+  fitted size (Pictures [frame deadEnd scene level g fx, over (focusOf Nothing fx)])
 
 -- | A frame of a level's ending. @next@ is the number and name of the level that it
 -- leads into, for the card at the end.
@@ -187,15 +183,15 @@ fitted (winW, winH) pic = Pictures
       [ Translate 0 (hf / 2 - barY / 2) (rectC wf barY) | barY > 0.5 ] ++
       [ Translate 0 (negate (hf / 2) + barY / 2) (rectC wf barY) | barY > 0.5 ])
 
-frame :: Scene -> Level -> Game -> Fx -> Picture
-frame scene level g fx = case gPhase g of
+frame :: (StateKey -> Bool) -> Scene -> Level -> Game -> Fx -> Picture
+frame deadEnd scene level g fx = case gPhase g of
   Menu -> Pictures
     [titleScreen clock
     , if gShowInstructions g then instructionsPopup else Blank
     ]
 
   _ -> Pictures
-    [ world Nothing scene level (if peeking g fx then peekView g else g) fx
+    [ world deadEnd Nothing scene level (if peeking g fx then peekView g else g) fx
     , hud (scHud scene) level g fx clock
     , board f (lessonPlate level g fx)
     , board f (overlays scene g fx)
@@ -252,12 +248,13 @@ openedCells level f = case fnStage f of
   s | s > Opening -> length (lvPassage level)
   _ -> 0
 
-world :: Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
-world finale scene level g fx = Pictures
+-- | The sea and the board. @deadEnd@ is as for 'render'.
+world :: (StateKey -> Bool) -> Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
+world deadEnd finale scene level g fx = Pictures
   [ seaOf scene era
   , seaLife era (fromIntegral (fxClock fx))
   , scSeaShade scene
-  , board (focusOf finale fx) (onTheBoard finale scene level g fx)
+  , board (focusOf finale fx) (onTheBoard deadEnd finale scene level g fx)
   ]
   where era = seaEra g fx
 
@@ -275,8 +272,8 @@ seaEra g fx = case fxWave fx of
   _ -> gEra g
 
 -- | Everything 'world' draws on the board, in the board's own coordinates.
-onTheBoard :: Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
-onTheBoard finale scene level g fx = Pictures
+onTheBoard :: (StateKey -> Bool) -> Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
+onTheBoard deadEnd finale scene level g fx = Pictures
   [ surfBreathing
   , shoreOf scene shownEra
   , backOf scene shownEra
@@ -671,7 +668,7 @@ onTheBoard finale scene level g fx = Pictures
           Beckon | gPhase g == Playing -> hintBand era (clamp01 (fromIntegral (fnAge f) / 40)) (beckonText level)
           _ -> Blank
       | peeking g fx = hintBand era 1 (peekText era)
-      | stateKey g `Set.member` scDead scene = hintBand era 1 deadEndText
+      | deadEnd (stateKey g) = hintBand era 1 deadEndText
       | otherwise = case gFeedback g of
           Just (Feedback CellCollected left) | gPhase g `elem` [Playing, Paused] ->
             hintBand era (clamp01 (fromIntegral left / 30)) pickupText
@@ -1140,7 +1137,9 @@ endingFrame scene level (number, name) f g fx = Pictures
     onlyIf p c = if c then p else Blank
     scenePic
       | stage >= Rush = rushWorld scene level f g fx
-      | otherwise = world (Just f) scene level g fx
+      -- An ending's hint line only ever shows the way on, never that the level is
+      -- lost, so it needs no dead ends.
+      | otherwise = world (const False) (Just f) scene level g fx
     -- The last plate of the hall, and then the lamp takes it back.
     plate = case stage of
       Lit -> endedPlate (smooth ((ageF - 70) / 30)) (gRemaining g)

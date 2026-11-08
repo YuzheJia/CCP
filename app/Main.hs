@@ -17,14 +17,19 @@
 --                    T Tab held, e Enter, p pause, r restart, ! Escape, i instructions, . one idle tick
 --   --after=N        then run N more idle ticks
 --   --fps            print measured frames per second to stdout
---   --trace          print the game state whenever phase, era, cell or inventory change
+--   --trace          print the game state whenever phase, era, cell or inventory change,
+--                    and when each level's dead ends become known
 module Main (main) where
 
 import Audio
+import Control.Applicative ((<|>))
+import Control.Exception (evaluate)
 import Control.Monad (forM_, when)
+import qualified Data.IntMap.Strict as IntMap
 import Data.IORef
 import Data.List (stripPrefix)
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
+import qualified Data.Set as Set
 import Game.Fx
 import Game.Input
 import Game.Level
@@ -63,6 +68,10 @@ data World = World
   , wTalks  :: !Bool         -- ^ off for the demo, whose keys would only be taken by it
   , wIntroLen :: !Int        -- ^ ticks the opening film runs; 0 with no film, or once
                              --   it has been shown, so it plays once a session
+  , wDead   :: !(IntMap.IntMap DeadSearch)
+    -- ^ each level's search for the states it can no longer be won from, by its
+    --   index in the hall, advanced a slice per frame ('searchDeadEnds'). A level
+    --   with no entry is never told it is lost (see 'warnsOfDeadEnds')
   }
 
 -- | The 1280 x 800 the art is composed for, shrunk to fit a smaller display.
@@ -130,6 +139,8 @@ main = do
         , wStory = noStory
         , wTalks = not demo
         , wIntroLen = if demo then 0 else maybe 0 videoTicks video
+        -- Made here, but nothing is worked out until 'searchDeadEnds' runs them.
+        , wDead = IntMap.fromList [ (i, startDeadSearch l) | (i, l) <- zip [0 ..] levels, warnsOfDeadEnds l ]
         }
       -- An inspection script is played instantly through the same ticks as the
       -- keyboard, talk and film included, and then the world holds still.
@@ -139,6 +150,10 @@ main = do
           let inputs = keys ++ replicate after noInput
           in (iterate (oneTick levels) world0 { wScript = inputs } !! length inputs)
                { wFrozen = True, wCues = [] }
+  -- A frozen world runs no searches, so the level it shows has its search finished
+  -- here, before the window opens, and the moment it holds can show the dead-end
+  -- line exactly as play would. Inspection stays the same from run to run.
+  world2 <- if inspect then finishShownSearch world1 else pure world1
   -- Every sound is made here, before the window opens.
   sound <- if inspect then pure False else startAudio
   when sound $ forM_ video (\v -> loadClip (vdAudioRate v) (vdAudio v))
@@ -149,6 +164,8 @@ main = do
   start <- getMonotonicTime
   counter <- newIORef (start, 0 :: Int)
   firstFrame <- newIORef True
+  -- Seconds spent on dead-end searches since the last frame was drawn.
+  searchSpent <- newIORef (0 :: Double)
   let countFrame = when ("--fps" `elem` args) $ do
         now <- getMonotonicTime
         (since, frames) <- readIORef counter
@@ -162,14 +179,19 @@ main = do
     (InWindow "Borrowed Light" windowSize (40, 40))
     black
     60
-    (start, world1)
+    (start, world2)
     (\(_, w) -> do
         first <- readIORef firstFrame
         when first (writeIORef firstFrame False >> exitWhenWindowCloses)
         countFrame
+        writeIORef searchSpent 0
         let run = wRun w
             i = runIndex run
             g = runGame run
+            -- Known only once this level's search has finished; until then the
+            -- dead-end line simply does not show. Never a wait: looking a state up
+            -- in a finished search is one hash-table probe.
+            deadEnd key = maybe False (`knownDeadEnd` key) (IntMap.lookup i (wDead w))
             -- While she talks about something in the other era, the board shows
             -- that era, as if Tab were held.
             shown = case lookNow (wStory w) of
@@ -177,12 +199,12 @@ main = do
               _ -> g
             talk f = talkLayer (wStory w) f (fxClock (wFx w))
         case runMode run of
-          Title -> pure (Render.render (scenes !! i) (levels !! i) g (wFx w) (wWindow w))
+          Title -> pure (Render.render deadEnd (scenes !! i) (levels !! i) g (wFx w) (wWindow w))
           Intro age held -> do
             frame <- traverse (`frameAt` age) player
             pure (Render.fitted (wWindow w) (introScreen (maybe 2 videoScale video) frame age held))
           Lobby -> pure (Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w))
-          InLevel -> pure (Render.renderWith talk (scenes !! i) (levels !! i) shown (wFx w) (wWindow w))
+          InLevel -> pure (Render.renderWith talk deadEnd (scenes !! i) (levels !! i) shown (wFx w) (wWindow w))
           Ending f -> pure (Render.renderEnding (scenes !! i) (levels !! i) (beyond i) f g (wFx w) (wWindow w)))
     (\event (t, w) -> pure (t, onEvent event w))
     (\_ (t, w) -> do
@@ -194,12 +216,88 @@ main = do
             playCue c
             when ("--trace" `elem` args) (putStrLn ("sound " ++ show c) >> hFlush stdout)
           setBeds (beds levels (wRun w'))
-        w'' <- persistWorld w' { wCues = [] }
+        persisted <- persistWorld w' { wCues = [] }
+        -- Gloss's loop draws a frame, holds it until at least a hundredth of a
+        -- second has passed since the last one, runs this step (none, one or two
+        -- times, to keep 60 ticks a second), then swaps buffers, which waits for
+        -- the screen's refresh. The searches go last in the step, and share one
+        -- budget a frame however many steps the frame has: the display callback
+        -- above resets what has been spent. Time spent here is time the next
+        -- frame's hold does not sleep, so a frame that draws quickly loses nothing.
+        spent <- readIORef searchSpent
+        (w'', used) <- searchDeadEnds (searchBudget (runMode (wRun persisted)) - spent) persisted
+        writeIORef searchSpent (spent + used)
+        when ("--trace" `elem` args) $
+          forM_ (IntMap.toList (wDead w'')) $ \(n, s) ->
+            when (deadSearchFinished s && maybe False (not . deadSearchFinished) (IntMap.lookup n (wDead w))) $ do
+              putStrLn ("dead ends of level " ++ show (n + 1) ++ " known, " ++ show (now - start) ++ " s after opening")
+              hFlush stdout
         let game = runGame (wRun w'')
         when ("--trace" `elem` args && (stateKey game /= stateKey (runGame (wRun w)) || runIndex (wRun w'') /= runIndex (wRun w) || filmless (runMode (wRun w'')) /= filmless (runMode (wRun w)))) $ do
           putStrLn ("mode=" ++ show (runMode (wRun w'')) ++ " level=" ++ show (runIndex (wRun w'') + 1) ++ " " ++ show (stateKey game) ++ " remaining=" ++ show (gRemaining game))
           hFlush stdout
         pure (now, w''))
+
+-- | Whether the game looks for a level's dead ends at all, as it always has. The
+-- search knows one keeper only, so a level for two is never told it is lost. A level
+-- with three or more crates could reach too many states to search, unless it is
+-- built of whole rooms: its one-way gates keep its states a sum over the rooms
+-- rather than a product.
+warnsOfDeadEnds :: Level -> Bool
+warnsOfDeadEnds level =
+  not (isJust (lvSpawn2 level)) && not (Set.size (lvCrates level) >= 3 && not (roomedLevel level))
+
+-- | Seconds of dead-end search allowed in one frame, by what the screen shows. In
+-- play a frame takes three or four milliseconds to draw, and Gloss holds each frame
+-- for at least ten, so two milliseconds fit in the time it would otherwise sleep.
+-- The title, the hall and the opening film draw less and nobody is steering, so
+-- they take six. The Long Way Round takes about a second and a half of searching
+-- in all, so even straight from the title its dead ends are known a few seconds
+-- after the game opens, before anyone can walk into one.
+searchBudget :: RunMode -> Double
+searchBudget mode = case mode of
+  InLevel -> 0.002
+  Ending _ -> 0.002
+  _ -> 0.006
+
+-- | Units of search run between looks at the clock: about a tenth of a millisecond
+-- of work, so a frame overshoots its budget by little.
+searchSlice :: Int
+searchSlice = 16
+
+-- | Advance the dead-end searches for up to @budget@ seconds of wall-clock time, and
+-- say how long it took. The level being played, or chosen on the title or in the
+-- hall, goes first; then the levels after it, which the player is likely to reach
+-- next; then the ones before. A frozen world runs nothing, so it stays the same.
+searchDeadEnds :: Double -> World -> IO (World, Double)
+searchDeadEnds budget w
+  | wFrozen w || budget <= 0 = pure (w, 0)
+  | otherwise = do
+      begun <- getMonotonicTime
+      let go searches = case nextSearch searches of
+            Nothing -> pure searches
+            Just (i, s) -> do
+              -- Evaluating the advanced search is what runs it, here and not later
+              -- in some frame that happens to look at it.
+              s' <- evaluate (advanceDeadSearch searchSlice s)
+              let searches' = IntMap.insert i s' searches
+              now <- getMonotonicTime
+              if now - begun < budget then go searches' else pure searches'
+      searches <- go (wDead w)
+      ended <- getMonotonicTime
+      pure (w { wDead = searches }, ended - begun)
+  where
+    current = runIndex (wRun w)
+    nextSearch searches =
+      let (before, after) = IntMap.partitionWithKey (\i _ -> i < current) searches
+          unfinished = IntMap.filter (not . deadSearchFinished)
+      in IntMap.lookupMin (unfinished after) <|> IntMap.lookupMin (unfinished before)
+
+-- | Finish the search of the level the world shows, all at once.
+finishShownSearch :: World -> IO World
+finishShownSearch w = do
+  searches <- evaluate (IntMap.adjust finishDeadSearch (runIndex (wRun w)) (wDead w))
+  pure w { wDead = searches }
 
 persistWorld :: World -> IO World
 persistWorld world
