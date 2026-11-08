@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Borrowed Light 封面方案</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&display=swap">
+<style>
+  /* One reading column; each design is the game's own 1280x800 canvas with notes
+     under it. Dark on purpose: it is the game's night palette. */
+  :root {
+    color-scheme: dark;
+    --bg: #0a0f12; --panel: #10181c; --edge: #22313a;
+    --fg: #ece6da; --dim: #97a6ab; --sun: #f6b31c; --cool: #8fb4bf;
+    --pixel: "Silkscreen", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --body: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif;
+  }
+  html, body { background: var(--bg); color: var(--fg); }
+  body { margin: 0; font-family: var(--body); font-size: 15px; line-height: 1.75;
+         padding: 40px max(16px, env(safe-area-inset-left, 0px)) 96px; }
+  main { max-width: 1120px; margin: 0 auto; display: grid; gap: 72px; }
+  section { display: grid; gap: 18px; min-width: 0; }
+  .eyebrow { font-family: var(--pixel); font-size: 12px; letter-spacing: 0.14em; color: var(--sun); text-transform: uppercase; }
+  h1 { font-size: clamp(28px, 4.2vw, 44px); line-height: 1.2; margin: 0; text-wrap: balance; }
+  h2 { font-size: clamp(21px, 2.6vw, 27px); line-height: 1.3; margin: 0; text-wrap: balance; }
+  p { margin: 0; max-width: 46em; }
+  .lede { color: var(--dim); font-size: 16px; }
+  .tag { display: inline-block; font-family: var(--pixel); font-size: 11px; letter-spacing: 0.1em; padding: 2px 8px;
+         border: 1px solid currentColor; color: var(--sun); vertical-align: 4px; margin-left: 8px; }
+  .tag.alt { color: var(--cool); }
+  ol, ul { margin: 0; padding-left: 1.4em; max-width: 50em; }
+  li + li { margin-top: 6px; }
+  li::marker { color: var(--sun); font-family: var(--pixel); font-size: 12px; }
+  b { font-weight: 600; }
+
+  .refs { border-top: 1px solid var(--edge); }
+  .ref { display: grid; grid-template-columns: 170px minmax(0, 1fr) minmax(0, 1fr); gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--edge); }
+  .ref .what { color: var(--dim); }
+  .ref .ours::before { content: "→ "; color: var(--sun); }
+  .refs-head { font-family: var(--pixel); font-size: 11px; letter-spacing: 0.1em; color: var(--dim); padding: 8px 0; }
+  @media (max-width: 720px) { .ref { grid-template-columns: 1fr; gap: 4px; } .refs-head { display: none; } }
+
+  .stage { position: relative; aspect-ratio: 1280 / 800; width: 100%; background: #000; outline: 1px solid var(--edge); }
+  .stage canvas { display: block; width: 100%; height: 100%; }
+  .stage canvas:focus-visible { outline: 3px solid var(--sun); outline-offset: 3px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .bar button { font: 12px/1 var(--pixel); letter-spacing: 0.08em; color: var(--fg); background: var(--panel);
+                border: 1px solid var(--edge); padding: 9px 12px; cursor: pointer; }
+  .bar button[aria-pressed="true"] { background: var(--sun); color: #0d0b12; border-color: var(--sun); }
+  .bar .hint { color: var(--dim); font-size: 13px; margin-left: auto; }
+  .verdict { background: var(--panel); border-left: 3px solid var(--sun); padding: 18px 20px; display: grid; gap: 12px; }
+
+  /* ?shot=… renders one bare canvas at 1280x800 for the PNGs. */
+  body.shot { padding: 0; overflow: hidden; }
+  body.shot main { display: none; }
+  #shot { display: none; }
+  body.shot #shot { display: block; width: 1280px; height: 800px; }
+</style>
+</head>
+<body>
+<canvas id="shot"></canvas>
+<main>
+  <section>
+    <div class="eyebrow">Borrowed Light · 封面方案稿 · 2026-11-08</div>
+    <h1>封面：留住分割的灯塔，把她放进去</h1>
+    <p class="lede">要改，但不用推倒。现在的封面是整个游戏里最早做的一屏，早于外卖员的故事、对话框和订单票据。左右两个时代共用一座塔，这是全游戏最好的一张图，应该留下；要改的是压在它上面的东西。</p>
+    <ol>
+      <li><b>没有主角。</b>游戏里已经有梅的立绘和新小人，封面上一个人都没有。</li>
+      <li><b>文案过时。</b>“Borrow a power cell…” 是改成“送灯芯”之前的说法。</li>
+      <li><b>两套字。</b>标题是细线条的制图字，而对话框、订单票据都是像素字加黄色投影。封面应该和它们是一家人。</li>
+      <li><b>没有菜单。</b>只有 “Press Enter to begin” 和 “按 I 看说明”。存档、声音、说明，玩家只能靠猜。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>参考</h2>
+    <p class="lede">只借布局和做法，不借长相；画面全部用游戏自己的天空、塔、字体和小人画出来。</p>
+    <div class="refs">
+      <div class="ref refs-head"><span>参考</span><span>它做对了什么</span><span>这里拿来做什么</span></div>
+      <div class="ref"><b>Celeste</b><span class="what">标题就是一整张风景，菜单只是一列字，不画按钮框。</span><span class="ours">A 的菜单：左下角一列像素字，只有选中项有底板。</span></div>
+      <div class="ref"><b>Undertale、Hollow Knight</b><span class="what">打完结局，标题画面会变，玩家回到标题时能看到自己做过的事。</span><span class="ours">A 送达之后：“现在”那一半雨停了、灯亮了。</span></div>
+      <div class="ref"><b>VA-11 Hall-A、Coffee Talk 一类</b><span class="what">像素日系立绘加雨夜，角色本身就是门面。</span><span class="ours">B：梅的大立绘，加一张接单卡片当菜单。</span></div>
+      <div class="ref"><b>本游戏的对话框和订单票</b><span class="what">墨色底、米白字、黄色投影、说话箭头。</span><span class="ours">所有新元素都用这一套，不另起炉灶。</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>现在 <span class="tag alt">NOW</span></h2>
+    <div class="stage"><canvas data-screen="now" tabindex="0" aria-label="现在的标题画面"></canvas></div>
+  </section>
+
+  <section id="a">
+    <h2>方案 A · 分割的灯塔，她站在缝上 <span class="tag">推荐</span></h2>
+    <div class="bar" role="group" aria-label="封面状态">
+      <button data-mode="first" aria-pressed="true">首次打开</button>
+      <button data-mode="save" aria-pressed="false">有存档</button>
+      <button data-mode="done" aria-pressed="false">送达之后</button>
+      <span class="hint">点画面后 W / S 换选项</span>
+    </div>
+    <div class="stage"><canvas data-screen="A" data-mode="first" tabindex="0" aria-label="方案 A 封面"></canvas></div>
+    <ol>
+      <li><b>Logo 换成像素字</b>，和对话框、票据同一套。BORROWED 是过去的暖米色配她的黄色投影；LIGHT 是现在的冷灰配石板色投影，灯还没亮。</li>
+      <li><b>两行副标题各站一边</b>：PICK UP IN THE PAST / DELIVER TO THE PRESENT。它替掉了左上、右上的 PAST / PRESENT，同时把玩法和故事都讲了。</li>
+      <li><b>梅站在塔门口，正好压在两个时代的分界线上</b>：左半身被夕阳照着，右半身在雨里。背影，看得见保温箱。用的就是游戏里的走路小人。</li>
+      <li><b>菜单在左下角的海面上</b>，一列字，W/S 选、Enter 确定。选中项是对话框名牌的样子（墨底、米白字、黄色投影），旁边是对话箭头。</li>
+      <li><b>有存档时，右下角贴一张小订单</b>，就是订单界面那张票的缩小版：继续会进哪一单、下一站是哪一关。选中 CONTINUE 时它也抬起来，带黄色投影。</li>
+      <li><b>送达之后封面会变</b>：“现在”那一半雨停了，天快亮，有星星，灯亮了，光束扫向右边；LIGHT 变暖，副标题变成 DELIVERED TO THE PRESENT，梅转过身来。灯室里有一个很小的人影，是守塔人，只在通关后出现，所以不剧透。</li>
+    </ol>
+  </section>
+
+  <section id="b">
+    <h2>方案 B · 立绘加接单卡片 <span class="tag alt">备选</span></h2>
+    <div class="bar" role="group" aria-label="封面状态">
+      <button data-mode="first" aria-pressed="true">首次打开</button>
+      <button data-mode="save" aria-pressed="false">有存档</button>
+      <span class="hint">点画面后 W / S 换选项</span>
+    </div>
+    <div class="stage"><canvas data-screen="B" data-mode="first" tabindex="0" aria-label="方案 B 封面"></canvas></div>
+    <ol>
+      <li><b>整张画面都是“现在”的雨夜</b>，塔很远、很小，灯是灭的；地平线上只剩一线旧夕阳，是够不着的过去。</li>
+      <li><b>梅的像素立绘占右边一大块</b>，看着远处的塔。就是对话框里那张，放大 4 倍，稍微压暗一点融进夜色。</li>
+      <li><b>菜单是一张外卖 App 的“新订单”卡片</b>：1× 灯芯，取货：过去，送达：现在，地址：灯塔顶层。ACCEPT ORDER 就是开始游戏。卡片外框就是对话框的样子。</li>
+      <li><b>代价</b>：分割的塔这张最有辨识度的图没了；接单卡片和存档界面的订单票也有点重复。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>我的建议</h2>
+    <div class="verdict">
+      <p><b>选 A。</b>分割的灯塔就是这个游戏的玩法（一个键切两个时代），封面一眼就讲清楚。A 只是在原图上加人、换字、加菜单，<code>Title.hs</code> 里的天空、海和塔都不用动，风险小；“送达之后封面会变”花得很少，回报感很足。B 的接单文案可以借给 A，比如首次打开时 NEW ORDER 后面那行小字。</p>
+      <p>壁纸：A 去掉菜单就是一张 16:10 的图，可以另外导出 1920×1200 当桌面壁纸；itch.io 封面要 16:9 的话，需要重新构图一次。</p>
+    </div>
+    <ul>
+      <li>A 还是 B，或者 A 加 B 的接单文案。</li>
+      <li>Logo 用像素字（稿里这样），还是保留现在的线条字。</li>
+      <li>通关后灯室里的守塔人人影，要不要。</li>
+      <li>菜单里要不要 QUIT：全屏启动时有用，窗口模式可以省掉。</li>
+    </ul>
+  </section>
+</main>
+
+<script src="../../ui-mockups/save-screen/game-data.js"></script>
+<script src="sprites.js"></script>
+<script src="title-core.js"></script>
+<script src="title-mockups.js"></script>
+<script>
+"use strict";
+// drawStage and MENUS are globals from title-mockups.js.
+const SHOTS = {
+  now: { screen: "now", t: 300 },
+  A1: { screen: "A", mode: "first", sel: 0, t: 300 },
+  A2: { screen: "A", mode: "save", sel: 0, t: 300 },
+  A3: { screen: "A", mode: "done", sel: 0, t: 300 },
+  B1: { screen: "B", mode: "first", sel: 0, t: 300 },
+  B2: { screen: "B", mode: "save", sel: 0, t: 300 },
+};
+const shot = new URLSearchParams(location.search).get("shot");
+if (shot && SHOTS[shot]) {
+  document.body.classList.add("shot");
+  drawStage(document.getElementById("shot"), { ...SHOTS[shot], dpr: 1 }, 1280);
+} else {
+  const stages = [...document.querySelectorAll("main canvas")].map(cv => ({ cv, sel: 0 }));
+  const itemsOf = s => s.cv.dataset.screen === "A" ? MENUS[s.cv.dataset.mode].length : s.cv.dataset.screen === "B" ? 4 : 0;
+  stages.forEach(s => s.cv.addEventListener("keydown", e => {
+    const n = itemsOf(s); if (!n) return;
+    if (["w", "W", "ArrowUp"].includes(e.key)) { s.sel = (s.sel + n - 1) % n; e.preventDefault(); }
+    if (["s", "S", "ArrowDown"].includes(e.key)) { s.sel = (s.sel + 1) % n; e.preventDefault(); }
+  }));
+  document.querySelectorAll(".bar").forEach(bar => bar.addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    bar.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    const cv = bar.parentElement.querySelector("canvas");
+    cv.dataset.mode = b.dataset.mode;
+    stages.find(s => s.cv === cv).sel = 0;
+  }));
+  const t0 = performance.now();
+  (function frame(now) {
+    const t = (now - t0) / 1000 * 60 + 300;
+    for (const s of stages) {
+      const r = s.cv.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > innerHeight) continue;
+      drawStage(s.cv, { screen: s.cv.dataset.screen, mode: s.cv.dataset.mode, sel: s.sel, t }, s.cv.clientWidth);
+    }
+    requestAnimationFrame(frame);
+  })(t0);
+}
+</script>
+</body>
+</html>

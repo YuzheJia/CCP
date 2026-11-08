@@ -219,10 +219,8 @@ fitted (winW, winH) pic = Pictures
 -- Preview changes only the world passed for drawing; the HUD retains live state.
 frame :: (StateKey -> Bool) -> Scene -> Level -> Game -> Fx -> Picture
 frame deadEnd scene level g fx = case gPhase g of
-  Menu -> Pictures
-    [titleScreen clock
-    , if gShowInstructions g then instructionsPopup else Blank
-    ]
+  -- The title; the app draws its menu and the instructions over it.
+  Menu -> titleScreen clock
 
   -- World first, HUD next, board panels last: paint order keeps labels readable.
   _ -> Pictures

@@ -503,6 +503,8 @@ data Game = Game
                                    --   pause, an undo, a restart, a win or a loss)
   , gShowInstructions :: Bool  -- ^ the instructions are open on the title (I key);
                                --   the one lazy field, as it has no @!@
+  , gTitleChoice  :: !Int          -- ^ the title menu's chosen line, 0 at the top
+                                   --   (see 'Game.Run.titleStart' and the rest)
   , gPartner      :: !(Maybe Partner) -- ^ the second keeper, in a level for two
   } deriving (Eq, Show)
 

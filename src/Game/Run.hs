@@ -43,6 +43,8 @@ module Game.Run
   , startRunWithProgress
   , startRunAt
   , stepRun
+  , titleStart, titleHowTo, titleSound, titleQuit, titleItems
+  , titleChoiceTaken
   , lastVisible
     -- * The opening
   , introSkipTicks
@@ -201,6 +203,29 @@ startRunAt levels i completed
   | otherwise = startRunWithProgress levels i completed
   where c = clamp 0 (length levels) completed
 
+-- | The lines of the title's menu, top to bottom, by their index in
+-- 'gTitleChoice': start (a new order, or continue), how to play, sound on or off,
+-- and quit. 'titleItems' is how many there are. The app's Title module draws them.
+titleStart, titleHowTo, titleSound, titleQuit, titleItems :: Int
+titleStart = 0
+titleHowTo = 1
+titleSound = 2
+titleQuit = 3
+titleItems = 4
+
+-- | The title menu line Enter takes this tick, if it takes one: on the title, with
+-- the instructions shut, a fresh Enter takes the chosen line. 'stepRun' acts on the
+-- start and how-to-play lines itself; the app looks here for the sound and quit
+-- lines, which are not the run's to change. Arguments as 'stepRun's: this tick's
+-- keys and the run before the tick.
+titleChoiceTaken :: TickInput -> Run -> Maybe Int
+titleChoiceTaken input run
+  | runMode run == Title && not (gShowInstructions g)
+      && not (tiInstructions input && not (tiInstructions (gPrev g)))
+      && tiEnter input && not (tiEnter (gPrev g)) = Just (gTitleChoice g)
+  | otherwise = Nothing
+  where g = runGame run
+
 -- | One fixed tick. Enter moves from the title into the lobby, where Escape goes
 -- back to the title; a campaign with nothing cleared yet plays the opening film
 -- instead, and goes from it straight into the first level. Escape from a level
@@ -278,16 +303,23 @@ stepRun levels input run = case runMode run of
     toTitle = Run shown u c Title ((initialGame (levels !! shown))
       { gAttempt = gAttempt g + 1, gPrev = input })
 
-    -- I opens and shuts the instructions; while they are open, Enter does nothing.
-    -- The instructions are a flag on the board, 'gShowInstructions'; the app's
-    -- Render draws them over the title screen while it is set.
+    -- The title's menu: W/S (or the arrows) choose a line, going round at either
+    -- end, and Enter takes it. I opens the instructions from anywhere on the title,
+    -- as HOW TO PLAY does; while they are open, Enter, I or Escape shuts them and
+    -- nothing else happens. The instructions are a flag on the board,
+    -- 'gShowInstructions'; the app draws them over the title while it is set. The
+    -- sound and quit lines are the app's to act on ('titleChoiceTaken'), so here
+    -- Enter on them only uses up the press.
     stepTitle
-      |tiInstructions input && not (tiInstructions prev)=
-        run {runGame = g
-        {gShowInstructions = not (gShowInstructions g)
-        , gPrev = input
-        }}
-      |gShowInstructions g = run {runGame = g {gPrev = input}}
+      | gShowInstructions g =
+          if freshInstructions || freshEnter || freshLobby
+            then title (\b -> b { gShowInstructions = False })
+            else keep
+      | freshInstructions = title (\b -> b { gShowInstructions = True })
+      | Just d <- freshDir, d == DirUp || d == DirLeft = choose (choice - 1)
+      | Just d <- freshDir, d == DirDown || d == DirRight = choose (choice + 1)
+      | freshEnter && choice == titleHowTo = title (\b -> b { gShowInstructions = True })
+      | freshEnter && choice /= titleStart = keep
       -- Enter with nothing cleared yet plays the opening film, from age 0 with
       -- nothing held, on level 1's board. When there is no film the app ends the
       -- opening at once, in the same tick, so this still leads straight into
@@ -297,7 +329,14 @@ stepRun levels input run = case runMode run of
       -- With a level cleared, Enter opens the hall instead.
       | freshEnter = toLobby
       -- Any other tick changes nothing but the remembered keys.
-      | otherwise  = run { runGame = g { gPrev = input } }
+      | otherwise  = keep
+      where
+        choice = gTitleChoice g
+        freshInstructions = tiInstructions input && not (tiInstructions prev)
+        -- The title with its board changed by f, and this tick's keys remembered.
+        title f = run { runGame = f g { gPrev = input } }
+        keep = title id
+        choose k = title (\b -> b { gTitleChoice = k `mod` titleItems })
 
     -- Escape skips the film at once; Enter or Space skips it once held down for
     -- 'introSkipTicks', so a tap meant for something else cannot. Only a hold that

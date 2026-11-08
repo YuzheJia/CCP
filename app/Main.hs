@@ -92,6 +92,7 @@ import Graphics.Gloss.Interface.Environment (getScreenSize)
 import Graphics.Gloss.Interface.IO.Game
 import qualified Lobby
 import OrdersScreen (hallOverlay, ordersScreen)
+import Title (instructionsPopup, titleMenu)
 import Platform (exitWhenWindowCloses, keepLetterKeys)
 import qualified Render
 import Save
@@ -134,6 +135,8 @@ data World = World
   , wSlipMark :: !Int        -- ^ rooms the order in play had cleared when last slipped or entered
   , wCues   :: [Cue]         -- ^ sounds the ticks of the current step started, newest
                              --   first; the step callback plays them and empties the list
+  , wQuit   :: !Bool         -- ^ QUIT was taken on the title: the step ends the game
+                             --   once the orders are written
   , wMuted  :: !Bool         -- ^ True while the sound is off; M flips it, and the
                              --   mute flag starts the game with it True
   , wStory  :: !Story        -- ^ the courier's talk
@@ -294,6 +297,7 @@ main = do
         -- holds, [] when not.
         , wCues = [ CueIntro | watchFilm ]
         , wMuted = "--mute" `elem` args
+        , wQuit = False
         -- A secret level opened by number is entered at once, as if from the hall.
         , wStory = if demo && not talkDemo then noStory else notice levels start0 { runMode = Lobby } start0 noStory
         , wTalks = not demo || talkDemo
@@ -410,7 +414,12 @@ main = do
           -- The title belongs to the selected level's game, whose phase is 'Menu',
           -- and for that phase 'Render' draws the title screen (and the
           -- instructions, while they are open) instead of the board.
-          Title -> pure (Render.render deadEnd (scenes !! i) (levels !! i) g (wFx w) (wWindow w))
+          -- Over it the menu, and over that the instructions while they are open.
+          Title -> pure (Pictures
+            [ Render.render deadEnd (scenes !! i) (levels !! i) g (wFx w) (wWindow w)
+            , Render.fitted (wWindow w) (Pictures
+                [ titleMenu (gTitleChoice g) (anyOrders (wBook w)) (wMuted w)
+                , if gShowInstructions g then instructionsPopup else Blank ]) ])
           -- Three order tickets, drawn over the shared title background.
           Orders -> pure (Render.fitted (wWindow w) (ordersScreen levels (wBook w) (wDesk w) (fxClock (wFx w))))
           -- The film: decode the picture for this tick, if there is a film, and
@@ -459,6 +468,8 @@ main = do
         -- The cues have been played, or there is no sound to play them, so they are
         -- dropped before the world is kept; then progress is saved if it changed.
         persisted <- persistWorld w' { wCues = [] }
+        -- QUIT on the title, now that the orders are written.
+        when (wQuit persisted) exitSuccess
         -- Gloss's loop draws a frame, holds it until at least a hundredth of a
         -- second has passed since the last one, runs this step (none, one or two
         -- times, to keep 60 ticks a second), then swaps buffers, which waits for
@@ -759,6 +770,8 @@ oneTick levels w =
         | otherwise = let held = holdRun input (wRun w)
                       in (before { cpRun = held }, stepFx (runGame (wRun w)) (runGame held) (wFx w))
       r0 = cpRun after0
+      -- The title's sound and quit lines are the app's: Enter on them, this tick.
+      taken = if free then titleChoiceTaken input (wRun w) else Nothing
       -- The film ends the run's opening once it has run its length, and is not
       -- shown again this session. With no film, the opening ends at once.
       -- The first level then begins, introduced from the start ('fxFocus' 0).
@@ -793,7 +806,9 @@ oneTick levels w =
   in w { wRun = r, wFx = fx, wScript = script, wKeys = afterTick (wKeys w)
        , wCues = reverse heard ++ wCues w, wStory = story
        , wIntroLen = if filmOver then 0 else wIntroLen w
-       , wBook = book, wDesk = desk, wSlipAge = slip, wSlipMark = mark }
+       , wBook = book, wDesk = desk, wSlipAge = slip, wSlipMark = mark
+       , wMuted = if taken == Just titleSound then not (wMuted w) else wMuted w
+       , wQuit = wQuit w || taken == Just titleQuit }
   where
     -- Whether a mode is the opening film, whatever its ticks.
     isIntro m = case m of
