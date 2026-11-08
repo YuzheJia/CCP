@@ -91,7 +91,11 @@ render scene level g fx (winW, winH) = Pictures
 
 frame :: Scene -> Level -> Game -> Fx -> Picture
 frame scene level g fx = case gPhase g of
-  Menu -> titleScreen clock
+  Menu -> Pictures
+    [titleScreen clock
+    , if gShowInstructions g then instructionsPopup else Blank
+    ]
+
   _ -> Pictures
     [ world scene level (if peeking g fx then peekView g else g) fx
     , hud (scHud scene) level g fx clock
@@ -100,6 +104,7 @@ frame scene level g fx = case gPhase g of
     ]
   where
     clock = fromIntegral (fxClock fx)
+
     startFade
       | fxLevelAge fx < 26 =
           Color (hexA 0x05080A (1 - smooth (fromIntegral (fxLevelAge fx) / 26))) (rectC canvasW canvasH)

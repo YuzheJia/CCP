@@ -180,6 +180,8 @@ gameKey key = case key of
   Char ' ' -> Just KSpace
   Char '\r' -> Just KEnter
   Char '\n' -> Just KEnter
+  Char 'i' -> Just KInstructions
+  Char 'I' -> Just KInstructions
   SpecialKey KeySpace -> Just KSpace
   SpecialKey KeyTab   -> Just KPeek
   SpecialKey KeyEnter -> Just KEnter

@@ -55,12 +55,13 @@ data TickInput = TickInput
   , tiUndo    :: !Bool
   , tiPeek    :: !Bool
   , tiEcho    :: !Bool
+  ,tiInstructions :: Bool
   , tiDirRevealed :: !Bool     -- ^ no direction went down this tick, so if 'tiDir'
                                --   changed, a newer key was let go of, not a press
   } deriving (Eq, Show)
 
 noInput :: TickInput
-noInput = TickInput Nothing False False False False False False False False
+noInput = TickInput { tiDir = Nothing, tiShift = False, tiEnter = False, tiRestart = False, tiPause = False, tiUndo = False, tiPeek = False, tiEcho = False, tiInstructions = False, tiDirRevealed = False }
 
 -- | The player does exactly one of these at a time. Being a sum type, "walking
 -- while shifting" cannot be represented at all.
@@ -176,6 +177,7 @@ data Game = Game
   , gPrev         :: !TickInput    -- ^ last tick's keys, for finding fresh presses
   , gArmed        :: !Bool         -- ^ the held direction was freshly pressed in this
                                    --   screen, so it may repeat
+  , gShowInstructions :: Bool
   } deriving (Eq, Show)
 
 ticksPerSecond :: Int
