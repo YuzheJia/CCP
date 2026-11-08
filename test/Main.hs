@@ -1,15 +1,86 @@
 -- | Plain assertions over the pure core. Numbered items match the brief's list.
+--
+-- This is the project's whole test suite, run with
+-- @cabal test spec --test-show-details=direct@. It uses no test framework. A check
+-- is a name and a 'Bool' ('Check'); 'allChecks' gathers every group of them; 'main'
+-- prints one line per check ("ok" or "FAIL", then its name), then a few numbers
+-- measured on the implementation ('report', which the README copies under "Test
+-- results"), then the totals, and exits with a failure code if any check failed,
+-- which is how cabal knows the suite failed.
+--
+-- What it covers: only the modules under src/Game, which have no graphics and no
+-- IO, so every rule can be played here without a window. The numbered groups (1 to
+-- 18) are the items the jam's brief required; the named groups pin down every rule
+-- added since: crates, pits, plates and doors, the echo, mirrors, the campaign and
+-- its dead-end search, the input adapter, effects, the ending, the level for two
+-- keepers, sound, the opening film and the courier's talk. Nothing in app/ (drawing,
+-- sound synthesis, the save file, the film's decoder) is tested here.
+--
+-- How the checks drive the game. 'stepGame' (Game.Logic) moves one 'Game' on by one
+-- tick, given the keys held during that tick (a 'TickInput'). There are 60 ticks a
+-- second; a step takes 'stepTicks' (8) of them, and a shift locks input for
+-- 'shiftTicks' (13). A check either feeds ticks one at a time ('run', 'idle'), to
+-- pin down timing, or a whole action at a time ('walk', 'shift', and 'applyAction'
+-- from Game.Solution, which presses a key for one tick and then waits until the
+-- keeper stands still), when only the outcome matters. The rules notice a key only
+-- on the tick it goes down (they compare with the last tick's keys, kept in
+-- 'gPrev'), so a list of inputs that presses the same key twice needs a tick
+-- without it in between.
+--
+-- Most checks build the exact state they need with 'at' and Haskell's record update
+-- syntax (@g { gCell = (3, 2) }@ is a copy of @g@ with that one field changed)
+-- rather than playing up to it, then compare a field or two, or whole games: 'Game'
+-- derives 'Eq', so @==@ compares every field.
+--
+-- Conventions. A cell is (x, y): (0, 0) is the top-left cell, x grows to the right
+-- and y grows downward, so 'DirUp' takes one off y. Time is the level's budget in
+-- seconds, spent only by accepted actions: a step costs 2, a shift 6, a jump through
+-- a mirror 4 and an echo 4, and an undo gives back half the undone action's price.
+-- These are 'baseRules'; a level may change them.
+--
+-- The fixture. Most numbered checks use 'theLevel', the original Harrow Point
+-- station: 13 by 9 cells, budget 128 (its par, 108, plus 20). Walls in columns 4 and
+-- 8 cut it into three rooms three cells wide. The west and middle rooms meet only at
+-- (4,2), a door that stands open in the past and is rubble in the present; the
+-- middle and east rooms meet only at (8,6), a breach open in the present and shut in
+-- the past. The keeper starts at (2,6) in the present, the power cell is at (10,2)
+-- in the past, and the lighthouse is at (2,2) in the present. Other checks use small
+-- maps parsed in this file ('yard', 'glass', 'mirrorYard', 'cornerYard',
+-- 'duoFixture') or levels taken from Game.Level by name.
+--
+-- Many checks ask the solver. 'search' (Game.Solution) plays every action from every
+-- state through the real 'stepGame', so "no reachable state does X" is checked over
+-- the keys of its 'srStates', which hold every state the level can reach.
+--
+-- Laziness keeps this affordable: a check's 'Bool' is only worked out when 'main'
+-- prints it, and a search named in a @where@ clause that a group's checks share (as
+-- in 'levelChecks') runs once for all of them, the first time one needs it. The
+-- suite still takes a while: the campaign's four-room level, The Long Way Round, is
+-- searched in full three times (for 'deadSearchChecks', 'levelChecks' and 'report'),
+-- besides its restricted and dead-end searches.
 module Main (main) where
 
+-- forM runs an IO action for each element of a list and collects the results;
+-- unless runs an action only when a condition is False.
 import Control.Monad (forM, unless)
+-- foldl' is the strict left fold (see 'run'); isInfixOf asks whether one list, here
+-- a string, occurs inside another. sort is imported but not used.
 import Data.List (foldl', isInfixOf, sort)
 import Data.Maybe (isJust)
+-- Map and Set are imported qualified, so their functions are written Map.size,
+-- Set.member and so on. Many share a name with a Prelude list function (map,
+-- filter, null), and the prefix says which is meant. Both are balanced search
+-- trees: lookups take logarithmic time, and Set.toList and Map.keys come out in
+-- ascending order (for cells, by x and then by y).
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+-- The whole pure core, every module of it. Nothing from app/ is imported, so the
+-- suite builds without Gloss or OpenGL.
 import Game.Fx
 import Game.Input
 import Game.Level
 import Game.Logic
+import Game.Orders
 import Game.Run
 import Game.Solution
 import Game.Sound
@@ -17,14 +88,32 @@ import Game.Story
 import Game.Types
 import System.Exit (exitFailure)
 
-data Check = Check String Bool
+-- | One assertion: its name, printed in the log, and whether it held. The name is
+-- the only thing a failure reports, so each says in a sentence what should be true.
+-- The 'Bool' is left unevaluated until 'main' prints the check.
+data Check = Check String Bool -- ^ Diagnostic name and lazily evaluated result.
 
+-- | Builds a 'Check'. A lower-case name for the constructor, so the lists below read
+-- @check "what should hold" condition@. Most checks write @check "..." $@ and put
+-- the condition on the lines after: @$@ is function application with the lowest
+-- precedence, so everything after it, however long, is the second argument.
 check :: String -> Bool -> Check
 check = Check
 
+-- | One tick with the direction @d@ held and nothing else. This is the record update
+-- syntax used all through this file: @noInput { tiDir = Just d }@ is a copy of
+-- 'noInput' (no key held) with only the field 'tiDir' changed.
+--
+-- It sets 'tiDir' alone, the field a level for one keeper reads. A level for two
+-- reads 'tiDir1' (W A S D) and 'tiDir2' (the arrows) instead, so there @press@
+-- moves nobody; 'duoChecks' builds its own inputs for that.
 press :: Dir -> TickInput
 press d = noInput { tiDir = Just d }
 
+-- | One tick with one key held: Space (shift era), Enter (start, retry, go on), R
+-- (restart), P (pause), Z (undo) and Escape (back to the level hall). Like 'press',
+-- each is a value for a single tick; holding a key for longer is a list that repeats
+-- it, and pressing it again needs a tick without it in between.
 space, enter, restartKey, pauseKey, undoKey, lobbyKey :: TickInput
 space      = noInput { tiShift = True }
 enter      = noInput { tiEnter = True }
@@ -33,27 +122,78 @@ pauseKey   = noInput { tiPause = True }
 undoKey    = noInput { tiUndo = True }
 lobbyKey   = noInput { tiLobby = True }
 
+-- | Play a list of ticks, first to last, from @g@: one 'stepGame' per element, so a
+-- list of 60 inputs is one second of play. The result is the game after the last
+-- tick.
+--
+-- @foldl' f g [i1, i2]@ is @f (f g i1) i2@: it walks the list from the left,
+-- carrying the game along. 'stepGame' takes the input before the game, and the fold
+-- hands over the game first, so 'flip' swaps its two arguments. The prime marks the
+-- strict fold: it evaluates each intermediate game to its outer constructor.
+-- Strict fields (the @!@ in Game.Types) also force their outer values; this does
+-- not recursively force every element of the board's containers. A lazy
+-- @foldl@ would instead build a chain of 100000 unevaluated steps for the longest
+-- check below before working any of them out.
 run :: Level -> [TickInput] -> Game -> Game
 run level inputs g = foldl' (flip (stepGame level)) g inputs
 
+-- | @n@ ticks with no key held. Defined without its last argument (the game): a
+-- function applied to fewer arguments than it takes is a function of the rest, so
+-- @idle level n@ is itself a @Game -> Game@, ready to apply or to pass on.
 idle :: Level -> Int -> Game -> Game
 idle level n = run level (replicate n noInput)
 
 -- | A playing state at a chosen spot, with no leftovers.
+--
+-- It is the level just started from its title screen ('startPlaying' presses Enter
+-- once), with the keeper moved to @cell@ in @era@, carrying the power cell if
+-- @hasCell@. Everything else is as the level starts: the whole budget, no history,
+-- the crates where the map puts them. 'gPrev' is set back to no keys, so the Enter
+-- that started the level is forgotten and the first key a check presses counts as a
+-- fresh press.
+--
+-- Nothing checks that the keeper can stand at @cell@: the checks rely on this to
+-- set up a moment directly, such as standing in a doorway. The footprints
+-- ('gTrail'), in a level with an echo, still name the spawn, not @cell@.
 at :: Level -> Era -> Cell -> Bool -> Game
 at level era cell hasCell =
   (startPlaying level) { gEra = era, gCell = cell, gHasCell = hasCell, gPrev = noInput }
 
+-- | One whole step in direction @d@ (or a push, or a jump through a mirror, whatever
+-- that key does from here): 'applyAction' presses the key for one tick, then ticks
+-- with no keys until the keeper stands still, so the move has landed and been paid
+-- for. A refused key leaves the keeper standing at once, so no idle tick follows,
+-- and the key is still recorded as held in 'gPrev': walking the same way again
+-- straight after then counts as holding the key, not as a fresh press.
+--
+-- Point-free: @applyAction level . Go@ is the composition "wrap the direction in
+-- 'Go', then apply the action", so @walk level d = applyAction level (Go d)@.
 walk :: Level -> Dir -> Game -> Game
 walk level = applyAction level . Go
 
+-- | One whole shift of era, as 'walk' does a step: Space for one tick, then idle
+-- ticks until the input lock of the wave is over.
 shift :: Level -> Game -> Game
 shift level = applyAction level ShiftEra
 
 -- | What a game holds that the player can tell apart, ignoring time.
+--
+-- It is the solver's 'StateKey': the era, the keeper's cell, whether they carry the
+-- power cell, the phase, the crates, the filled pits, the footprints, the echo and
+-- the movable mirrors. Time left, the history, the motion under way, messages and
+-- last tick's keys are not in it, so two games with equal essentials are the same
+-- board, however they got there.
 essentials :: Game -> StateKey
 essentials = stateKey
 
+-- | Parse the fixture, print every check, print the report, then the totals.
+--
+-- @case theLevel of@ looks at the 'Either' the parser returns: 'Left' with a
+-- message if the map is malformed, which stops the suite at once ('>>' runs one IO
+-- action and then the next), or 'Right' with the level. In the do block, 'forM'
+-- runs the lambda for every check in order; the lambda's pattern @(Check name ok)@
+-- takes the check apart, and printing it forces @ok@, which is when the check's
+-- work is actually done. @results@ is the list of all the 'Bool's.
 main :: IO ()
 main = case theLevel of
   Left err -> putStrLn ("level does not parse: " ++ err) >> exitFailure
@@ -62,41 +202,71 @@ main = case theLevel of
       putStrLn ((if ok then "  ok    " else "  FAIL  ") ++ name)
       pure ok
     report level
+    -- 'let' in a do block names a value for the lines after it.
     let failed = length (filter not results)
     putStrLn (show (length results - failed) ++ " passed, " ++ show failed ++ " failed")
+    -- A non-zero exit code is what tells cabal the suite failed.
     unless (failed == 0) exitFailure
 
 -- | Numbers worth reading in the log, measured on the implementation.
+--
+-- For the fixture: how many states the solver reaches and how many are dead ends,
+-- the cheapest route's cost (in seconds), length and shifts, and that route as keys
+-- (W A S D and Space); then how many ticks the intended route takes and the state it
+-- ends in. Then one line per campaign level, and the secret level's ('reportDuo').
+-- Nothing here passes or fails; the README's "Test results" is a copy of it. The
+-- searches here repeat ones the checks already made, since nothing is shared
+-- between this function and them, so the report adds several seconds to the run.
 report :: Level -> IO ()
 report level = do
+  -- 'search' takes a filter on (game, action) saying which actions may be tried;
+  -- @\_ _ -> True@ ignores both arguments and allows every action everywhere.
   let start = startPlaying level
       result = search level (\_ _ -> True) start
       route = routeInputs intendedRoute
       end = run level route start
   putStrLn ""
+  -- 'srStates' maps every reachable state to its cheapest cost; 'Map.size' counts
+  -- its entries.
   putStrLn ("search: " ++ show (Map.size (srStates result)) ++ " reachable states, "
             ++ show (length (srDeadEnds result)) ++ " dead ends")
+  -- 'srGoal' is 'Nothing' if no state wins, or the cheapest cost and a route to it.
   case srGoal result of
     Nothing -> putStrLn "search: NO ROUTE"
     Just (n, actions) -> do
       putStrLn ("search: cheapest route costs " ++ show n ++ " s, " ++ show (length actions)
                 ++ " actions, " ++ show (length (filter (== ShiftEra) actions)) ++ " of them shifts")
       putStrLn ("search: " ++ unwords (map actionLabel actions))
+  -- The state is printed with the 'Show' instance 'StateKey' derives, field by field.
   putStrLn ("route:  intended route takes " ++ show (length route) ++ " ticks, ends "
             ++ show (essentials end))
+  -- 'mapM_' runs an IO action for each element and keeps no results.
   case campaign of
     Left _ -> pure ()
     Right levels -> mapM_ reportLevel levels
   reportDuo
   putStrLn ""
+  -- 'where' scopes helpers over the definition above it; a let scopes them over
+  -- its following expression/block. Both can define functions with guards.
   where
+    -- A pattern guard, @| Just known <- knownRoute l@: this equation applies only if
+    -- 'knownRoute' gives a 'Just', and then @known@ names what is inside it.
+    -- Otherwise the next equation is tried. A level has a pinned route when it is
+    -- too big to search on every run; at present only The Long Reflection, kept in
+    -- 'extraLevels', has one, so every campaign level takes the second equation.
     reportLevel l | Just known <- knownRoute l =
       putStrLn ("level:  " ++ lvName l ++ ": par " ++ show (lvPar l)
                 ++ ", budget " ++ show (lvBudget l) ++ ", "
                 ++ show (length known) ++ " actions, "
                 ++ show (length (filter (== ShiftEra) known)) ++ " shifts, too big to search here, "
                 ++ show (sharedPercent l) ++ "% shared")
+    -- Any other level is searched in full. The par printed is the one the solver
+    -- finds, not the one written in the level, so a level whose numbers drifted
+    -- shows it here (and fails 'levelChecks').
     reportLevel l =
+      -- @maybe d f m@ is @d@ when @m@ is 'Nothing' and @f x@ when it is @Just x@.
+      -- @length . filter (== ShiftEra) . snd@ reads right to left: take the route
+      -- out of the (cost, route) pair, keep its shifts, count them.
       let r = search l (\_ _ -> True) (startPlaying l)
           shifts = maybe 0 (length . filter (== ShiftEra) . snd) (srGoal r)
       in putStrLn ("level:  " ++ lvName l ++ ": par " ++ maybe "NONE" (show . fst) (srGoal r)
@@ -106,11 +276,19 @@ report level = do
                    ++ show (Map.size (srStates r)) ++ " states, "
                    ++ show (length (srDeadEnds r)) ++ " dead, "
                    ++ show (sharedPercent l) ++ "% shared")
+    -- Of the cells open in either era, the share open in both, as a whole percentage.
+    -- A rough measure of how much the two maps differ: the lower it is, the more the
+    -- era matters. 'div' written in backquotes is used as an infix operator; it is
+    -- integer division, rounding down.
     sharedPercent l =
       let both = Set.size (Set.intersection (lvPast l) (lvPresent l))
           every = Set.size (Set.union (lvPast l) (lvPresent l))
       in 100 * both `div` every
 
+-- | Every check, in the order they are printed. Each group is a list of checks,
+-- either built from the fixture @level@ or standing alone with its own maps;
+-- 'concat' joins the lists into one. Building this list does no work: each check's
+-- condition waits, unevaluated, until 'main' prints that check.
 allChecks :: Level -> [Check]
 allChecks level = concat
   [ dimensions level
@@ -127,6 +305,7 @@ allChecks level = concat
   , echoChecks level
   , mirrorChecks
   , campaignChecks
+  , deadSearchChecks
   , pendingShifts level
   , routeChecks level
   , determinism level
@@ -140,52 +319,89 @@ allChecks level = concat
   , introChecks
   , storyChecks
   , endingStoryChecks
+  , ordersChecks
   ]
 
 -- 1. ---------------------------------------------------------------------------
+-- | Item 1: the fixture's map is the one the brief describes. Its size, where the
+-- spawn, the power cell and the lighthouse are, and that its only differences
+-- between the eras are the two passages, (4,2) open only in the past and (8,6) open
+-- only in the present. Every later numbered check leans on these coordinates.
 dimensions :: Level -> [Check]
 dimensions level =
   [ check "1. maps are 13 x 9" (lvWidth level == 13 && lvHeight level == 9)
+  -- The rows as written in Game.Level, before parsing. @(== 13)@ is an operator
+  -- section, the function "is equal to 13", and @(== 13) . length@ composes it
+  -- after 'length': "is this row 13 long?".
   , check "1. both source maps have 9 rows of 13"
       (all (\rows -> length rows == 9 && all ((== 13) . length) rows) [pastRows, presentRows])
   , check "1. spawn, cell and lighthouse are where the brief says"
       (lvSpawn level == (2, 6) && lvPowerCell level == (10, 2) && lvGoal level == (2, 2))
+  -- 'passageCells' lists the cells open in exactly one era, past ones first, so this
+  -- says the maps differ in these two cells and nowhere else.
   , check "1. passages are (4,2) in the past and (8,6) in the present"
       (passageCells level == [(Past, (4, 2)), (Present, (8, 6))])
+  -- A marker on the map (B, G, S) stands on floor: it adds nothing solid.
   , check "1. markers are walkable"
       (walkable level Past (10, 2) && walkable level Present (2, 2) && walkable level Present (2, 6))
   ]
 
+-- | The level parser refuses malformed maps. Each check takes the fixture's rows
+-- ('pastRows', 'presentRows'), breaks one thing, and expects 'parseLevel' to return
+-- 'Left' (an error message) rather than 'Right' (a level). The last two parse good
+-- maps and read back what the parser made of plates, doors, crates and pits.
+--
+-- A bad level must fail when the game starts, with a reason, never half work in
+-- play; and the rules count on what the parser promises, such as a sealed border
+-- (so no keeper walks off the map) and a crate only where both eras have floor.
+--
+-- Row numbers in @replaceAt@ count from 0 at the top, so @replaceAt 3 row@ replaces
+-- the cells with y = 3.
 parserChecks :: [Check]
 parserChecks =
   [ check "parser: rejects a missing row" (isLeft (parse (drop 1 pastRows) presentRows))
+  -- 'init' drops a row's last character; @(++ "#")@ adds one. Only the top row is
+  -- changed, so the rows disagree on the width.
   , check "parser: rejects a short row" (isLeft (parse pastRows (mapHead init presentRows)))
   , check "parser: rejects a long row" (isLeft (parse (mapHead (++ "#") pastRows) presentRows))
   , check "parser: rejects an unknown character"
       (isLeft (parse pastRows (replaceAt 1 "#.?.#...#...#" presentRows)))
+  -- The fixture's own cell is at (10,2); this adds another at (2,3).
   , check "parser: rejects a second power cell"
       (isLeft (parse (replaceAt 3 "#.B.#...#...#" pastRows) presentRows))
+  -- Row 6 without its S at (2,6).
   , check "parser: rejects a missing spawn"
       (isLeft (parse pastRows (replaceAt 6 "#...#.......#" presentRows)))
+  -- The lighthouse belongs on the present map; on the past map G is not a known mark.
   , check "parser: rejects the goal in the wrong era"
       (isLeft (parse (replaceAt 1 "#.G.#...#...#" pastRows) presentRows))
+  -- Floor at (0,3) in the outer wall: the border must be solid all round, or a
+  -- keeper could walk off the map.
   , check "parser: rejects an open border"
       (isLeft (parse (replaceAt 3 "....#...#...#" pastRows) presentRows))
   , check "parser: rejects an empty map" (isLeft (parse [] []))
+  -- Crates and pits are written on the past map only: a crate has one position for
+  -- both eras, and a pit is a hole in the past's floor.
   , check "parser: rejects a crate on the present map"
       (isLeft (parse pastRows (replaceAt 1 "#.C.#...#...#" presentRows)))
   , check "parser: rejects a pit on the present map"
       (isLeft (parse pastRows (replaceAt 1 "#.~.#...#...#" presentRows)))
   , check "parser: rejects a pit in the border"
       (isLeft (parse (replaceAt 3 "~...#...#...#" pastRows) presentRows))
+  -- A crate at (2,6), where the keeper starts.
   , check "parser: rejects a crate on the spawn"
       (isLeft (parse (replaceAt 6 "#.C.#...#...#" pastRows) presentRows))
+  -- The crate at (2,3) is on past floor, but the present row makes (2,3) a wall, and
+  -- a crate stands in both eras.
   , check "parser: rejects a crate inside a present wall"
       (isLeft (parse (replaceAt 3 "#.C.#...#...#" pastRows) (replaceAt 3 "###.#...#...#" presentRows)))
+  -- Plates and doors come together or not at all.
   , check "parser: rejects a plate with no door"
       (isLeft (parse (replaceAt 3 "#.P.#...#...#" pastRows) presentRows))
   , check "parser: rejects a door with no plate"
       (isLeft (parse pastRows (replaceAt 3 "#.D.#...#...#" presentRows)))
+  -- A plate at (2,3) with its door at (2,5), two rows below so not beside it, but
+  -- the present has a wall at (2,3), where no crate could rest on the plate.
   , check "parser: rejects a plate in a present wall"
       (isLeft (parse (replaceAt 3 "#.P.#...#...#" pastRows)
                      (replaceAt 3 "###.#...#...#" (replaceAt 5 "#.D.#...#...#" presentRows))))
@@ -194,12 +410,18 @@ parserChecks =
        && isLeft (parse pastRows (replaceAt 3 "#.P.#...#...#" presentRows)))
   , check "parser: rejects a door in the border"
       (isLeft (parse (replaceAt 3 "#.P.#...#...#" pastRows) (replaceAt 3 "D...#...#...#" presentRows)))
+  -- A good map this time: a plate at (2,3), a door at (2,5). The plate is floor in
+  -- both eras, so a crate can rest on it; the door is a wall on the map, and only
+  -- 'doorsOpen' (worked out from the board) lets anyone through.
   , check "parser: reads a plate as floor in both eras, and a door as shut" $
       case parse (replaceAt 3 "#.P.#...#...#" pastRows) (replaceAt 5 "#.D.#...#...#" presentRows) of
         Left _ -> False
         Right l -> lvPlates l == Set.fromList [(2, 3)] && lvDoors l == Set.fromList [(2, 5)]
                    && walkable l Past (2, 3) && walkable l Present (2, 3)
                    && not (walkable l Present (2, 5))
+  -- Crates at (2,3) and (6,4), a pit at (6,3). A crate's cell stays floor on the
+  -- map, since the crate itself lives in the game's 'gCrates' and moves; a pit is
+  -- not floor until a crate fills it.
   , check "parser: a crate stands on floor; a pit is not floor" $
       case parse (replaceAt 3 "#.C.#.~.#...#" (replaceAt 4 "#...#.C.#...#" pastRows)) presentRows of
         Left _ -> False
@@ -207,15 +429,21 @@ parserChecks =
                    && walkable l Past (2, 3) && not (walkable l Past (6, 3))
   ]
   where
+    -- The budget, 100 seconds, does not matter to any of these.
     parse = parseLevel 100
     isLeft e = case e of
       Left _  -> True
       Right _ -> False
+    -- Change the first row only.
     mapHead f (x : xs) = f x : xs
     mapHead _ []       = []
+    -- Row @i@ (from 0) replaced by @row@: the rows before it, the new one, the rest.
     replaceAt i row rows = take i rows ++ [row] ++ drop (i + 1) rows
 
 -- 2. ---------------------------------------------------------------------------
+-- | Static collision in both eras: walls, borders and opposite passages. The
+-- exhaustive final check guards the global invariant behind the spot examples:
+-- every settled reachable position must be floor in its own era.
 collision :: Level -> [Check]
 collision level =
   [ check "2. a wall stops a step, in the present"
@@ -242,6 +470,9 @@ collision level =
   ]
 
 -- 3, 4, 5. ---------------------------------------------------------------------
+-- | Shift atomicity and its 13-tick animation lock. A legal shift changes era
+-- and charges immediately, while a refused shift changes feedback only. These
+-- checks distinguish a queued direction from Space dropped during the lock.
 shifting :: Level -> [Check]
 shifting level =
   [ check "3. a legal shift changes the era, charges it and starts the lock, nothing else" $
@@ -288,6 +519,9 @@ shifting level =
   ]
 
 -- 6, 7, 8. ---------------------------------------------------------------------
+-- | Pickup is tied to arrival/era change, not the start of motion. Once carried,
+-- the wick persists through shifts and returning to its cradle cannot collect
+-- it twice; this prevents repeated feedback and duplicated inventory.
 powerCell :: Level -> [Check]
 powerCell level =
   [ check "6. stepping on the cell in the past collects it" $
@@ -312,6 +546,9 @@ powerCell level =
   ]
 
 -- 9. ---------------------------------------------------------------------------
+-- | Victory needs both the present era and the carried wick at the lamp.
+-- Walking and shifting must call the same arrival rule; hints/objective text
+-- are checked alongside those state changes so they describe the actual goal.
 lighthouse :: Level -> [Check]
 lighthouse level =
   [ check "9. present and cell: entering wins" $
@@ -336,6 +573,9 @@ lighthouse level =
   ]
 
 -- 10, 11. ----------------------------------------------------------------------
+-- | Restart resets the board from any terminal/pause state, while pause preserves
+-- an unfinished move. Held keys and queued actions must not leak across either
+-- transition; comparisons ignore only the deliberate input/attempt bookkeeping.
 restartAndPause :: Level -> [Check]
 restartAndPause level =
   [ check "10. restart restores the level from a messy state" $
@@ -396,6 +636,10 @@ restartAndPause level =
   ]
 
 -- 12, 13. ----------------------------------------------------------------------
+-- | Budget accounting and terminal ordering, in seconds rather than tick time.
+-- Check both sides of each affordability boundary: refused actions are free,
+-- accepted actions charge once, and a last affordable arrival can still win.
+-- Long idle/held-input traces catch accidental per-tick draining or overspending.
 timing :: Level -> [Check]
 timing level =
   [ check "12. the prices are 2 s a step and 6 s a shift, and the budget is par + 20" $
@@ -491,6 +735,8 @@ timing level =
       in not (gPendingShift g0) && gEra g1 == Past && gRemaining g1 == lvBudget level - 6
   ]
   where
+    -- This fixture route uses only steps and shifts. The local price sum is an
+    -- independent expectation (108 s), not a replacement for the rule's charge.
     routeCost = sum (map price intendedRoute)
     price a = if a == ShiftEra then 6 else 2 :: Int
 
@@ -515,6 +761,11 @@ yard = case parseLevel 1000
     Right l -> l
     Left err -> error err
 
+-- | Shared crate placement, fresh-press pushing and permanent pit filling.
+-- Artificial board edits isolate obstructions in either era; checks compare
+-- position, cost and feedback to ensure a refusal cannot partly mutate the board.
+-- Later checks cover solver identity and undo, since losing crate/fill state in
+-- either would make a visually plausible game obey different rules afterwards.
 crateChecks :: [Check]
 crateChecks =
   [ check "crate: in the present it is solid, and walking into it is free" $
@@ -560,6 +811,8 @@ crateChecks =
                  { gCrates = Set.fromList [(5, 1)], gFilled = Set.fromList [(6, 1)] }
           g = walk walled DirRight g0
       in gCrates g == gCrates g0 && fmap fbKind (gFeedback g) == Just (PushBlocked (6, 1))
+  -- Feedback distinguishes an available push requiring a new press from rust or
+  -- an impossible push; holding must not repeatedly spend or restart messages.
   , check "hint: holding a key against a crate that could move says to press again" $
       let g = run yard (replicate 60 (press DirRight)) (at yard Past (1, 1) False)
       in gCell g == (2, 1) && fmap fbKind (gFeedback g) == Just PushNeedsPress
@@ -577,6 +830,8 @@ crateChecks =
       let g0 = at yard Present (1, 1) False
           g = run yard (replicate 200 (press DirRight)) g0
       in gRemaining g == gRemaining g0 && gFeedback g == Nothing
+  -- Crossing markers are a query of the live board, not just static map overlap.
+  -- Compare them with real shifts over every currently open yard cell.
   , check "crossings: open in both eras, and never under a crate" $
       let g = (at yard Present (1, 1) False) { gCrates = Set.fromList [(2, 1)] }
           cells = crossings yard g
@@ -599,6 +854,8 @@ crateChecks =
       let g = at yard Past (1, 1) False
           peek = noInput { tiPeek = True }
       in (run yard (replicate 30 peek) g) { gPrev = noInput } == g
+  -- Failed destinations, occupied cells and held keys all stop a push before
+  -- charging. A genuinely new buffered press is the deliberate exception.
   , check "crate: a wall stops the push, and the refused push is free" $
       let g0 = (at yard Past (1, 2) False) { gCrates = Set.fromList [(1, 3)] }
           g = walk yard DirDown g0
@@ -634,6 +891,8 @@ crateChecks =
       let g0 = (at yard Past (5, 3) False) { gCrates = Set.fromList [(6, 3)] }
           g = walk yard DirRight g0
       in gCrates g == Set.fromList [(7, 3)] && gCell g == (6, 3)
+  -- A pit consumes a crate once. Test both the immediate state change and the
+  -- subsequent traversal, second crate, restart and undo that rely on it.
   , check "pit: it stops a step in the past, and a shift from the present" $
       let walkIn = walk yard DirRight (at yard Past (5, 1) False)
           shiftIn = run yard [space] (at yard Present (6, 1) False)
@@ -700,6 +959,9 @@ gatedYard = yard
   , lvPresent = Set.delete (5, 2) (lvPresent yard)
   }
 
+-- | A present door is open exactly when all plates have weight. Test crates and
+-- keepers, removal of weight, shared-era placement restrictions and undo. The
+-- parser's adjacency restriction prevents stepping off a plate into its door.
 plateChecks :: [Check]
 plateChecks =
   [ check "door: shut, it stops a step in the present, and a shift into it, for free" $
@@ -760,27 +1022,37 @@ plateChecks =
   ]
 
 -- | Every reachable state, checked directly: in the present, the player's cell is on
--- the map, or is a door that those crates have opened.
+-- the map, or is a door opened by the state's crates, keeper and echo.
 nobodyInShutDoor :: Level -> Bool
 nobodyInShutDoor l = all ok (Map.keys (srStates (search l (\_ _ -> True) (startPlaying l))))
   where
     ok k = skEra k /= Present || walkable l Present (skCell k)
            || (skCell k `Set.member` lvDoors l && doorsOpen l (held k))
+    -- Reconstruct weights from a one-keeper StateKey. maybe id leaves crates
+    -- and player unchanged when there is no echo; otherwise insert its cell.
     held k = maybe id (Set.insert . snd) (skEcho k) (Set.insert (skCell k) (skCrates k))
 
 -- The echo. --------------------------------------------------------------------
 
--- | The campaign's "Echo" level: spawn (1,4), plate (3,4), door (8,4), lighthouse
+-- | The archived "Echo" level: spawn (1,4), plate (3,4), door (8,4), lighthouse
 -- (10,4), all in one row of the present; the cell is at (1,3) in the past.
 echoRoom :: Level
 echoRoom = head [l | Right ls <- [extraLevels], l <- ls, lvName l == "Echo"]
 
+-- | Request an echo through the real action adapter, retaining refusal/price
+-- behaviour. It settles immediately, so another echo needs a released key.
 sendEcho :: Level -> Game -> Game
 sendEcho level = applyAction level SendEcho
 
+-- | Apply whole direction actions in order. Empty directions return the input
+-- game; the strict fold avoids retaining intermediate unevaluated games.
 walks :: Level -> [Dir] -> Game -> Game
 walks level ds g = foldl' (flip (walk level)) g ds
 
+-- | Footprints are newest-first, bounded and era-aware; an echo stops at the
+-- last reachable footprint and contributes only weight. Refusals, replacement,
+-- undo and restart must preserve these rules. The supplied fixture tests the
+-- disabled-echo path so ordinary levels do not grow unnecessary solver state.
 echoChecks :: Level -> [Check]
 echoChecks fixture =
   [ check "echo: steps and shifts leave footprints, newest first; refusals leave none" $
@@ -849,13 +1121,20 @@ echoChecks fixture =
            == Just (map pr [(7, 4), (6, 4), (5, 4), (4, 4), (3, 4)])
   ]
   where
+    -- Shorthand for a present-era footprint, distinct from a bare cell.
     pr c = (Present, c)
 
 -- Mirrors. ---------------------------------------------------------------------
 
+-- | Find a trusted named fixture among campaign/prototype levels. Pattern
+-- generators keep only Right parses. head deliberately fails if the expected
+-- name disappears; this helper assumes the repository's fixed fixture names.
 levelNamed :: String -> Level
 levelNamed name = head [l | Right ls <- [campaign, extraLevels], l <- ls, lvName l == name]
 
+-- | Fixed-glass micro-map, movable-mirror campaign room, and door-gated prototype.
+-- The micro-map isolates reflection distance without unrelated routes; the
+-- named rooms exercise mirror movement and plate-dependent beam occlusion.
 glass, twoAlignments, oneWay :: Level
 -- A past mirror facing down at (6,4), with the cell two spaces behind it.
 glass = either error id $ parseLevel 42
@@ -882,6 +1161,10 @@ glass = either error id $ parseLevel 42
 twoAlignments = levelNamed "Two Alignments"
 oneWay = levelNamed "One Way In"
 
+-- | Beams, reflection distance and the jump-versus-walk decision share the real
+-- rule queries. Check blocked landings and held keys, moving/fixed mirrors, door
+-- occlusion and undo, then show that bypassing the intended setup can dead-end.
+-- movableMirrorChecks adds destination and persistence edge cases below.
 mirrorChecks :: [Check]
 mirrorChecks =
   [ check "parser: a mirror belongs to the era it is drawn in, and is solid there" $
@@ -947,7 +1230,58 @@ mirrorChecks =
       in gCell g == (6, 4) && stateKey g `Set.member` deadStates oneWay
   ] ++ movableMirrorChecks
 
+-- The dead-end search the game runs a slice per frame. -------------------------
+--
+-- The game advances each level's 'DeadSearch' a few units a frame, so however the
+-- work is cut up it must find exactly what the full cheapest-first 'search' calls
+-- dead ends. Each campaign level's reference set is worked out once (The Long Way
+-- Round's takes several seconds) and compared with the search advanced one unit, 7
+-- units and 1000 units at a time: cut at every possible point, at uneven points,
+-- and in big pieces, the way a frame's time budget might cut it.
+-- | Resumable search must agree with exhaustive search regardless of slice size.
+-- Also compare packed membership with the expanded set and probe an unseen key
+-- with negative/large coordinates, exercising variable-length packing lookup.
+deadSearchChecks :: [Check]
+deadSearchChecks = case campaign of
+  Left err -> [check ("dead search: campaign parses: " ++ err) False]
+  Right levels -> concat
+    [ [ check ("dead search: " ++ lvName l ++ ", advanced " ++ show k
+               ++ " units at a time, finds exactly the full search's dead ends")
+          (sliced k l == Just reference)
+      | k <- [1, 7, 1000] ]
+    | l <- levels
+    , let reference = Set.fromList (srDeadEnds (search l (\_ _ -> True) (startPlaying l))) ]
+    ++
+    [ check "dead search: one not yet advanced knows nothing, so the game says nothing yet" $
+        let plug = levelNamed "The Plug"
+            lost = foldl' (flip (applyAction plug)) (startPlaying plug)
+                     [Go DirDown, Go DirRight, Go DirRight, Go DirRight, ShiftEra, Go DirRight]
+            fresh = startDeadSearch plug
+        in deadSearchResult fresh == Nothing && not (deadSearchFinished fresh)
+           && not (knownDeadEnd fresh (stateKey lost))
+           && knownDeadEnd (finishDeadSearch fresh) (stateKey lost)
+    , check "dead search: the game's quick lookup agrees with the set on every reachable state" $
+        -- 'knownDeadEnd' looks keys up in the packed result rather than in the set;
+        -- Two Alignments has some ten thousand dead states among thirteen thousand.
+        let l = levels !! 1
+            done = finishDeadSearch (startDeadSearch l)
+            dead = deadStates l
+        in all (\k -> knownDeadEnd done k == (k `Set.member` dead))
+               (Map.keys (srStates (search l (\_ _ -> True) (startPlaying l))))
+    , check "dead search: a key it never met is not dead" $
+        let l = levels !! 1
+            done = finishDeadSearch (startDeadSearch l)
+            stranger = (stateKey (startPlaying l)) { skCell = (-7, 123456789), skPhase = Paused }
+        in not (knownDeadEnd done stranger)
+    ]
+  where
+    -- Advance @k@ units at a time until the search says it is finished.
+    sliced k l = deadSearchResult (until deadSearchFinished (advanceDeadSearch k) (startDeadSearch l))
+
 -- The campaign. -----------------------------------------------------------------
+-- | Campaign structure and Run navigation: unlocks, retry, restored progress and
+-- hall selection must agree with completion, without entering locked rooms.
+-- Every listed level then undergoes the shared route/invariant checks below.
 campaignChecks :: [Check]
 campaignChecks = case campaign of
   Left err -> [check ("campaign: parses: " ++ err) False]
@@ -1090,19 +1424,30 @@ levelChecks l =
       all (\k -> skCell k `Set.notMember` skCrates k) (Map.keys (srStates result))
   ]
   where
+    -- Shared where bindings reuse one exhaustive result across the checks for l.
+    -- Absent goals give an empty route, but the explicit par/win checks still fail.
     named what = check ("level " ++ lvName l ++ ": " ++ what)
     start = startPlaying l
     result = search l (\_ _ -> True) start
     goal = srGoal result
     route = maybe [] snd goal
+    -- An unreachable border plate prevents every door from opening, isolating
+    -- whether the door mechanic is necessary to solve this level.
     noDoors lv = lv { lvPlates = Set.fromList [(0, 0)] }
+    -- Reject only past commands directed into crates; shifts/echoes remain
+    -- available so this asks whether crate movement, specifically, is essential.
     noPushing g action = case action of
       Go d -> stepCell d (gCell g) `Set.notMember` gCrates g || gEra g /= Past
       ShiftEra -> True
       SendEcho -> True
+    -- Replay at a chosen budget through ticks, independently of search's refill.
     play n = run l (routeInputs route) start { gRemaining = n }
 
 -- Undo. ------------------------------------------------------------------------
+-- | Undo restores the latest accepted action's board snapshot but refunds only
+-- its configured percentage. Test ordering during movement, key arming, pickup,
+-- history exhaustion and recovery from loss, including a refund too small to
+-- resume play. Whole-game comparisons normalise only time and last-tick keys.
 undoChecks :: Level -> [Check]
 undoChecks level =
   [ check "undo: a step comes back exactly, for half its price" $
@@ -1213,6 +1558,9 @@ undoChecks level =
   ]
 
 -- 14, 15. ----------------------------------------------------------------------
+-- | Buffered input priority and fresh-press detection. Mid-step Space waits for
+-- arrival, then precedes movement; repeated/held Space cannot become extra shifts.
+-- Direction repeats and newest-key selection are separate from that one-shot rule.
 pendingShifts :: Level -> [Check]
 pendingShifts level =
   [ check "14. a shift pressed mid-step waits for the step to land" $
@@ -1261,6 +1609,9 @@ pendingShifts level =
   ]
 
 -- 16, 17, reachability. --------------------------------------------------------
+-- | Replay the intended fixture solution through both adapters and exhaust its
+-- reachable graph. Restricted searches prove that era changes are necessary;
+-- the final custom search counts shifts, rather than minimising total seconds.
 routeChecks :: Level -> [Check]
 routeChecks level =
   [ check "16. the intended route wins through tick inputs" $
@@ -1298,10 +1649,14 @@ routeChecks level =
       not (winsWithin 5) && winsWithin 6
   ]
   where
+    -- Include shifts-used in the visited key: merging equal boards reached with
+    -- different remaining allowances could discard the only feasible route.
     winsWithin budget = go [(startPlaying level, 0 :: Int)] [stateKeyB (startPlaying level) 0]
       where
         stateKeyB g n = (stateKey g, n)
         go [] _ = False
+        -- This small breadth-first queue refills time after each edge. The test
+        -- bounds shifts, not elapsed budget; all other real movement rules apply.
         go ((g, n) : rest) seen
           | gPhase g == Won = True
           | otherwise =
@@ -1312,10 +1667,15 @@ routeChecks level =
                           , stateKeyB next n' `notElem` seen ]
                   uniq = dedupe nexts
               in go (rest ++ uniq) (map (uncurry stateKeyB) uniq ++ seen)
+        -- Different refused keys can produce the same successor in one batch.
+        -- Remove duplicates before adding them to both queue and visited list.
         dedupe = foldr (\x acc -> if any (\y -> uncurry stateKeyB y == uncurry stateKeyB x) acc
                                     then acc else x : acc) []
 
 -- 18. --------------------------------------------------------------------------
+-- | Both action/tick adapters agree on settled essentials. A fixed 6000-tick
+-- mashing trace then checks position, timer ranges and budget at every tick.
+-- The adjacency invariant applies to this fixture, which has no mirror jumps.
 determinism :: Level -> [Check]
 determinism level =
   [ check "18. a route ends in the same state, by tick inputs or by whole actions" $
@@ -1328,6 +1688,8 @@ determinism level =
          && all (\g -> gRemaining g >= 0 && gRemaining g <= lvBudget level) trail
   ]
   where
+    -- A countdown must remain within its declared duration; a stepping target
+    -- must be adjacent floor. Settled carries no target or timer to validate.
     legalMotion g = case gMotion g of
       Stepping to left -> left >= 1 && left <= stepTicks
                           && walkable level (gEra g) to && adjacent to (gCell g)
@@ -1339,6 +1701,8 @@ determinism level =
 messyInputs :: [TickInput]
 messyInputs = map fromSeed (take 6000 (iterate (\s -> (s * 1103515245 + 12345) `mod` 2147483648) 42))
   where
+    -- Decode different base-16 slices of a deterministic generator into keys.
+    -- This is reproducible stress input, not a uniform/random gameplay model.
     fromSeed :: Int -> TickInput
     fromSeed s =
       let bits n = (s `div` n) `mod` 16 :: Int
@@ -1354,6 +1718,9 @@ messyInputs = map fromSeed (take 6000 (iterate (\s -> (s * 1103515245 + 12345) `
                  , tiUndo = bits 16 == 1 }
 
 -- Input adapter. ---------------------------------------------------------------
+-- | OS event adaptation without OS IO: preserve between-tick taps, ignore
+-- auto-repeat downs, and distinguish a fresh direction from an older held key
+-- exposed by release. Integration checks feed those tick records into stepGame.
 inputAdapter :: Level -> [Check]
 inputAdapter level =
   [ check "input: a tap between two ticks is seen for one tick" $
@@ -1403,6 +1770,10 @@ inputAdapter level =
   ]
 
 -- Effects. ---------------------------------------------------------------------
+-- | Effects derive from consecutive games and must never alter their rules.
+-- Check wave/pickup/refund lifetimes, pause/restart behaviour, focus and room
+-- handover at its midpoint; iterate/scanl retain intermediate ticks to expose
+-- off-by-one errors that an endpoint-only comparison would miss.
 fxChecks :: Level -> [Check]
 fxChecks level =
   [ check "fx: a shift starts a wave as long as the input lock" $
@@ -1513,6 +1884,10 @@ mirrorYard = case parseLevel 1000
 mirrorCells :: Game -> [Cell]
 mirrorCells = Map.keys . gMirrors
 
+-- | Sleds move from sides/back, jump through their face and keep their facing.
+-- Unlike crates they move in their own era; unlike floor they block shifting.
+-- Test all forbidden destinations, cross-era mirror collisions, held keys,
+-- undo, moving beams and solver keys so the visual hint can use these same rules.
 movableMirrorChecks :: [Check]
 movableMirrorChecks =
   [ check "parser: a movable mirror stands on floor, in its own era only" $
@@ -1597,6 +1972,10 @@ movableMirrorChecks =
 -- The way on. --------------------------------------------------------------------
 -- The last listed lamp goes out again, and its light leads to a level the hall
 -- does not list.
+-- | Ending stages, passage geometry and secret-level access through the real Run.
+-- Exact boundary ticks pin down the handover from lamp to walking to rush/card.
+-- The opened station uses free movement and its own reset; the rush uses separate
+-- shift/barrier rules. Both paths must leave campaign completion consistent.
 finaleChecks :: [Check]
 finaleChecks = case (levelHall, campaign) of
   (Right levels, Right listed) ->
@@ -1605,13 +1984,18 @@ finaleChecks = case (levelHall, campaign) of
         -- One shift from lighting the lamp: in the past, on its footing, with the cell.
         nearWin = (startPlaying third) { gEra = Past, gCell = lvGoal third, gHasCell = True, gPrev = noInput }
         before = Run 2 shown 2 InLevel nearWin
+        -- Advance the whole run, not just Game, so cinematic stage clocks and
+        -- level handovers happen exactly as they do in Main.
         stepAll r inputs = foldl' (flip (stepRun levels)) r inputs
         lit = stepRun levels space before
         open = stepAll lit (replicate (revealTicks third) noInput)
+        -- Nothing distinguishes an ordinary level/hall from any ending stage.
         stageOf r = case runMode r of
           Ending f -> Just (fnStage f)
           _ -> Nothing
         beckoning r = stageOf r == Just Beckon
+        -- Enter at the passage mouth, then use Run's barrier-aware rush script.
+        -- The final extra ticks cover only the arrival card, not puzzle actions.
         walkedIn = stepAll open (press DirUp : replicate stepTicks noInput)
         arrived = stepAll walkedIn (rushInputs third ++ replicate arrivalTicks noInput)
         finaleOf r = case runMode r of
@@ -1635,6 +2019,9 @@ finaleChecks = case (levelHall, campaign) of
         && not (gHasCell (runGame open)) && gCell (runGame open) == lvGoal third
     , check "ending: one tick earlier, the wall is still opening" $
         stageOf (stepAll lit (replicate (revealTicks third - 1) noInput)) == Just Opening
+    -- At this particular lamp cell the alternate era is blocked, undo is disabled,
+    -- and resetting to the lamp changes nothing. Later checks exercise free
+    -- shifting elsewhere and R from a different cell; the label is historical.
     , check "ending: in the opened station there is no shifting, undoing or starting over" $
         let tried = stepAll open [space, noInput, undoKey, noInput, restartKey, noInput]
         in beckoning tried && gEra (runGame tried) == Present
@@ -1783,14 +2170,21 @@ duoFixture = parseLevel 100
   , "#############"
   ]
 
+-- | Two keepers share board, era, budget and history while keeping independent
+-- motion/input. Check concurrent steps, mutual blocking, pickup ownership,
+-- shared shifts and undo of overlapping actions, then verify event-key routing.
 duoChecks :: [Check]
 duoChecks = case duoFixture of
   Right duo ->
     let start = startPlaying duo
+        -- Set both the legacy aggregate and the actor-specific field. A single
+        -- tick may contain both directions; Game.Logic resolves shared collisions.
         wasd d = noInput { tiDir = Just d, tiDir1 = Just d }
         arrows d = noInput { tiDir = Just d, tiDir2 = Just d }
         both d1 d2 = noInput { tiDir = Just d1, tiDir1 = Just d1, tiDir2 = Just d2 }
         partnerAt g = fmap ptCell (gPartner g)
+        -- fmap updates a partner only when present, preserving the Maybe shape.
+        -- Direct placement isolates the rule being tested from route setup.
         moveTo c g = g { gPartner = fmap (\p -> p { ptCell = c }) (gPartner g) }
         settle = replicate stepTicks noInput
         budget = lvBudget duo
@@ -1879,6 +2273,8 @@ duoChecks = case duoFixture of
 traceRun :: [Level] -> Run -> [TickInput] -> [((Run, Fx), [Cue])]
 traceRun levels r0 inputs = zip (drop 1 states) (zipWith (cues levels) states (drop 1 states))
   where
+    -- scanl includes the initial state; dropping its first element aligns each
+    -- post-tick state with cues computed from the preceding/current pair.
     states = scanl tick (r0, initialFx) inputs
     tick (r, fx) i = let r' = stepRun levels i r in (r', stepFx (runGame r) (runGame r') fx)
 
@@ -1886,6 +2282,9 @@ traceRun levels r0 inputs = zip (drop 1 states) (zipWith (cues levels) states (d
 playTrace :: Level -> Game -> [TickInput] -> [[Cue]]
 playTrace l g inputs = map snd (traceRun [l] (Run 0 0 0 InLevel g) inputs)
 
+-- | Cue decisions, not waveform quality: action counts must equal heard cues,
+-- with one pickup/win and no spurious footstep for a mirror jump. Following
+-- groups extend the same before/after comparison to ending and partner actions.
 soundChecks :: Level -> [Check]
 soundChecks level =
   [ check "sound: the route sounds every step and shift, and the pickup and the lamp once each" $
@@ -1946,6 +2345,9 @@ twoKeeperSounds = case levelHall of
     ]
   _ -> [check "sound: level 4 is a level for two" False]
 
+-- | Cinematic sounds and bed levels must track the same stage clocks as drawing.
+-- Replay success and failure paths; inspect exact lamp/wall ticks, cue order,
+-- corridor-lamp indices and silence after arrival rather than listening to audio.
 endingSounds :: [Check]
 endingSounds = case levelHall of
   Left _ -> [check "sound: the level hall parses" False]
@@ -1961,6 +2363,8 @@ endingSounds = case levelHall of
           _ -> Nothing
         -- The finale after the tick that sounded this.
         when' c = [ f | ((r, _), cs) <- whole, c `elem` cs, Just f <- [finaleOf r] ]
+        -- Filter only milestone cues for the ordering assertion; ordinary rush
+        -- footsteps, shifts and weather may legitimately occur between them.
         moment c = case c of
           CueLamp -> True
           CueFlare -> True
@@ -1972,6 +2376,8 @@ endingSounds = case levelHall of
           CueCard -> True
           _ -> False
         passage = lvPassage third
+        -- Select continuous bed settings by post-tick finale predicate, letting
+        -- assertions cover every tick of a stage rather than one sampled instant.
         bedsAt p = [ beds levels r | ((r, _), _) <- whole, Just f <- [finaleOf r], p f ]
         rushing f = fnStage f == Rush
     in
@@ -2028,6 +2434,9 @@ cornerYard = parseLevel 100
   , "##########"
   ]
 
+-- | Corner mirrors preserve distance while turning through the other face.
+-- Verify both beams and both directions, blocked landing fallback, fixed backs
+-- and era ownership so a bend cannot accidentally behave like a straight mirror.
 cornerChecks :: [Check]
 cornerChecks = case cornerYard of
   Left err -> [check ("corner mirrors: the yard parses: " ++ err) False]
@@ -2063,6 +2472,8 @@ cornerChecks = case cornerYard of
 
 -- | W A S D move yellow, w a s d red (the arrows), @_@ shifts both.
 duoRoute :: String -> [DuoAction]
+-- Only trusted route strings are used: the fallback treats every character
+-- outside the eight direction letters as a shared shift, including underscore.
 duoRoute = map key
   where
     key c = case c of
@@ -2085,13 +2496,21 @@ redCarries = duoRoute $ concat
 yellowCarries = duoRoute $ concat
   [ "DDDWWWWS", "_", "d", "WWWWAWAASS", "W", "AAADDS", "D", "awaa", "ddd", "SSD", "_", "S", "WWW", "_", "DDWWWD", "_" ]
 
+-- | The secret puzzle needs cooperation, not just two available avatars.
+-- Full/restricted searches establish par and the impossibility of either solo
+-- keeper; authored routes prove either may carry. Bad ordering must remain a
+-- dead end, since the two gate crates deliberately remove crossings for good.
 twoKeepersChecks :: [Check]
 twoKeepersChecks = case secretLevels of
   Right (l : _) ->
     let start = startPlaying l
+        -- Share the expensive unrestricted search; each restricted search asks
+        -- a different question and therefore needs its own graph exploration.
         full = duoSearch l (const True) start
         play route = foldl' (flip (applyDuo l)) start route
         replay route = run l (concatMap duoInputs route ++ [noInput]) start
+        -- Removing the partner tests solo solvability; restricting Go1/Go2 below
+        -- instead leaves the stationary partner as an obstacle and possible weight.
         alone c = l { lvSpawn = c, lvSpawn2 = Nothing }
         onlyYellow a = case a of { Go2 _ -> False; _ -> True }
         onlyRed a = case a of { Go1 _ -> False; _ -> True }
@@ -2140,8 +2559,130 @@ reportDuo = case secretLevels of
         putStrLn ("level:  " ++ concatMap duoLabel route)
   _ -> pure ()
 
+-- Her orders: the saves ---------------------------------------------------------
+
+ordersChecks :: [Check]
+ordersChecks = case levelHall of
+  Left err -> [check ("orders: the levels parse: " ++ err) False]
+  Right levels ->
+    let steps cp inputs = foldl' (flip (stepCampaign levels)) cp inputs
+        tap i = [i, noInput]
+        right = noInput { tiDir = Just DirRight }
+        cancelKey = noInput { tiCancel = True }
+        order c s = newOrder { odCompleted = c, odSelected = s, odTicks = 14 * 60 * 60 }
+        book = Book [Just (order 2 2), Just (order 0 0), Nothing] 0
+        title b = Campaign b closedDesk (startRunWithProgress levels 2 2)
+        desk = steps (title book) (tap enter)
+        isIntro cp = case runMode (cpRun cp) of
+          Intro _ _ -> True
+          _ -> False
+        asking cp = case dkStep (cpDesk cp) of
+          Asking _ _ -> True
+          _ -> False
+        held n = replicate n enter
+        cancelling = steps desk (tap cancelKey)
+        torn = steps cancelling (held holdTicks ++ replicate tearTicks noInput)
+        shiftOnce level = let g0 = (startPlaying level) { gPrev = noInput } in (g0, applyAction level ShiftEra g0)
+    in
+    [ check "orders: with no order yet, Enter at the title takes the first one and plays the opening" $
+        let cp = steps (Campaign emptyBook closedDesk (startRun levels 0)) (tap enter)
+        in isIntro cp && bkActive (cpBook cp) == 0 && activeOrder (cpBook cp) /= Nothing
+    , check "orders: with orders, Enter at the title opens the desk on the order last played" $
+        runMode (cpRun desk) == Orders && dkSel (cpDesk desk) == 0
+    , check "orders: while the instructions are open, Enter at the title does nothing" $
+        let shown = (title book) { cpRun = (startRunWithProgress levels 2 2) { runGame = (runGame (startRunWithProgress levels 2 2)) { gShowInstructions = True } } }
+        in runMode (cpRun (steps shown (tap enter))) == Title
+    , check "orders: right chooses the next ticket, and stops at the last" $
+        dkSel (cpDesk (steps desk (tap right))) == 1
+        && dkSel (cpDesk (steps desk (concat (replicate 5 (tap right))))) == slotCount - 1
+    , check "orders: Enter on an order with rooms cleared opens the hall where it was" $
+        let cp = steps desk (tap enter)
+        in runMode (cpRun cp) == Lobby && runCompleted (cpRun cp) == 2 && runIndex (cpRun cp) == 2
+    , check "orders: Enter on an order with nothing cleared plays the opening, and makes it the one in play" $
+        let cp = steps desk (tap right ++ tap enter)
+        in isIntro cp && bkActive (cpBook cp) == 1 && runCompleted (cpRun cp) == 0
+    , check "orders: Enter on an empty slot prints a new order, then plays the opening" $
+        let printingNow = steps desk (concat (replicate 2 (tap right)) ++ tap enter)
+            done = steps printingNow (replicate printTicks noInput)
+        in runMode (cpRun printingNow) == Orders && orderAt 2 (cpBook printingNow) == Nothing
+           && isIntro done && bkActive (cpBook done) == 2 && orderAt 2 (cpBook done) == Just newOrder
+    , check "orders: Escape on the desk goes back to the title" $
+        runMode (cpRun (steps desk (tap lobbyKey))) == Title
+    , check "orders: Escape in the hall goes back to the desk, not the title" $
+        let hall = steps desk (tap enter)
+        in runMode (cpRun (steps hall (tap lobbyKey))) == Orders
+    , check "orders: Delete asks first; a tap of Enter tears nothing" $
+        let tapped = steps cancelling (tap enter ++ replicate 30 noInput)
+        in asking cancelling && asking tapped && orderAt 0 (cpBook tapped) /= Nothing
+    , check "orders: Delete on an empty slot does nothing" $
+        dkStep (cpDesk (steps desk (concat (replicate 2 (tap right)) ++ tap cancelKey))) == Choosing
+    , check "orders: Escape while she asks keeps the order" $
+        let kept = steps cancelling (held 20 ++ tap lobbyKey)
+        in dkStep (cpDesk kept) == Choosing && orderAt 0 (cpBook kept) /= Nothing
+    , check "orders: letting go of Enter takes the tear back" $
+        case dkStep (cpDesk (steps cancelling (held 30 ++ replicate 30 noInput))) of
+          Asking _ h -> h == 0
+          _ -> False
+    , check "orders: Enter already down when she asks does not count towards the tear" $
+        case dkStep (cpDesk (steps (title book) ([enter, enter { tiCancel = True }] ++ held 80))) of
+          Asking _ h -> h == 0
+          _ -> False
+    , check "orders: Enter held long enough tears the order off and says so" $
+        orderAt 0 (cpBook torn) == Nothing && dkNote (cpDesk torn) /= Nothing
+        && dkStep (cpDesk torn) == Choosing && orderAt 1 (cpBook torn) /= Nothing
+    , check "orders: cancelling the order in play leaves the run fresh" $
+        runCompleted (cpRun torn) == 0 && runMode (cpRun torn) == Orders
+    , check "orders: progress made in play is written into the order" $
+        let hall = steps desk (tap enter)
+            won = (cpRun hall) { runMode = InLevel, runIndex = 2, runGame = ((startPlaying (levels !! 2)) { gPhase = Won, gPrev = noInput }) }
+            cp = steps hall { cpRun = won } [noInput]
+        in fmap odCompleted (activeOrder (cpBook cp)) == Just 3
+    , check "orders: time on the road counts in play, not at the title or the desk" $
+        let r = startRun levels 0
+            inLevel = r { runMode = InLevel }
+            b = Book [Just newOrder, Nothing, Nothing] 0
+        in fmap odTicks (activeOrder (tally inLevel inLevel b)) == Just 1
+           && tally r r b == b && tally r r { runMode = Orders } b == b
+    , check "orders: an era shift counts; an undo does not" $
+        let level = levels !! 0
+            (g0, g1) = shiftOnce level
+            playing g = (startRun levels 0) { runMode = InLevel, runGame = g }
+            b = Book [Just newOrder, Nothing, Nothing] 0
+            -- An undo takes the shift back: the era changes and the history shrinks.
+            undoneFrom = g1
+            undone = g0
+        in gEra g1 /= gEra g0 && length (gHistory g1) > length (gHistory g0)
+           && fmap odShifts (activeOrder (tally (playing g0) (playing g1) b)) == Just 1
+           && fmap odShifts (activeOrder (tally (playing undoneFrom) (playing undone) b)) == Just 0
+    , check "orders: the save before the orders becomes the first order" $
+        bookFromProgress 2 1 == Book [Just newOrder { odCompleted = 2, odSelected = 1 }, Nothing, Nothing] 0
+    , check "orders: a book read back is made to fit: three slots, progress in range" $
+        normaliseBook (length levels) (Book [Just newOrder { odCompleted = 99, odSelected = 99, odTicks = -5 }] 7)
+          == Book [Just newOrder { odCompleted = length levels, odSelected = length levels - 1 }, Nothing, Nothing] 2
+    , check "orders: a book survives being written and read" $
+        let b = Book [Just (order 2 1) { odSaved = Just (Stamp 11 8 21 14) }, Nothing, Just newOrder] 2
+        in read (show b) == b
+    , check "orders: she names what a cancel would lose" $
+        let said = cancelLine levels 1 (order 2 2)
+        in "ORDER 1" `isInfixOf` said && "two rooms" `isInfixOf` said && "14 minutes" `isInfixOf` said
+           && "DELIVERED" `isInfixOf` cancelLine levels 2 (order 3 2)
+    , check "orders: the tear is heard as it goes, and when it comes off" $
+        let a = cpDesk (steps cancelling (held 7))
+            b = cpDesk (steps cancelling (held 8))
+            last1 = cpDesk (steps cancelling (held (holdTicks - 1)))
+            off = cpDesk (steps cancelling (held holdTicks))
+        in CueTearing 1 `elem` deskCues levels book a b && CueTorn `elem` deskCues levels book last1 off
+    , check "orders: the desk's moves into and out of play are heard" $
+        CueMenuEnter `elem` cues levels (cpRun (title book), initialFx) (cpRun desk, initialFx)
+        && CueIntro `elem` cues levels (cpRun desk, initialFx) (cpRun (steps desk (tap right ++ tap enter)), initialFx)
+    ]
+
 -- The opening film --------------------------------------------------------------
 
+-- | Film flow and skip arming. A fresh save opens the film, a completed one the
+-- hall; only a released-and-held key counts towards skipping. Handover carries
+-- held inputs into the level so the skip key cannot immediately act there.
+-- These test Run/sound decisions, not Video's file decoding or actual playback.
 introChecks :: [Check]
 introChecks = case levelHall of
   Left err -> [check ("intro: the levels parse: " ++ err) False]
@@ -2187,11 +2728,16 @@ introChecks = case levelHall of
 
 -- | One tick as the game runs it: an open talk takes the keys and holds the run.
 storyTick :: [Level] -> (Story, Run) -> TickInput -> (Story, Run)
+-- Match Main's ordering: consume dialogue input first, hold/step the run second,
+-- then notice new triggers. This keeps the closing Space from becoming a shift.
 storyTick levels (s, r) input =
   let (s0, free) = talkTick input r s
       r' = if free then stepRun levels input r else holdRun input r
   in (notice levels r r' s0, r')
 
+-- | Dialogue locks the board, types/advances on fresh keys and triggers only for
+-- eligible visits. Check focus targets against actual objects, escape during a
+-- line, closing-key consumption and the open/letter sounds from story deltas.
 storyChecks :: [Check]
 storyChecks = case levelHall of
   Right levels@(first : second : _) ->
@@ -2204,11 +2750,15 @@ storyChecks = case levelHall of
           Nothing -> st
           Just _ -> through key (play st [key, noInput])
         done = through enter talking
+        -- Pattern matching discards lines without a Look; targets must identify
+        -- real map objects rather than positions duplicated in the test.
         looks b = [ lk | Line _ _ (Just lk) <- beatLines first (runGame (snd entered)) b ]
         playing = (runGame (snd done)) { gPrev = noInput }
         inLevel = Run 0 0 0 InLevel playing
         withCell = inLevel { runGame = playing { gHasCell = True } }
         rustedRun = inLevel { runGame = playing { gFeedback = Just (Feedback CrateRusted hintFeedbackTicks) } }
+        -- Keep all story states while idling so consecutive deltas reveal the
+        -- exact appearance tick and whether letters emitted any blips.
         trace0 st n = map fst (scanl (storyTick levels) st (replicate n noInput))
         heardOver ss = concat (zipWith storyCues ss (drop 1 ss))
     in

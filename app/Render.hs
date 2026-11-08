@@ -1,4 +1,15 @@
 -- | Composes one frame from the game, the effects and the prebuilt art.
+-- Main owns the cached Scene and supplies Game.Logic's current Game, Game.Fx's
+-- decorative state and Game.Run's ending state. Station/Figures draw the pieces;
+-- Hud/Title draw panels. This module chooses their order and coordinates, never
+-- accepting input, charging time or changing the live game. Even hint probes
+-- such as tryStep are pure queries whose hypothetical games are discarded.
+-- Cells count x right and y down. Draw maps them to an upward-y, centred
+-- 1280 by 800 canvas with 76-unit cells; fitted finally scales to window pixels.
+-- Ages and clock are 60 Hz ticks. Trigonometric phases use radians; Gloss Rotate
+-- uses clockwise degrees. Colours written 0xRRGGBB have separate alpha values.
+-- Static art is baked once on demand; per-frame work selects caches and adds
+-- changing objects, hints and effects. Pictures paint in list order.
 module Render (Scene, mkScene, render, renderWith, renderEnding, fitted) where
 
 import Control.Monad (mfilter)
@@ -9,7 +20,7 @@ import Font (textC)
 import Game.Fx
 import Game.Logic
 import Game.Run hiding (finale)
-import Game.Solution (StateKey, deadStates, stateKey)
+import Game.Solution (StateKey, stateKey)
 import Game.Types
 import Graphics.Gloss
 import Hud
@@ -21,34 +32,33 @@ import Title
 -- | Everything that is expensive to build and never changes.
 data Scene = Scene
   { scPastCells    :: Map.Map Cell [(Cell, Picture)]  -- ^ by room, for the wave's flips
-  , scPresentCells :: Map.Map Cell [(Cell, Picture)]
+  , scPresentCells :: Map.Map Cell [(Cell, Picture)] -- ^ Present tiles by room.
   , scPastWhole    :: Map.Map Cell Picture            -- ^ by room, one baked picture each
-  , scPresentWhole :: Map.Map Cell Picture
+  , scPresentWhole :: Map.Map Cell Picture -- ^ Present room pictures at rest.
   , scRooms        :: (Int, Int)                      -- ^ how many rooms across and down
   , scPastSea      :: Picture                         -- ^ canvas scale, under the board
-  , scPresentSea   :: Picture
-  , scSeaShade     :: Picture
+  , scPresentSea   :: Picture -- ^ Present sea behind the board, in canvas units.
+  , scSeaShade     :: Picture -- ^ Shared darkening over the sea background.
   , scPastShore    :: Picture                         -- ^ shelf, rocks, surf: on the board
-  , scPresentShore :: Picture
+  , scPresentShore :: Picture -- ^ Present shelf and rocks in board coordinates.
   , scPastSurf     :: Picture                         -- ^ the outer surf, breathing
-  , scPresentSurf  :: Picture
-  , scTitle        :: (String, String)
+  , scPresentSurf  :: Picture -- ^ Present outer surf, scaled gently per frame.
+  , scTitle        :: (String, String) -- ^ Hall place label and level name.
   , scPastBack     :: Picture                         -- ^ the stone apron, on the board
-  , scPresentBack  :: Picture
-  , scPastVig      :: Picture
-  , scPresentVig   :: Picture
-  , scPastCaption  :: Picture
-  , scPresentCaption :: Picture
-  , scWonCaption   :: Picture
-  , scDarkCaption  :: Picture
-  , scHasNext      :: Bool
-  , scDead         :: Set.Set StateKey  -- ^ worked out once, the first time it is needed
-  , scHud          :: HudArt
+  , scPresentBack  :: Picture -- ^ Present stone apron under the cells.
+  , scPastVig      :: Picture -- ^ Past shading around the map edges.
+  , scPresentVig   :: Picture -- ^ Present shading around the map edges.
+  , scPastCaption  :: Picture -- ^ Opaque past title above the board.
+  , scPresentCaption :: Picture -- ^ Opaque present title above the board.
+  , scWonCaption   :: Picture -- ^ Title for the illuminated station.
+  , scDarkCaption  :: Picture -- ^ Title after the lamp dies in the ending.
+  , scHasNext      :: Bool -- ^ Whether the win panel can offer another level.
+  , scHud          :: HudArt -- ^ Watch, control and heading art shared by frames.
   , scEnding       :: EndingArt         -- ^ built the first time an ending is drawn
   }
 
 -- | The art only an ending draws: the station as its passage opens, and the whole
--- way north from it.
+-- way out from it, in the direction defined by its passage.
 data EndingArt = EndingArt
   { eaOpened :: [Picture]             -- ^ per passage cell, its neighbourhood once it is open
   , eaDash   :: Map.Map Cell Picture  -- ^ every cell of the rush, in the present
@@ -83,26 +93,31 @@ mkScene title hasNext teach level = Scene
   , scWonCaption = wonCaption title
   , scDarkCaption = darkCaption title
   , scHasNext = hasNext
-  -- Exhaustive dead-state search grows quickly with several pushable objects.
-  -- Keep the level-select transition responsive in the larger rooms. A level of
-  -- whole rooms keeps it: its one-way gates hold its search to the sum of its rooms.
-  -- The search knows one keeper only, so a level for two is never told it is lost.
-  , scDead = if duo || (Set.size (lvCrates level) >= 3 && not (roomedLevel level))
-               then Set.empty else deadStates level
   , scHud = mkHudArt duo teach title level
   , scEnding = mkEndingArt level
   }
   where
+    -- A Just second spawn selects two-keeper HUD controls. Scene fields have no
+    -- bangs: expensive art, especially the ending, stays lazy until demanded.
     duo = isJust (lvSpawn2 level)
+    -- Row-major order makes the old/new tile lists line up during a wave and
+    -- preserves overlapping wall art. A comprehension enumerates every cell.
     ordered = [ (x, y) | y <- [0 .. lvHeight level - 1], x <- [0 .. lvWidth level - 1] ]
     -- Cells are kept by room, so a level of several screens only ever draws one.
     -- A level under the following camera is one room, drawn whole and masked.
     roomKey c = if roomedLevel level then roomOf c else (0, 0)
+    -- fromListWith combines duplicate room keys. flip (++) preserves the scan
+    -- order instead of placing each later cell before the earlier ones.
     byRoom f = Map.fromListWith (flip (++)) [ (roomKey c, [f c]) | c <- ordered ]
+    -- Keep local tile pictures for flips, and already-positioned whole-room
+    -- pictures for normal frames. bake folds geometry transforms into vertices.
     cells era = byRoom (\c -> (c, bake (cellArt level era c)))
     whole era = Map.map (\pics -> bake (Pictures pics))
                         (byRoom (\c -> at (cellPos c) (cellArt level era c)))
 
+-- | Prebuild art altered by the ending, from the same level geometry as Run.
+-- Each opening patch includes neighbours whose exposed wall faces change.
+-- Rush maps cover both eras; absent passage/empty floor produces no rush region.
 mkEndingArt :: Level -> EndingArt
 mkEndingArt level = EndingArt
   { eaOpened =
@@ -136,11 +151,15 @@ cellsOf s era room = Map.findWithDefault [] room (case era of
   Past -> scPastCells s
   Present -> scPresentCells s)
 
+-- | Cached whole room for an era; an absent room contributes Blank. Room keys
+-- are room-grid coordinates, not the top-left cell of that room.
 wholeOf :: Scene -> Era -> Cell -> Picture
 wholeOf s era room = Map.findWithDefault Blank room (case era of
   Past -> scPastWhole s
   Present -> scPresentWhole s)
 
+-- | Select immutable art by era: sea in canvas space; shore, surf, apron,
+-- vignette and caption in board space. No transition is performed in selectors.
 seaOf, shoreOf, surfOf, backOf, vigOf, captionOf :: Scene -> Era -> Picture
 seaOf s Past = scPastSea s
 seaOf s Present = scPresentSea s
@@ -156,20 +175,27 @@ captionOf s Past = scPastCaption s
 captionOf s Present = scPresentCaption s
 
 -- | The picture for the current window: scaled to fit, bars over the remainder.
-render :: Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
-render scene level g fx size = fitted size (frame scene level g fx)
+-- @deadEnd@ says whether a state is known to be one the level can no longer be won
+-- from. It is a function rather than part of the 'Scene' because the answer arrives
+-- later: Main works it out a slice per frame, and until then it is always 'False'.
+render :: (StateKey -> Bool) -> Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
+render deadEnd scene level g fx size = fitted size (frame deadEnd scene level g fx)
 
--- | As 'render', with more drawn over the frame in canvas units: @ is given the
+-- | As 'render', with more drawn over the frame in canvas units: @over@ receives
+-- the
 -- board's stand, 0 while the level is introduced and 1 once closed in.
-renderWith :: (Float -> Picture) -> Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
-renderWith over scene level g fx size =
-  fitted size (Pictures [frame scene level g fx, over (focusOf Nothing fx)])
+renderWith :: (Float -> Picture) -> (StateKey -> Bool) -> Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
+renderWith over deadEnd scene level g fx size =
+  fitted size (Pictures [frame deadEnd scene level g fx, over (focusOf Nothing fx)])
 
 -- | A frame of a level's ending. @next@ is the number and name of the level that it
 -- leads into, for the card at the end.
 renderEnding :: Scene -> Level -> (String, String) -> Finale -> Game -> Fx -> (Int, Int) -> Picture
 renderEnding scene level next f g fx size = fitted size (endingFrame scene level next f g fx)
 
+-- | Uniformly fit the logical canvas into window width/height in pixels.
+-- The smaller axis ratio preserves aspect; black bars cover spare space and
+-- art extending beyond the canvas. Callers supply non-negative window sizes.
 fitted :: (Int, Int) -> Picture -> Picture
 fitted (winW, winH) pic = Pictures
   [ Scale k k pic
@@ -178,6 +204,8 @@ fitted (winW, winH) pic = Pictures
   where
     wf = fromIntegral winW :: Float
     hf = fromIntegral winH :: Float
+    -- The picture is scaled, but these bars are drawn afterwards in unscaled
+    -- window coordinates. Ignore sub-half-pixel bars to avoid tiny edge slivers.
     k = min (wf / canvasW) (hf / canvasH)
     barX = (wf - canvasW * k) / 2
     barY = (hf - canvasH * k) / 2
@@ -187,15 +215,18 @@ fitted (winW, winH) pic = Pictures
       [ Translate 0 (hf / 2 - barY / 2) (rectC wf barY) | barY > 0.5 ] ++
       [ Translate 0 (negate (hf / 2) + barY / 2) (rectC wf barY) | barY > 0.5 ])
 
-frame :: Scene -> Level -> Game -> Fx -> Picture
-frame scene level g fx = case gPhase g of
+-- | Compose a title or level frame on the logical canvas, before window fitting.
+-- Preview changes only the world passed for drawing; the HUD retains live state.
+frame :: (StateKey -> Bool) -> Scene -> Level -> Game -> Fx -> Picture
+frame deadEnd scene level g fx = case gPhase g of
   Menu -> Pictures
     [titleScreen clock
     , if gShowInstructions g then instructionsPopup else Blank
     ]
 
+  -- World first, HUD next, board panels last: paint order keeps labels readable.
   _ -> Pictures
-    [ world Nothing scene level (if peeking g fx then peekView g else g) fx
+    [ world deadEnd Nothing scene level (if peeking g fx then peekView g else g) fx
     , hud (scHud scene) level g fx clock
     , board f (lessonPlate level g fx)
     , board f (overlays scene g fx)
@@ -204,6 +235,7 @@ frame scene level g fx = case gPhase g of
   where
     clock = fromIntegral (fxClock fx)
     f = focusOf Nothing fx
+    -- Reveal entry over 26 ticks, independently of the player's first action.
     startFade
       | fxLevelAge fx < 26 =
           Color (hexA 0x05080A (1 - smooth (fromIntegral (fxLevelAge fx) / 26))) (rectC canvasW canvasH)
@@ -219,6 +251,8 @@ lessonPlate level g fx
       , Color (fade alpha (hex 0xF3E9D5)) (Translate 0 (-5) (textC 12 (lvLesson level)))
       ])
   where
+    -- Hold the lesson for 330 ticks (5.5 s), then fade over 90 ticks; it is gone
+    -- at 420 ticks. Pausing does not replace the message with another rule.
     age = fxLevelAge fx
     alpha = if age < 330 then 1 else 1 - fromIntegral (age - 330) / 90
     centreX = (mapLeft + mapRight) / 2
@@ -229,6 +263,8 @@ peeking g fx = tiPeek (gPrev g) && gPhase g == Playing && fxWave fx == Nothing
 
 -- | The same moment seen from the other era: only drawing ever sees this game.
 peekView :: Game -> Game
+-- Record update syntax produces a separate Game with just two fields changed;
+-- it neither writes into the live state nor checks whether a shift is affordable.
 peekView g = g { gEra = otherEra (gEra g), gFeedback = Nothing }
 
 -- | Said under the map once the passage is open.
@@ -247,17 +283,20 @@ lampBurning f = fnStage f == Lit || (fnStage f == Flare && fnAge f < lampDiesAt)
 
 -- | How many cells of the passage are open in this frame of an ending.
 openedCells :: Level -> Finale -> Int
+-- Ordered EndingStage constructors let s > Opening mean all later stages.
+-- During Opening each wall has its own cellOpenTick, shared with sound/rules.
 openedCells level f = case fnStage f of
   Opening -> length [ k | k <- [0 .. length (lvPassage level) - 1], fnAge f >= cellOpenTick level k ]
   s | s > Opening -> length (lvPassage level)
   _ -> 0
 
-world :: Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
-world finale scene level g fx = Pictures
+-- | The sea and the board. @deadEnd@ is as for 'render'.
+world :: (StateKey -> Bool) -> Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
+world deadEnd finale scene level g fx = Pictures
   [ seaOf scene era
   , seaLife era (fromIntegral (fxClock fx))
   , scSeaShade scene
-  , board (focusOf finale fx) (onTheBoard finale scene level g fx)
+  , board (focusOf finale fx) (onTheBoard deadEnd finale scene level g fx)
   ]
   where era = seaEra g fx
 
@@ -275,8 +314,8 @@ seaEra g fx = case fxWave fx of
   _ -> gEra g
 
 -- | Everything 'world' draws on the board, in the board's own coordinates.
-onTheBoard :: Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
-onTheBoard finale scene level g fx = Pictures
+onTheBoard :: (StateKey -> Bool) -> Maybe Finale -> Scene -> Level -> Game -> Fx -> Picture
+onTheBoard deadEnd finale scene level g fx = Pictures
   [ surfBreathing
   , shoreOf scene shownEra
   , backOf scene shownEra
@@ -336,6 +375,8 @@ onTheBoard finale scene level g fx = Pictures
     inRoom
       | roomed = Translate (negate (fromIntegral (roomX * roomCols)) * cs) (fromIntegral (roomY * roomRows) * cs)
       | otherwise = Translate cameraDX cameraDY
+    -- The following camera draws and masks the whole level. Room mode culls by
+    -- room before constructing most dynamic pictures, reducing draw calls.
     visible c = not roomed || roomOf c == shownRoom
     -- The cell as the map shows it, for anything pinned to the map's own edges.
     onScreen (x, y)
@@ -356,9 +397,10 @@ onTheBoard finale scene level g fx = Pictures
     -- The sea swings over halfway across, as most of the tiles do.
     shownEra = seaEra g fx
 
-    -- Two keepers in a level for two: the first in yellow, the second in red. The
-    -- rules speak of "the player", so the second is drawn from the swapped game.
-    keepers = (g, yellowCoat) : [ (swapKeepers g, redCoat) | isJust (gPartner g) ]
+    -- Two keepers in a level for two: the courier on WASD, the lighthouse keeper on
+    -- the arrows. The rules speak of "the player", so the second is drawn from the
+    -- swapped game.
+    keepers = (g, courierLook) : [ (swapKeepers g, keeperLook) | isJust (gPartner g) ]
 
     -- Where a keeper is drawn: their cell, plus a purely visual ease to the next.
     -- A jump through a mirror: the keeper shrinks to nothing where they stood and
@@ -367,6 +409,9 @@ onTheBoard finale scene level g fx = Pictures
       Stepping (toX, toY) left | abs (toX - fst (gCell gg)) + abs (toY - snd (gCell gg)) > 1 ->
         Just ((toX, toY), 1 - fromIntegral left / fromIntegral stepTicks)
       _ -> Nothing :: Maybe (Cell, Float)
+    -- A long step is a mirror jump, so switch positions at halfway while actor
+    -- scales down/up. Ordinary steps ease continuously but retain raw phase for
+    -- the walking gait. Pattern guards bind a value only when the match succeeds.
     walkOf gg = case gMotion gg of
       Stepping (toX, toY) _ | Just (_, p) <- jumpOf gg ->
         if p < 0.5 then (fromIntegral (fst (gCell gg)), fromIntegral (snd (gCell gg)), 0)
@@ -377,6 +422,8 @@ onTheBoard finale scene level g fx = Pictures
         in ( lerp e (fromIntegral (fst (gCell gg))) (fromIntegral toX)
            , lerp e (fromIntegral (snd (gCell gg))) (fromIntegral toY), p)
       _ -> (fromIntegral (fst (gCell gg)), fromIntegral (snd (gCell gg)), 0 :: Float)
+    -- Bump follows facing for at most four canvas units. Negate the map y
+    -- direction when adding it to upward-y picture coordinates.
     placedAt gg shake =
       let (vx, vy, _) = walkOf gg
           (px0, py0) = cellVec vx vy
@@ -388,10 +435,14 @@ onTheBoard finale scene level g fx = Pictures
     -- larger ones slide smoothly under it while the keeper stays near the centre.
     viewCols = 13 :: Float
     viewRows = 9 :: Float
+    -- Clamp the camera's top-left cell to the map edges. The outer max keeps a
+    -- smaller-than-viewport level at zero instead of scrolling it backwards.
     cameraX = max 0 (min (fromIntegral (lvWidth level) - viewCols) (visX - 6))
     cameraY = max 0 (min (fromIntegral (lvHeight level) - viewRows) (visY - 4))
     cameraDX = negate (cameraX * cs)
     cameraDY = cameraY * cs
+    -- Only selected refusals shudder, for their first 18 ticks; the amplitude
+    -- decays linearly while the sine supplies the rapid horizontal motion.
     refuseShake = case gFeedback g of
       Just (Feedback kind left)
         | refusal kind && left > blockedFeedbackTicks - 18 ->
@@ -435,7 +486,9 @@ onTheBoard finale scene level g fx = Pictures
                    | mx < fst (lvGoal level) -> DirLeft
       _ -> DirRight
     actors = Pictures (map actor keepers)
-    actor (gg, coat) =
+    -- Keep a minimum jump scale of 0.04 so the figure does not invert. A winning
+    -- keeper alone steps aside from the lamp; the partner keeps their own pose.
+    actor (gg, who) =
       let (_, _, phase) = walkOf gg
           jumpK = maybe 1 (\(_, p) -> max 0.04 (abs (1 - 2 * p))) (jumpOf gg)
           (ax, ay) = if gCell gg == gCell g then playerAt else placedAt gg (if partnerRefused then refuseShake else 0)
@@ -447,7 +500,7 @@ onTheBoard finale scene level g fx = Pictures
             | aside > 0 && aside < 1 = aside * 2
             | lampLit || isJust endFacing = 0
             | otherwise = phase
-      in at (ax + 42 * aside, ay + 6 - 26 * aside) (Scale jumpK jumpK (keeperIn coat facing stride))
+      in at (ax + 42 * aside, ay + 6 - 26 * aside) (Scale jumpK jumpK (lookWalk who facing stride))
 
     -- Mirrors stand in their own era, and their light only shows there.
     -- A mirror being pushed slides with the keeper, like a crate, and its light
@@ -465,9 +518,13 @@ onTheBoard finale scene level g fx = Pictures
               Just b -> bendMirrorArt (mEra m) (mFace m) b clock
               Nothing -> mirrorArt (mMovable m) (mEra m) (mFace m) clock)
       | (c, m) <- Map.toList (gMirrors g), visible c, eraOf c == mEra m ]
+    -- Find the first pushed-mirror position; Nothing falls back to its cell.
+    -- mfilter above retains the Maybe only if its cell agrees with this mirror.
     lookupPair c ps = case [ p | p@(c', _) <- ps, c' == c ] of
       (p : _) -> Just p
       [] -> Nothing
+    -- Draw a beam only after a push settles and outside a tile flip. beamsOf
+    -- supplies rule-derived rays; takeWhile clips them at this room's edge.
     beams = Pictures
       [ beamLight (mEra m) clock (edge c face)
                   (if null cells then edge c face else edge (last cells) face)
@@ -476,18 +533,21 @@ onTheBoard finale scene level g fx = Pictures
       , c `notElem` map fst pushedMirrors
       , (face, lit) <- beamsOf level g c
       , let cells = takeWhile visible lit ]
+    -- Convert a cell centre to its face edge; screenDir already flips map y.
     edge c face = let (x, y) = cellPos c; (ux, uy) = screenDir face in (x + half * ux, y + half * uy)
 
     -- Standing in a mirror's light: the reflection shows where its key would put
     -- the keeper, with an arrow on the key that does it, or a cross if it cannot.
+    -- Reflection and push previews require a settled actor and hide during Tab
+    -- preview: a key would act on the real era, not the era being inspected.
     reflections
       | gPhase g /= Playing || peeking g fx = Blank
       | otherwise = Pictures
           [ if jOpen j
-              then Pictures [ at (cellPos (jTarget j)) (Pictures [landingMark clock, echoFigure clock 0.9])
+              then Pictures [ at (cellPos (jTarget j)) (Pictures [landingMark clock, lookEcho who clock 0.9])
                             , at (placedAt gg 0) (jumpArrow d clock) ]
               else at (cellPos (jTarget j)) blockedLanding
-          | (gg, _) <- keepers, gMotion gg == Settled
+          | (gg, who) <- keepers, gMotion gg == Settled
           , d <- [minBound .. maxBound], Just j <- [mirrorAhead level gg d], visible (jTarget j) ]
     -- A level shown a room at a time: each doorway on to another room glows with the
     -- light of the room beyond, chevrons running out through it, so a way on never
@@ -507,6 +567,7 @@ onTheBoard finale scene level g fx = Pictures
           , openIn Past || openIn Present
           , let unseen = roomOf n `notElem` fxVisited fx
                 strength = (if unseen then 1 else 0.35) * (if openIn era then 1 else 0.4) ]
+    -- Doorway hints disappear under the room transition's dark cover.
     fadeIn = 1 - roomFadeDark fx
 
     -- Beside a movable mirror's back or side: where a push would slide it, worked
@@ -521,6 +582,8 @@ onTheBoard finale scene level g fx = Pictures
           , let pushed = tryStep level True d gg
           , gMirrors pushed /= gMirrors gg
           , Just to <- [gPushing pushed], visible to ]
+    -- Departure ring expands/fades as the landing ring contracts/brightens.
+    -- Pattern generators keep only keepers currently making a long step.
     jumpFlash = Pictures
       [ Pictures
           [ at (cellPos (gCell gg)) (Color (hexA 0xE6FAFF (0.7 * (1 - p))) (ring 28 (20 + 30 * p) 3 1))
@@ -528,6 +591,8 @@ onTheBoard finale scene level g fx = Pictures
           ]
       | (gg, _) <- keepers, Just (to, p) <- [jumpOf gg] ]
 
+    -- carrierCell may name either keeper; swapKeepers reuses the placement
+    -- calculation for the partner. A win replaces the carried glow with the lamp.
     carried = case carrierCell g of
       Just c | gPhase g /= Won ->
         let gg = if c == gCell g then g else swapKeepers g
@@ -567,12 +632,15 @@ onTheBoard finale scene level g fx = Pictures
            (crate (eraOf (cx, cy)))
       | ((cx, cy), (fx0, fy0), e) <- pushedCrates ]
     -- Only under the keepers' feet: "you can switch era right here".
-    -- In an ending the era cannot change, so there is nothing to mark.
+    -- Endings suppress these ordinary puzzle hints; their free-shift guidance
+    -- comes from the ending's own hint line.
     crossingMarks = Pictures
       [ at (cellPos c) (crossingMark (eraOf c))
       | gPhase g == Playing, not (peeking g fx), finale == Nothing
       , (gg, _) <- keepers, gMotion gg == Settled
       , let c = gCell gg, c `elem` crossings level gg ]
+    -- Collision and the pictured doors use the same combined weight set, so
+    -- crates, keepers and echoes all affect the displayed gate state.
     gates = Pictures
       [ at (cellPos c) (doorway level c (doorsOpen level (weights g)))
       | c <- Set.toList (lvDoors level), visible c, eraOf c == Present ]
@@ -591,6 +659,7 @@ onTheBoard finale scene level g fx = Pictures
           | (i, (e, c)) <- zip [0 :: Int ..] (drop 1 (gTrail g)) ] ++
           [ at (cellPos c) (Scale (0.6 + 0.4 * eraK e) (0.6 + 0.4 * eraK e) (landingMark clock))
           | Just (e, c) <- [echoLanding level g] ]
+    -- An other-era echo remains faintly visible to explain what holds a plate.
     eraK e = if e == era then 1 else 0.4
 
     -- The echo walks back along the footprints, then stays. Crossing a shift, it
@@ -601,10 +670,12 @@ onTheBoard finale scene level g fx = Pictures
         let e = smooth p
             k = lerp e (eraK e0) (eraK e1)
         in at (cellVec (lerp e (fromIntegral x0) (fromIntegral x1)) (lerp e (fromIntegral y0) (fromIntegral y1)))
-              (echoFigure clock k)
+              (lookEcho courierLook clock k)
       Nothing -> case gEcho g of
-        Just (e, c) -> at (cellPos c) (echoFigure clock (eraK e))
+        Just (e, c) -> at (cellPos c) (lookEcho courierLook clock (eraK e))
         Nothing -> Blank
+    -- The rule fills a pit as the push starts; defer its floor art until the
+    -- falling crate finishes so it does not appear to slide over a finished fill.
     filledPits = Pictures
       [ at (cellPos c) (filledPit level c)
       | c <- Set.toList (gFilled g), visible c, eraOf c == Past, not (fillingNow c) ]
@@ -614,6 +685,7 @@ onTheBoard finale scene level g fx = Pictures
       (before : _) -> c `Set.notMember` snFilled before
       [] -> False
 
+    -- Fx retains pickup position/age after the wick disappears from the board.
     burst = case fxBurst fx of
       Just b -> at (cellPos (burstCell b)) (pickupBurst (burstAge b))
       Nothing -> Blank
@@ -666,12 +738,15 @@ onTheBoard finale scene level g fx = Pictures
           cx = (mapLeft + mapRight) / 2
       in Translate cx cy (Scale s s (Translate (negate cx) (negate cy) (surfOf scene shownEra)))
 
+    -- Priority is ending guidance, free preview, known dead end, transient rule
+    -- feedback, then a contextual hint. Querying deadEnd never advances a search;
+    -- Main supplies False while its independently stepped search is unfinished.
     hintLine
       | Just f <- finale = case fnStage f of
           Beckon | gPhase g == Playing -> hintBand era (clamp01 (fromIntegral (fnAge f) / 40)) (beckonText level)
           _ -> Blank
       | peeking g fx = hintBand era 1 (peekText era)
-      | stateKey g `Set.member` scDead scene = hintBand era 1 deadEndText
+      | deadEnd (stateKey g) = hintBand era 1 deadEndText
       | otherwise = case gFeedback g of
           Just (Feedback CellCollected left) | gPhase g `elem` [Playing, Paused] ->
             hintBand era (clamp01 (fromIntegral left / 30)) pickupText
@@ -693,6 +768,7 @@ onTheBoard finale scene level g fx = Pictures
             Just h -> hintBand era 1 (hintText h)
             Nothing -> Blank
 
+    -- This overlay follows the same progress as cell flips, but changes no era.
     waveFront = case wave of
       Just w -> at (cellPos (waveOrigin w)) (waveRing t)
       Nothing -> Blank
@@ -700,11 +776,15 @@ onTheBoard finale scene level g fx = Pictures
     -- Victory: warmth under the keeper and the beams above. In an ending the lamp
     -- burns on its own clock, flares, and goes out.
     goalAt = cellPos (lvGoal level)
+    -- The light source is above the goal's floor centre, at the drawn lantern.
     lanternAt = let (gx, gy) = goalAt; (ox, oy) = lanternOffset in (gx + ox, gy + oy)
+    -- Keep the lamp's warm-up continuous across Lit -> Flare instead of resetting
+    -- it when the ending stage's local age goes back to zero.
     endAge = case finale of
       Just f | fnStage f == Lit -> fromIntegral (fnAge f)
              | fnStage f == Flare -> fromIntegral (litTicks + fnAge f)
       _ -> fromIntegral (fxEnd fx) :: Float
+    -- Extra rays grow until lampDiesAt and vanish exactly when the lamp fails.
     flareK = case finale of
       Just f | fnStage f == Flare && fnAge f < lampDiesAt -> smooth (fromIntegral (fnAge f) / fromIntegral lampDiesAt)
       _ -> 0
@@ -725,6 +805,8 @@ onTheBoard finale scene level g fx = Pictures
 
     -- The ending's own marks on the station, drawn in the present only: in the past
     -- the walls still stand.
+    -- Ending patches belong to the goal's room in the present. The Nothing/Just
+    -- wrapper decides whether these cinematic layers are active at all.
     endingOn = maybe False (const ((roomOf (lvGoal level) == shownRoom || not roomed) && shownEra == Present)) finale
     passage = lvPassage level
     way = wayCells level
@@ -783,6 +865,8 @@ onTheBoard finale scene level g fx = Pictures
             dist (ax, ay) (bx', by') = sqrt ((ax - bx') * (ax - bx') + (ay - by') * (ay - by'))
             here = (visX, visY)
             cellF (x, y) = (fromIntegral x, fromIntegral y) :: (Float, Float)
+            -- Euclidean distance is in cells. Taking the smaller shade leaves
+            -- light around either the route or the keeper, easing orientation.
             shadeOf c =
               let dWay = minimum [ dist (cellF c) (cellF w) | w <- way ]
                   dKeeper = dist (cellF c) here
@@ -791,6 +875,8 @@ onTheBoard finale scene level g fx = Pictures
                                  , x <- [roomX * roomCols .. roomX * roomCols + roomCols - 1] ]
             (ux, uy) = screenDir towardsMouth
             onWay = gCell g `elem` way
+            -- Three phases circulate arrows along the mouth direction. A sine
+            -- fades both ends of each pass; the perpendicular gives equal arms.
             chevron i =
               let p = wrap01 (clock * 0.02 + fromIntegral i / 3)
                   (cx, cy) = cellPos mouth
@@ -806,6 +892,8 @@ onTheBoard finale scene level g fx = Pictures
              | c <- roomCells, let s = shadeOf c, s > 0.02 ] ++
              [ chevron i | not onWay, fnStage f == Beckon, i <- [0 .. 2 :: Int] ]
       _ -> Blank
+    -- Separate foreground effects preserve depth: rubble/light cover the opened
+    -- wall patches while the underlying map remains the cached static scene.
     passageFx = case finale of
       Just f | endingOn -> Pictures [smoke f, leaving f, runner f, cracks f, motes f]
       _ -> Blank
@@ -814,12 +902,15 @@ onTheBoard finale scene level g fx = Pictures
       Flare | fnAge f >= lampDiesAt -> wisps (fromIntegral (fnAge f - lampDiesAt))
       Opening -> wisps (fromIntegral (flareTicks - lampDiesAt + fnAge f))
       _ -> Blank
+    -- Six staggered particles wrap at 90 ticks. Each rises and grows as it fades;
+    -- the extra 180-tick envelope lets the whole smoke plume die away.
     wisps a = Pictures
       [ at (fst lanternAt + 8 * sin (r * 0.09 + fromIntegral i), snd lanternAt + 8 + r * 0.7)
            (Color (hexA 0xB7C4C9 (0.32 * (1 - r / 90) * clamp01 (1 - a / 180))) (ngon 10 (4 + r * 0.12)))
       | i <- [0 .. 5 :: Int]
       , let r = a + fromIntegral i * 15 - 90 * fromIntegral (floor ((a + fromIntegral i * 15) / 90) :: Int)
       , a > fromIntegral i * 15 - 15 ]
+    -- Bright point plus a translucent pool, with k scaling both opacities.
     lightOrb k = Pictures [pool 0xFFE9B0 (0.6 * k) 46 46, Color (fade k (hex 0xFFFFFF)) (ngon 12 5)]
     -- The light itself leaves the lamp and slips into the wall beside the tower,
     -- where it glows through the stone until it sets off.
@@ -856,10 +947,13 @@ onTheBoard finale scene level g fx = Pictures
         , let a = fromIntegral (fnAge f - lightSetsOff - lightCellTicks * i) :: Float
         , a >= 0, a < 30 ]
       _ -> Blank
+    -- Rays extend from the cell centre before impact, then yield to the puff.
     crackLines k
       | k >= 1 = Blank
       | otherwise = Color (hexA 0xFFE2A8 (0.9 * k)) (Pictures
           [ plainSeg 2.4 (0, 0) (lerp k 0 x, lerp k 0 y) | (x, y) <- [(-26, 24), (22, 30), (30, -10), (-18, -28), (6, -34), (-34, 2)] ])
+    -- Negative age means impact has not happened. Flash for 14 ticks, then let
+    -- eight dust discs expand radially over the 30-tick lifetime set by callers.
     breakPuff a
       | a < 0 = Blank
       | otherwise = Pictures $
@@ -893,6 +987,7 @@ onTheBoard finale scene level g fx = Pictures
 -- or the other: the faint outline of the other era's ones shows where to change.
 rushWorld :: Scene -> Level -> Finale -> Game -> Fx -> Picture
 rushWorld scene level f g fx = case finaleRun level of
+  -- A malformed/missing passage has no finaleRun, so no rush geometry is drawn.
   Nothing -> Blank
   Just fr ->
     let start@(sx, sy) = gCell g
@@ -901,6 +996,8 @@ rushWorld scene level f g fx = case finaleRun level of
         era = gEra g
         len = rushLength fr start
         arriving = fnStage f == Arrival
+        -- Distances here are cells along the passage, not elapsed seconds.
+        -- Arrival pins the actor to the destination while its own age advances.
         along = if arriving then fromIntegral len else dsAlong d
         (dx, dy) = dirDelta (frDir fr)
         fdx = fromIntegral dx :: Float
@@ -931,6 +1028,8 @@ rushWorld scene level f g fx = case finaleRun level of
         y1 = ceiling (cameraY + 9) - 1 :: Int
         shown = [ (x, y) | y <- [y0 .. y1], x <- [x0 .. x1] ]
         (ex, ey) = frEdge fr
+        -- Project cell offsets onto/perpendicular to the unit cardinal direction.
+        -- Magnitudes classify the three-cell causeway and seven-cell island.
         alongOf (cx, cy) = (cx - ex) * dx + (cy - ey) * dy
         acrossOf (cx, cy) = (cx - ex) * dy + (cy - ey) * dx
         onCauseway c = alongOf c >= 1 && alongOf c <= corridorLength && abs (acrossOf c) <= 1
@@ -939,6 +1038,8 @@ rushWorld scene level f g fx = case finaleRun level of
         art = case era of
           Past -> eaDashPast (scEnding scene)
           Present -> eaDash (scEnding scene)
+        -- Map.lookup may miss cells beyond the prebaked region. The Just pattern
+        -- skips them; sea is drawn procedurally instead of as a wall tile.
         cellsShown = Pictures [ pic | c <- shown, not (isSea c), Just pic <- [Map.lookup c art] ]
 
         -- The sea, cell by cell, alive: swell lines that rise and fall, glints of
@@ -963,6 +1064,8 @@ rushWorld scene level f g fx = case finaleRun level of
           | c@(cx, cy) <- seaCells
           , let k = max 0 (sin (clock * (if era == Past then 0.07 else 0.11) + rnd cx cy 33 * 6.28)) ] ++
           [ foamEdge c n | c <- seaCells, n <- [minBound .. maxBound], not (isSea (stepCell n c)) ]
+        -- Sine rates below are radians per tick. Higher present rates and crest
+        -- lift distinguish storm water; deterministic rnd anchors details to cells.
         swell = if era == Past then 0.02 else 0.045
         third = cs / 3
         (swellLit, swellK, swellSpeed) = case era of
@@ -978,6 +1081,7 @@ rushWorld scene level f g fx = case finaleRun level of
           in at (cellPos c) (Translate (ux * (half - 6)) (uy * (half - 6)) (Pictures
                [ Color (hexA foamC (0.25 + 0.3 * pulse)) (if ux /= 0 then rectC 5 cs else rectC cs 5)
                , Translate (-ux * 10) (-uy * 10) spray ]))
+        -- Five expanding droplets fade over a normalised burst fraction 0 to 1.
         sprayBurst p = Pictures
           [ Translate (fromIntegral (j - 2) * 12 + 4 * sin (fromIntegral j)) (-(p * 26) + fromIntegral (j `mod` 2) * 6)
               (Color (hexA 0xE6F0F2 (0.55 * (1 - p))) (ngon 8 (4 + p * 9)))
@@ -997,6 +1101,8 @@ rushWorld scene level f g fx = case finaleRun level of
         (capC, capHi) = case era of
           Past -> (hex 0xC6A679, hex 0xE8D3A8)
           Present -> (hex 0x5D6B72, hex 0x83929A)
+        -- Project the continuous actor position, so lamps light smoothly before
+        -- the actor crosses their integer row rather than popping at cell edges.
         keeperAlong = (kx - fromIntegral ex) * fdx + (ky - fromIntegral ey) * fdy
         lamps = Pictures
           [ at (lx + fdy * fromIntegral side * (half - 4), ly - fdx * fromIntegral side * (half - 4))
@@ -1020,6 +1126,8 @@ rushWorld scene level f g fx = case finaleRun level of
         beam = at lanternAt (Rotate (clock * 0.55) (Pictures
           [ Color (hexA 0xFFE9B0 (if era == Past then 0.08 else 0.17)) (Polygon [(0, -6), (2600, -300), (2600, 300), (0, 6)])
           , Color (hexA 0xFFF6DD (if era == Past then 0.06 else 0.13)) (Polygon [(0, -3), (2600, -110), (2600, 110), (0, 3)]) ]))
+        -- Speed is cells per tick. Suppress streaks below 30% of top speed, then
+        -- scale their opacity to full; length is a short canvas-space motion trail.
         speedK = clamp01 ((dsSpeed d / dashTopSpeed - 0.3) / 0.7)
         trail = dsSpeed d * cs * 3.4
         streaks
@@ -1033,9 +1141,13 @@ rushWorld scene level f g fx = case finaleRun level of
                     px = qx - 30 + 60 * rnd cx cy 62
                     py = qy - 30 + 60 * rnd cx cy 63 ])
         running = dsSpeed d > 0.01 && not arriving
+        -- One gait cycle per two travelled cells, so faster travel animates feet
+        -- faster without a second time counter.
         stride = if running then let s = along / 2 in s - fromIntegral (floor s :: Int) else 0
         bump = if dsBlocked d then 3 * sin (fromIntegral (fxClock fx) * 0.9) else 0
         keeperPos = let (px, py) = cellVec kx ky in (px - fdx * bump, py + 6 + fdy * bump)
+        -- The rush keeps its own shift age/refusal timer instead of gMotion.
+        -- Effects use those timers so they match the ending's separate rules.
         ripple
           | dsShifted d < shiftTicks = at keeperPos (waveRing (fromIntegral (dsShifted d) / fromIntegral shiftTicks))
           | otherwise = Blank
@@ -1054,7 +1166,9 @@ rushWorld scene level f g fx = case finaleRun level of
                     h = mapTop - mapBottom
                     x = mapLeft + wrapTo w (w * rnd i 1 8 - clock * speed * 0.45)
                     y = mapBottom + wrapTo h (h * rnd i 4 8 - clock * speed) ]
+        -- Wrap into [0,size), including negative falling-rain positions.
         wrapTo size v = v - size * fromIntegral (floor (v / size) :: Int)
+        -- A two-part flash every 330 ticks (5.5 seconds) in the present only.
         flashK
           | era /= Present = 0
           | otherwise = let t = fxClock fx `mod` 330 in
@@ -1063,6 +1177,8 @@ rushWorld scene level f g fx = case finaleRun level of
         -- Taken back: the screen goes dark, and lightens on the last barrier passed.
         caughtK = if dsCaught d > 0 then 1 - abs (fromIntegral (dsCaught d) - fromIntegral catchTicks / 2) / (fromIntegral catchTicks / 2) else 0
         caughtDark = if caughtK > 0 then Color (hexA 0x05080A (0.92 * smooth caughtK)) (rect mapLeft mapBottom (mapRight - mapLeft) (mapTop - mapBottom)) else Blank
+        -- Introduce the viewport mask as scrolling leaves the original room.
+        -- Fade the station's residual darkness with progress along the rush.
         offset = max (abs (cameraX - bx)) (abs (cameraY - by))
         maskK = smooth (min 1 (offset * 3))
         darkK = 0.13 * (1 - smooth (along / fromIntegral (max 1 len) * 1.3))
@@ -1090,7 +1206,7 @@ rushWorld scene level f g fx = case finaleRun level of
              , if arriving then at lanternAt (victoryRays clock (smooth (arrivingAge / 50))) else Blank
              , ripple
              , refusedRing
-             , at keeperPos (keeper (frDir fr) stride)
+             , at keeperPos (lookWalk courierLook (frDir fr) stride)
              ])
          , ambient era clock 1
          , rain
@@ -1114,6 +1230,8 @@ rushHint fr start era d
   | dsFails d == 0 && firstAhead = hintBand era 1 "Out here, SPACE changes era for nothing.   Watch the way ahead."
   | otherwise = Blank
   where
+    -- Teach the first barrier only while close to it, and only before any failure.
+    -- Empty barrier lists need no introduction.
     firstAhead = case barriersFrom fr start of
       (a, _) : _ -> dsAlong d > a - 7 && dsAlong d < a + 0.75
       [] -> False
@@ -1140,7 +1258,9 @@ endingFrame scene level (number, name) f g fx = Pictures
     onlyIf p c = if c then p else Blank
     scenePic
       | stage >= Rush = rushWorld scene level f g fx
-      | otherwise = world (Just f) scene level g fx
+      -- An ending's hint line only ever shows the way on, never that the level is
+      -- lost, so it needs no dead ends.
+      | otherwise = world (const False) (Just f) scene level g fx
     -- The last plate of the hall, and then the lamp takes it back.
     plate = case stage of
       Lit -> endedPlate (smooth ((ageF - 70) / 30)) (gRemaining g)
@@ -1152,6 +1272,8 @@ endingFrame scene level (number, name) f g fx = Pictures
                               , let a = fromIntegral (age - cellOpenTick level k), a >= 0, a < 10 ])
       Flare | age >= lampDiesAt && age < lampDiesAt + 8 -> 3
       _ -> 0
+    -- Different sine/cosine rates avoid a straight-line shake; units are canvas
+    -- displacement, and the amplitude above decays over each short impact.
     shakeX = shakeAmp * sin (ageF * 2.3)
     shakeY = shakeAmp * cos (ageF * 3.1)
     -- The flare whites out everything, the panel too, and under it the lamp dies.
@@ -1194,6 +1316,8 @@ viewportMaskK k era = Color (fade k outside) (Pictures
   , rect mapLeft (mapBottom - canvasH) (mapRight - mapLeft) canvasH
   ])
   where
+    -- Match the surrounding era's sea-dark palette, rather than clipping with
+    -- a hard black rectangle on the warmer past background.
     outside = case era of
       Past -> hex 0x102F36
       Present -> hex 0x050A0D
@@ -1218,6 +1342,8 @@ flipOf w (x, y) = clamp01 ((waveProgress w - delay) / 0.3)
   where
     (ox, oy) = waveOrigin w
     d = sqrt (fromIntegral ((x - ox) * (x - ox) + (y - oy) * (y - oy))) :: Float
+    -- Distance is in cells. Across 13 cells, delay consumes 70% of the wave;
+    -- each tile's own flip occupies 30%. Clamp keeps distant cells at an endpoint.
     delay = 0.7 * d / 13
 
 -- | The cells: a single cached picture at rest; a flipping crowd during a wave.
@@ -1226,6 +1352,9 @@ stationCells scene room g fx = case fxWave fx of
   Nothing -> wholeOf scene (gEra g) room
   Just w -> Pictures (zipWith (flipped w) (cellsOf scene (waveFrom w) room) (cellsOf scene (gEra g) room))
   where
+    -- Both lists were built in the same row-major order by mkScene. Squash to
+    -- zero width at halfway, switch era edge-on, then widen; the sine glint hides
+    -- the abrupt texture change. The dark tile underneath prevents a hole.
     flipped w (c, old) (_, new) =
       let p = flipOf w c
           squash = abs (1 - 2 * p)
@@ -1237,6 +1366,8 @@ stationCells scene room g fx = case fxWave fx of
            , if shine > 0.02 then Color (hexA 0xFFFFFF (0.3 * shine)) (rectC (cs * squash) cs) else Blank
            ])
 
+-- | Board-space pause/win/loss panels, eased with Fx timers. The ordinary win
+-- waits 70 ticks before fading in; all other phases contribute no panel.
 overlays :: Scene -> Game -> Fx -> Picture
 overlays scene g fx = case gPhase g of
   Paused -> pausedScreen (gEra g) (smooth (fromIntegral (fxPaused fx) / 8))

@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# OPTIONS_HADDOCK hide #-}
 
@@ -13,6 +14,10 @@ import Graphics.Gloss.Internals.Data.Picture
 import Graphics.Gloss.Internals.Data.Color
 import System.Mem.StableName
 import Foreign.ForeignPtr
+import Foreign.Marshal.Alloc                            (free)
+import Foreign.Marshal.Array                            (mallocArray)
+import Foreign.Ptr                                      (plusPtr)
+import Foreign.Storable                                 (pokeElemOff)
 import Data.IORef
 import Data.List
 import Control.Monad
@@ -20,6 +25,47 @@ import Graphics.Rendering.OpenGL                        (($=), get)
 import qualified Graphics.Rendering.OpenGL.GL           as GL
 import qualified Graphics.Rendering.OpenGL.GLU.Errors   as GLU
 import qualified Graphics.UI.GLUT                       as GLUT
+
+
+-- [Note: Batching, patched for Borrowed Light]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Gloss used to draw every convex polygon on its own: glBegin GL_POLYGON, one
+-- glVertex call per corner, glEnd, with glColor4f before and after every Color
+-- node. The game draws about four thousand polygons a frame, and those calls,
+-- not the drawing itself, set its frame rate.
+--
+-- Now a convex polygon is not drawn on the spot. It is cut into the triangle fan
+-- (p0 p1 p2) (p0 p2 p3) ... (p0 p[n-2] p[n-1]) and written, each corner with the
+-- colour it is drawn in, into a buffer (the 'Batch'). Whatever is waiting there is
+-- drawn with one glDrawArrays GL_TRIANGLES as soon as anything else has to happen
+-- in OpenGL: a line, circle, text, bitmap or non-convex polygon is drawn (those
+-- still go straight to OpenGL), a transform pushes or pops the matrix, the buffer
+-- is full, or the frame ends. The image does not change, for these reasons:
+--
+--   * Same shapes. OpenGL draws a convex GL_POLYGON as exactly the region the
+--     fan of triangles from its first corner covers, and the rasteriser's rules
+--     for shared edges give every pixel of that region to exactly one triangle:
+--     no pixel is drawn twice (which would show through alpha blending) and none
+--     is missed. (Drivers commonly draw GL_POLYGON as this very fan themselves;
+--     screenshots of the game before and after this change match pixel for
+--     pixel.)
+--
+--   * Same colours. Each corner carries the colour Gloss would have made current
+--     with glColor4f for that polygon, the same four floats, so each vertex
+--     reaches OpenGL with the same colour as before.
+--
+--   * Same order. Triangles in one glDrawArrays are drawn in the order they are
+--     in the buffer, which is the order of the picture, and the batch is drawn
+--     before anything that is not in it. Blending sees the same sequence.
+--
+--   * Same transform. A batch is drawn before every push and pop of the matrix,
+--     so all its triangles are drawn under the matrix they were meant for.
+--
+-- The colour OpenGL has current is now set only when something drawn straight
+-- to OpenGL needs it (see 'useColour'), and after a glDrawArrays with a colour
+-- array it is unknown (OpenGL leaves it undefined), so it is set again before
+-- the next such drawing. At the end of the frame it is put back to what it was
+-- at the start, as Gloss's own restores used to leave it.
 
 
 -- | Render a picture into the current OpenGL context.
@@ -41,14 +87,65 @@ renderPicture state circScale picture
 
         -- Draw the picture
         checkErrors "before drawPicture."
-        drawPicture state circScale picture
+        -- Patched for Borrowed Light: the current colour is asked of OpenGL once per
+        -- frame, here, and then carried down the picture as an argument. Gloss used
+        -- to ask for it again at every Color node (and every matrix push asked for
+        -- the matrix mode), and each of those queries can make the driver finish the
+        -- work queued so far before it answers. With a few thousand of them in a
+        -- frame, the queries, not the drawing, set the frame rate.
+        initial <- get GL.currentColor
+
+        -- Patched for Borrowed Light: the batch of convex polygons (see [Note:
+        -- Batching]) is read from two client-side arrays, positions and colours,
+        -- interleaved in one buffer. They are switched on for the frame and off at
+        -- its end. Drawing with glBegin/glEnd, as everything outside the batch
+        -- still does, does not read them.
+        glColour <- newIORef (Just initial)
+        let ctx = Ctx state glColour
+        GL.clientState GL.VertexArray $= GL.Enabled
+        GL.clientState GL.ColorArray  $= GL.Enabled
+
+        drawPicture ctx circScale initial picture
+
+        -- Draw what is still waiting, then leave OpenGL as Gloss used to: no
+        -- arrays switched on, and the colour that was current at the start.
+        flushBatch ctx
+        GL.clientState GL.VertexArray $= GL.Disabled
+        GL.clientState GL.ColorArray  $= GL.Disabled
+        known   <- readIORef glColour
+        when (known /= Just initial)
+         $ GL.currentColor $= initial
+
+        -- Forget the tessellations of polygons not drawn this frame.
+        ageTessCache (stateTessCache state)
+
         checkErrors "after drawPicture."
 
 
-drawPicture :: State -> Float -> Picture -> IO ()
-drawPicture state circScale picture
+-- | Patched for Borrowed Light: what drawing a frame needs besides the picture.
+data Ctx
+        = Ctx
+        { -- | The render state, which holds the batch and the tessellation cache.
+          ctxState      :: !State
+
+          -- | The colour OpenGL has current, when it is known: 'Nothing' after a
+          --   batch was drawn, since a colour array leaves it undefined.
+        , ctxGLColour   :: !(IORef (Maybe (GL.Color4 GL.GLfloat))) }
+
+
+-- | Draw one picture. @colour@ is the colour it is drawn in: the colour of the
+--   innermost 'Color' node above it, or the frame's starting colour.
+--
+--   Patched for Borrowed Light: the colour is no longer made current in OpenGL
+--   at every 'Color' node (and restored after it). Convex polygons carry it into
+--   the batch, and everything drawn straight to OpenGL calls 'useColour' first,
+--   which sets it only when OpenGL's current colour is different.
+--   Every branch leaves the matrix as it found it.
+drawPicture :: Ctx -> Float -> GL.Color4 GL.GLfloat -> Picture -> IO ()
+drawPicture ctx circScale colour picture
  = {-# SCC "drawComponent" #-}
-   case picture of
+   let state = ctxState ctx
+   in case picture of
 
         -- nothin'
         Blank
@@ -56,112 +153,129 @@ drawPicture state circScale picture
 
         -- line
         Line path
-         -> GL.renderPrimitive GL.LineStrip
-                $ vertexPFs path
+         -> do  direct ctx colour
+                GL.renderPrimitive GL.LineStrip
+                 $ vertexPFs path
 
         -- polygon (where?)
         Polygon path
          | stateWireframe state
-         -> GL.renderPrimitive GL.LineLoop
-                $ vertexPFs path
+         -> do  direct ctx colour
+                GL.renderPrimitive GL.LineLoop
+                 $ vertexPFs path
 
+         -- Patched for Borrowed Light: a convex polygon goes into the batch, where
+         -- it used to be drawn on its own as GL_POLYGON. See [Note: Batching].
+         | isConvex path
+         -> addFan ctx colour path
+
+         -- Patched for Borrowed Light: a polygon that is not convex is drawn as
+         -- before, as GLU's triangles, but the triangles come from the cache when
+         -- the same polygon was drawn in this frame or the last one.
          | otherwise
-         -> renderComplexPolygon path
+         -> do  triangles <- tessellation (stateTessCache state) path
+                direct ctx colour
+                GL.renderPrimitive GL.Triangles
+                 $ mapM_ GL.vertex triangles
 
         -- circle
         Circle radius
-         ->  renderCircle 0 0 circScale radius 0
+         ->  direct ctx colour >> renderCircle 0 0 circScale radius 0
 
         ThickCircle radius thickness
-         ->  renderCircle 0 0 circScale radius thickness
+         ->  direct ctx colour >> renderCircle 0 0 circScale radius thickness
 
         -- arc
         Arc a1 a2 radius
-         ->  renderArc 0 0 circScale radius a1 a2 0
+         ->  direct ctx colour >> renderArc 0 0 circScale radius a1 a2 0
 
         ThickArc a1 a2 radius thickness
-         ->  renderArc 0 0 circScale radius a1 a2 thickness
+         ->  direct ctx colour >> renderArc 0 0 circScale radius a1 a2 thickness
 
         -- stroke text
         --      text looks weird when we've got blend on,
         --      so disable it during the renderString call.
         Text str
          -> do
+                direct ctx colour
                 GL.blend        $= GL.Disabled
                 GL.preservingMatrix $ GLUT.renderString GLUT.Roman str
                 GL.blend        $= GL.Enabled
 
         -- colors with float components.
+        -- Patched for Borrowed Light: the colour is passed down rather than made
+        -- current here; see 'drawPicture'.
         Color col p
          |  stateColor state
-         ->  do oldColor         <- get GL.currentColor
-
-                let RGBA r g b a  = col
-
-                GL.currentColor  $= GL.Color4 (gf r) (gf g) (gf b) (gf a)
-                drawPicture state circScale p
-                GL.currentColor  $= oldColor
+         ->  do let RGBA r g b a  = col
+                drawPicture ctx circScale (GL.Color4 (gf r) (gf g) (gf b) (gf a)) p
 
          |  otherwise
-         ->     drawPicture state circScale p
+         ->     drawPicture ctx circScale colour p
 
 
         -- Translation --------------------------
         -- Easy translations are done directly to avoid calling GL.perserveMatrix.
         Translate posX posY (Circle radius)
-         -> renderCircle posX posY circScale radius 0
+         -> direct ctx colour >> renderCircle posX posY circScale radius 0
 
         Translate posX posY (ThickCircle radius thickness)
-         -> renderCircle posX posY circScale radius thickness
+         -> direct ctx colour >> renderCircle posX posY circScale radius thickness
 
         Translate posX posY (Arc a1 a2 radius)
-         -> renderArc posX posY circScale radius a1 a2 0
+         -> direct ctx colour >> renderArc posX posY circScale radius a1 a2 0
 
         Translate posX posY (ThickArc a1 a2 radius thickness)
-         -> renderArc posX posY circScale radius a1 a2 thickness
+         -> direct ctx colour >> renderArc posX posY circScale radius a1 a2 thickness
 
+        -- Patched for Borrowed Light: the transforms push and pop the matrix
+        -- with 'GL.unsafePreservingMatrix', which skips the query of the matrix
+        -- mode that 'GL.preservingMatrix' makes every time. That is safe here:
+        -- drawing a picture never changes the matrix mode, and an exception while
+        -- drawing ends the program anyway. 'transformed' also draws the batch
+        -- before each push and each pop; see [Note: Batching].
         Translate tx ty (Rotate deg p)
-         -> GL.preservingMatrix
+         -> transformed ctx
           $ do  GL.translate (GL.Vector3 (gf tx) (gf ty) 0)
                 GL.rotate    (gf deg) (GL.Vector3 0 0 (-1))
-                drawPicture state circScale p
+                drawPicture ctx circScale colour p
 
         Translate tx ty p
-         -> GL.preservingMatrix
+         -> transformed ctx
           $ do  GL.translate (GL.Vector3 (gf tx) (gf ty) 0)
-                drawPicture state circScale p
+                drawPicture ctx circScale colour p
 
         -- Rotation -----------------------------
         -- Easy rotations are done directly to avoid calling GL.perserveMatrix.
         Rotate _   (Circle radius)
-         -> renderCircle   0 0 circScale radius 0
+         -> direct ctx colour >> renderCircle   0 0 circScale radius 0
 
         Rotate _   (ThickCircle radius thickness)
-         -> renderCircle   0 0 circScale radius thickness
+         -> direct ctx colour >> renderCircle   0 0 circScale radius thickness
 
         Rotate deg (Arc a1 a2 radius)
-         -> renderArc      0 0 circScale radius (a1-deg) (a2-deg) 0
+         -> direct ctx colour >> renderArc      0 0 circScale radius (a1-deg) (a2-deg) 0
 
         Rotate deg (ThickArc a1 a2 radius thickness)
-         -> renderArc      0 0 circScale radius (a1-deg) (a2-deg) thickness
+         -> direct ctx colour >> renderArc      0 0 circScale radius (a1-deg) (a2-deg) thickness
 
 
         Rotate deg p
-         -> GL.preservingMatrix
+         -> transformed ctx
           $ do  GL.rotate (gf deg) (GL.Vector3 0 0 (-1))
-                drawPicture state circScale p
+                drawPicture ctx circScale colour p
 
         -- Scale --------------------------------
         Scale sx sy p
-         -> GL.preservingMatrix
+         -> transformed ctx
           $ do  GL.scale (gf sx) (gf sy) 1
                 let mscale      = max sx sy
-                drawPicture state (circScale * mscale) p
+                drawPicture ctx (circScale * mscale) colour p
 
         Bitmap imgData ->
           let (width, height) = bitmapSize imgData
           in
-            drawPicture state circScale $
+            drawPicture ctx circScale colour $
               BitmapSection (rectAtOrigin width height) imgData
 
         BitmapSection
@@ -205,6 +319,10 @@ drawPicture state circScale picture
                       BottomToTop -> defTexCoords
                       TopToBottom -> reverse defTexCoords
 
+            -- Patched for Borrowed Light: the batch is drawn first, so the bitmap
+            -- lands on top of what was drawn before it.
+            flushBatch ctx
+
             -- Load the image data into a texture,
             -- or grab it from the cache if we've already done that before.
             tex     <- loadTexture (stateTextures state) imgData cacheMe
@@ -221,9 +339,11 @@ drawPicture state circScale picture
             -- Set current texture
             GL.textureBinding GL.Texture2D $= Just (texObject tex)
 
-            -- Set to opaque
-            oldColor <- get GL.currentColor
-            GL.currentColor $= GL.Color4 1.0 1.0 1.0 1.0
+            -- Set to opaque. (Patched for Borrowed Light: through 'useColour', so
+            -- that what follows knows OpenGL's colour is now white. Gloss used to
+            -- restore the previous colour afterwards; now whatever is drawn next
+            -- sets the colour it needs.)
+            useColour ctx (GL.Color4 1.0 1.0 1.0 1.0)
 
             -- Draw textured polygon
             GL.renderPrimitive GL.Polygon $
@@ -234,9 +354,6 @@ drawPicture state circScale picture
                 GL.texCoord $ GL.TexCoord2 (gf textureCoordX) (gf textureCoordY)
                 GL.vertex   $ GL.Vertex2   (gf polygonCoordX) (gf polygonCoordY)
 
-            -- Restore color
-            GL.currentColor $= oldColor
-
             -- Disable texturing
             GL.texture GL.Texture2D $= GL.Disabled
 
@@ -244,7 +361,119 @@ drawPicture state circScale picture
             freeTexture tex
 
         Pictures ps
-         -> mapM_ (drawPicture state circScale) ps
+         -> mapM_ (drawPicture ctx circScale colour) ps
+
+
+-- Batching (patched for Borrowed Light) --------------------------------------
+-- | Get OpenGL ready to draw something straight away, not through the batch:
+--   draw the batch first, so that what comes next lands on top of it, then make
+--   the colour current.
+direct :: Ctx -> GL.Color4 GL.GLfloat -> IO ()
+direct ctx colour
+ = do   flushBatch ctx
+        useColour ctx colour
+{-# INLINE direct #-}
+
+
+-- | Make this the colour OpenGL draws with, unless it already is.
+useColour :: Ctx -> GL.Color4 GL.GLfloat -> IO ()
+useColour ctx colour
+ = do   known   <- readIORef (ctxGLColour ctx)
+        when (known /= Just colour)
+         $ do   GL.currentColor $= colour
+                writeIORef (ctxGLColour ctx) (Just colour)
+
+
+-- | Draw a picture under a pushed matrix: the batch is drawn before the push,
+--   with the matrix its triangles were written under, and again before the pop,
+--   with the matrix of the picture inside.
+transformed :: Ctx -> IO () -> IO ()
+transformed ctx action
+ = do   flushBatch ctx
+        GL.unsafePreservingMatrix
+         $ do   action
+                flushBatch ctx
+
+
+-- | Add a convex polygon to the batch as the fan of triangles from its first
+--   corner, every vertex in this colour. A polygon with fewer than three corners
+--   adds nothing, as GL_POLYGON draws nothing for it.
+addFan :: Ctx -> GL.Color4 GL.GLfloat -> [(Float, Float)] -> IO ()
+addFan ctx (GL.Color4 r g b a) path
+ = case path of
+    p0 : p1 : rest@(_ : _)
+     -> do  -- n corners make n - 2 triangles, three vertices each.
+            let needed  = 3 * length rest
+                batch   = stateBatch (ctxState ctx)
+            reserve ctx needed
+            used    <- readIORef (batchUsed batch)
+            ptr     <- readIORef (batchPtr batch)
+
+            let -- Write one vertex, position then colour, into slot i.
+                vertex :: Int -> (Float, Float) -> IO ()
+                vertex i (x, y)
+                 = do   let o = 6 * i
+                        pokeElemOff ptr o       (gf x)
+                        pokeElemOff ptr (o + 1) (gf y)
+                        pokeElemOff ptr (o + 2) r
+                        pokeElemOff ptr (o + 3) g
+                        pokeElemOff ptr (o + 4) b
+                        pokeElemOff ptr (o + 5) a
+
+                -- The triangles (p0, previous, next) along the rest of the path.
+                fan :: Int -> (Float, Float) -> [(Float, Float)] -> IO Int
+                fan !i previous (next : more)
+                 = do   vertex i       p0
+                        vertex (i + 1) previous
+                        vertex (i + 2) next
+                        fan (i + 3) next more
+                fan !i _ []
+                 =      return i
+
+            end     <- fan used p1 rest
+            writeIORef (batchUsed batch) end
+
+    _ -> return ()
+
+
+-- | Make room in the batch for this many more vertices: draw what is waiting
+--   if it would not fit, and grow the buffer if even an empty one is too small.
+reserve :: Ctx -> Int -> IO ()
+reserve ctx needed
+ = do   let batch       = stateBatch (ctxState ctx)
+        used    <- readIORef (batchUsed batch)
+        cap     <- readIORef (batchCap batch)
+        when (used + needed > cap)
+         $ do   flushBatch ctx
+                when (needed > cap)
+                 $ do   let cap'        = max needed (2 * cap)
+                        old     <- readIORef (batchPtr batch)
+                        free old
+                        new     <- mallocArray (6 * cap')
+                        writeIORef (batchPtr batch) new
+                        writeIORef (batchCap batch) cap'
+
+
+-- | Draw the triangles waiting in the batch, if any, with one glDrawArrays.
+flushBatch :: Ctx -> IO ()
+flushBatch ctx
+ = do   let batch       = stateBatch (ctxState ctx)
+        used    <- readIORef (batchUsed batch)
+        when (used > 0)
+         $ do   ptr     <- readIORef (batchPtr batch)
+                -- Six floats (24 bytes) a vertex: x y at the start, r g b a after.
+                GL.arrayPointer GL.VertexArray
+                        $= GL.VertexArrayDescriptor 2 GL.Float 24 ptr
+                GL.arrayPointer GL.ColorArray
+                        $= GL.VertexArrayDescriptor 4 GL.Float 24 (ptr `plusPtr` 8)
+                GL.drawArrays GL.Triangles 0 (fromIntegral used)
+
+                -- OpenGL has read the arrays by the time glDrawArrays returns, so
+                -- the buffer can be written again at once.
+                writeIORef (batchUsed batch) 0
+
+                -- After drawing from a colour array the current colour is undefined.
+                writeIORef (ctxGLColour ctx) Nothing
 
 -- Errors ---------------------------------------------------------------------
 checkErrors :: String -> IO ()

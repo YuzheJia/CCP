@@ -1,10 +1,20 @@
+{-# OPTIONS_GHC -fno-omit-yields #-}
 {-# LANGUAGE BangPatterns, FlexibleContexts #-}
 -- | Every sound in the game, made from oscillators, noise and filters at startup.
--- Like the art, nothing is loaded from a file.
+-- These effects are generated rather than loaded from files; the opening film's
+-- separate soundtrack is decoded by Video, outside this module.
 --
 -- A sound is an array of samples at 'sampleRate', mono, roughly -1 to 1. Each
 -- one-shot is normalised, so 'Audio' sets how loud it plays; each bed loops without
 -- a seam.
+-- Audio selects recipes and sends the returned left/right arrays to its mixer;
+-- Game.Sound decides when to play them. Synthesis never advances the game or
+-- performs playback. Durations are seconds, frequencies/cutoffs are hertz, phase
+-- is cycles (0 to 1), delays inside filters are samples, and gains are linear.
+-- Sample buffers are zero-based unboxed arrays, avoiding a heap object per sample.
+-- ST permits local mutation while runSTUArray returns a pure immutable signal.
+-- Bang patterns force loop accumulators, keeping long sounds from building lazy
+-- arithmetic chains. The yield option lets lengthy background synthesis yield.
 module Synth
   ( Sound (..)
   , Signal
@@ -25,22 +35,33 @@ import Data.Word (Word32)
 import Game.Run (lampDiesAt)
 import Game.Types (ticksPerSecond)
 
+-- | Sound identifiers in cache/enumeration order. Derived Eq/Ord compare these
+-- tags, Show names WAV dumps, and Enum/Bounded let Audio enumerate the bank.
+-- isBed and isEnding rely on the order of the following constructor groups.
 data Sound
   -- In a level
   = StepPast | StepPresent | Push | MirrorPush | PitFill | Jump | JumpTurn
+    -- ^ Dry/wet footfall, crate/sled scrape, pit impact, straight/corner jump.
   | ShiftPast | ShiftPresent | Pickup | Lamp | Lose | Bump | Refused
+    -- ^ Era waves, wick pickup, lit lamp, timeout, collision and refused shift.
   | Undo | Restart | Room | PauseOn | PauseOff
+    -- ^ Rewind, fresh attempt, room crossing, pause and resume.
   -- The title and the hall
-  | MenuMove | MenuEnter | MenuBack
-  -- The courier's talk
-  | TalkBlip | TalkOpen | TalkClose
+  | MenuMove | MenuEnter | MenuBack -- ^ Selection, acceptance and return cues.
+  -- The courier's talk, and her orders
+  | TalkBlip | TalkOpen | TalkClose | Print | TearBit | Tear
+    -- ^ Typed letter, panel arrival/departure, ticket printing, notch and tear.
   -- The ending
   | Flare | LampDies | LightGoes | WallBreak | RushBegins | Barrier | BarrierPassed
+    -- ^ Rising lamp, its failure, departing light, rubble, rush and obstacle cues.
   | Caught | LampCatch | Thunder | Arrival | Card
+    -- ^ Falling behind, corridor lamp, storm, destination and next-level card.
   -- Beds, which loop
   | BedSea | BedStorm | BedBeam | BedDrone | BedWind | BedPulse
+    -- ^ Looping calm/storm sea, travelling light, waiting drone, rush air and beat.
   deriving (Eq, Ord, Show, Enum, Bounded)
 
+-- | Identify looping beds by their contiguous final range of constructors.
 isBed :: Sound -> Bool
 isBed s = s >= BedSea
 
@@ -48,11 +69,15 @@ isBed s = s >= BedSea
 isEnding :: Sound -> Bool
 isEnding s = (s >= Flare && s <= Card) || s `elem` [BedBeam, BedDrone, BedWind, BedPulse]
 
+-- | Source samples per second, 44.1 kHz; Audio/mixer use this same rate.
 sampleRate :: Int
 sampleRate = 44100
 
+-- | A mono, zero-based buffer of linear amplitudes. Intermediate mixes may exceed
+-- [-1,1]; render normalises the completed stereo pair before playback.
 type Signal = UArray Int Float
 
+-- | Floating-point sample rate for converting sample indices into seconds.
 sr :: Float
 sr = fromIntegral sampleRate
 
@@ -61,9 +86,12 @@ sr = fromIntegral sampleRate
 -- Each takes whole signals and gives a new one, so a sound reads as a recipe. Inside,
 -- each is one strict loop over an unboxed array.
 
+-- | Round seconds to a sample count; negative durations produce zero samples.
 samplesIn :: Float -> Int
 samplesIn d = max 0 (round (d * sr))
 
+-- | Sample count for a zero-based signal, including zero for bounds (0,-1).
+-- This assumes the Signal convention; it is not a general array-size function.
 len :: Signal -> Int
 len s = let (_, hi) = bounds s in hi + 1
 
@@ -75,12 +103,18 @@ newSignal n = newArray (0, n - 1) 0
 build :: Int -> (STUArray s Int Float -> Int -> ST s Float) -> ST s (STUArray s Int Float)
 build n f = do
   a <- newSignal n
+  -- forM_ sequences writes and discards their () results. f may read only earlier
+  -- samples if it wants causal feedback; each result is written at its own index.
   forM_ [0 .. n - 1] $ \i -> f a i >>= unsafeWrite a i
   pure a
 
+-- | Produce n samples from their integer indices. No earlier sample is needed;
+-- runSTUArray hides the mutable buffer and hands it over as an immutable array.
 generate :: Int -> (Int -> Float) -> Signal
 generate n f = runSTUArray (build n (\_ i -> pure (f i)))
 
+-- | Read a sample, treating indices before/after the buffer as silence. Used
+-- for delay padding; hot loops with proven bounds instead use unsafeAt.
 at :: Signal -> Int -> Float
 at s i = if i >= 0 && i < len s then unsafeAt s i else 0
 
@@ -89,6 +123,9 @@ osc :: (Float -> Float) -> (Float -> Float) -> Float -> Signal
 osc wave freq d = runSTUArray $ do
   let n = samplesIn d
   a <- newSignal n
+  -- Integrate frequency: hertz / samples-per-second gives cycles per sample.
+  -- Merely evaluating sin(freq(t)*t) would give the wrong pitch on a sweep.
+  -- Subtract floor each step to wrap phase and avoid unbounded phase growth.
   let go !i !p = when (i < n) $ do
         let q0 = p + freq (fromIntegral i / sr) / sr
             q = q0 - fromIntegral (floor q0 :: Int)
@@ -97,6 +134,8 @@ osc wave freq d = runSTUArray $ do
   go 0 0
   pure a
 
+-- | Unit-period wave shapes: sine maps cycles to radians, triangle reaches +1
+-- at the wrap and -1 halfway through. Both return amplitudes in [-1,1].
 sine, tri :: Float -> Float
 sine p = sin (2 * pi * p)
 tri p = 4 * abs (p - 0.5) - 1
@@ -105,6 +144,8 @@ tri p = 4 * abs (p - 0.5) - 1
 square :: Float -> Float
 square p = if p < 0.5 then 1 else -1
 
+-- | A waveform at constant frequency f hertz for the supplied duration seconds.
+-- Partial application supplies osc with a time-independent frequency function.
 tone :: (Float -> Float) -> Float -> Float -> Signal
 tone wave f = osc wave (const f)
 
@@ -113,6 +154,9 @@ noise :: Int -> Float -> Signal
 noise seed d = runSTUArray $ do
   let n = samplesIn d
   a <- newSignal n
+  -- Xorshift operates on Word32, whose shifts/arithmetic wrap to 32 bits.
+  -- Scaling by 2^31 and subtracting one centres the pseudo-random amplitude;
+  -- the seed determines the whole buffer, making repeated renders reproducible.
   let go !i !x = when (i < n) $ do
         let x1 = x `xor` (x `shiftL` 13)
             x2 = x1 `xor` (x1 `shiftR` 17)
@@ -128,10 +172,14 @@ env :: (Float -> Float) -> Signal -> Signal
 env f s = generate n (\i -> f (fromIntegral i / sr) * unsafeAt s i * min 1 (fromIntegral (n - 1 - i) / tailN))
   where
     n = len s
+    -- Index n-1 has gain zero. This multiplies the caller's envelope rather than
+    -- replacing it, preserving its attack and decay while removing the end step.
     tailN = fromIntegral (max 1 (samplesIn 0.005))
 
 -- | Rises linearly over @a@ seconds, then decays by e every @d@ seconds.
 perc :: Float -> Float -> Float -> Float
+-- Callers use positive attack/decay times. t is seconds since this part began;
+-- the attack meets the exponential at amplitude one, with a change of slope.
 perc a d t
   | t < a = t / a
   | otherwise = exp (negate (t - a) / d)
@@ -141,6 +189,9 @@ lowpass :: (Float -> Float) -> Signal -> Signal
 lowpass fc s = runSTUArray $ do
   let n = len s
   a <- newSignal n
+  -- y retains the preceding output. k is the per-sample approach fraction to
+  -- the new input; smaller positive cutoffs produce slower, smoother changes.
+  -- Initial silence gives a defined filter state at the start of every recipe.
   let go !i !y = when (i < n) $ do
         let k = 1 - exp (-2 * pi * fc (fromIntegral i / sr) / sr)
             y' = y + k * (unsafeAt s i - y)
@@ -149,6 +200,8 @@ lowpass fc s = runSTUArray $ do
   go 0 0
   pure a
 
+-- | Remove the one-pole low-pass output from the original, retaining faster
+-- changes. fc maps seconds to cutoff hertz; buffer length is unchanged.
 highpass :: (Float -> Float) -> Signal -> Signal
 highpass fc s = let l = lowpass fc s in generate (len s) (\i -> unsafeAt s i - unsafeAt l i)
 
@@ -157,6 +210,9 @@ bandpass :: Float -> (Float -> Float) -> Signal -> Signal
 bandpass q fc s = runSTUArray $ do
   let n = len s
   a <- newSignal n
+  -- low and band are the filter's two state variables. q controls resonance:
+  -- higher q means less damping. Cap the centre at 8000 Hz for these recipes'
+  -- numerical stability; callers supply positive cutoffs and positive q.
   let go !i !low !band = when (i < n) $ do
         let f = 2 * sin (pi * min 8000 (fc (fromIntegral i / sr)) / sr)
             low' = low + f * band
@@ -167,6 +223,8 @@ bandpass q fc s = runSTUArray $ do
   go 0 0 0
   pure a
 
+-- | Multiply every amplitude by a linear gain, with no clipping/normalisation.
+-- amap applies the function over the unboxed array and keeps its bounds.
 gain :: Float -> Signal -> Signal
 gain k = amap (* k)
 
@@ -181,6 +239,8 @@ cut n s = generate n (at s)
 -- | Everything at once: as long as the longest.
 mix :: [Signal] -> Signal
 mix ss = runSTUArray $ do
+  -- The leading zero handles an empty mix. Summing in one mutable destination
+  -- avoids allocating a new full-length array for every added voice.
   let n = maximum (0 : map len ss)
   a <- newSignal n
   forM_ ss $ \s -> forM_ [0 .. len s - 1] $ \i -> do
@@ -193,25 +253,36 @@ fadeEnd :: Signal -> Signal
 fadeEnd s = generate n (\i -> unsafeAt s i * min 1 (fromIntegral (n - 1 - i) / fromIntegral f))
   where
     n = len s
+    -- Fade at most 12 ms or a quarter of a short signal, with a nonzero divisor.
     f = max 1 (min (n `div` 4) (samplesIn 0.012))
 
 -- | A struck bell: inharmonic partials, the higher ones dying first. It rings for
 -- about @d@ seconds.
 bell :: Float -> Float -> Signal
+-- f is the fundamental in hertz. Each (ratio,gain,decay factor) adds one partial;
+-- non-integer ratios give metal its inharmonic ring, while shorter high decays
+-- let the fundamental outlast the bright strike. The comprehension mixes voices.
 bell f d = mix
   [ gain g (env (perc 0.002 (d * k / 4)) (tone sine (f * r) d))
   | (r, g, k) <- [(1, 1, 1), (2.0, 0.55, 0.6), (2.76, 0.4, 0.45), (5.4, 0.22, 0.25), (8.93, 0.1, 0.15)] ]
 
 -- | A pitch-dropping thump, the body of an impact.
 thump :: Float -> Float -> Float -> Signal
+-- Frequencies are hertz and d is seconds. The exponential approaches the lower
+-- target quickly (time constant d/6), while the amplitude decays more slowly.
 thump from to d = env (perc 0.003 (d / 4)) (osc sine (\t -> to + (from - to) * exp (negate t / (d / 6))) d)
 
 -- | A soft pad note: detuned saws through a low-pass.
 pad :: Float -> Float -> Float -> Signal
+-- Nearby frequency ratios beat against each other rather than sounding as
+-- separate notes; cutoff in hertz removes the sharp upper saw harmonics.
 pad f cutoff d = lowpass (const cutoff) (gain 0.6 (mix [ bsawTone (f * k) d | k <- [0.996, 1, 1.0045] ]))
 
 -- | A filtered-feedback delay, for the reverb.
 comb :: Int -> Float -> Float -> Signal -> Signal
+-- n must be a positive sample delay. g is feedback gain (below one here), damp
+-- the smoothing fraction on delayed output. The buffer has no implicit tail;
+-- stereoHall pads its input to make room for the feedback to decay.
 comb n g damp s = runSTUArray $ do
   let m = len s
   a <- newSignal m
@@ -223,6 +294,9 @@ comb n g damp s = runSTUArray $ do
   go 0 0
   pure a
 
+-- | Delay by n positive samples with feedback g. The feed-forward subtraction
+-- and delayed input redistribute phase for diffusion; g has magnitude below one
+-- in these recipes. Missing past input/output is silence.
 allpass :: Int -> Float -> Signal -> Signal
 allpass n g s = runSTUArray $ do
   let m = len s
@@ -238,7 +312,11 @@ allpass n g s = runSTUArray $ do
 stereoHall :: Float -> Float -> Float -> Signal -> (Signal, Signal)
 stereoHall fb wet tailSecs dry = (side 0, side 23)
   where
+    -- Keep the dry signal and add silence for the tail. Right delays are 23
+    -- samples longer; comb lengths are sample counts tuned for 44.1 kHz.
     padded = cut (len dry + samplesIn tailSecs) dry
+    -- Sum eight combs at 1/8 gain, then fold four all-pass stages over that sum.
+    -- foldr nests the filters from right to left; mix adds dry and scaled wet.
     side spread = mix [padded, gain wet (foldr (\n -> allpass (n + spread) 0.5) (gain 0.125 (mix
       [ comb (n + spread) fb 0.35 padded | n <- [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617] ]))
       [225, 341, 441, 556])]
@@ -250,6 +328,8 @@ pink seed d = runSTUArray $ do
   let w = noise seed d
       n = len w
   a <- newSignal n
+  -- Three differently decaying histories weight low frequencies more strongly.
+  -- The constants are filter coefficients/gains, not hertz or seconds.
   let go !i !b0 !b1 !b2 = when (i < n) $ do
         let x = unsafeAt w i
             b0' = 0.99765 * b0 + x * 0.0990460
@@ -266,6 +346,8 @@ brown seed d = runSTUArray $ do
   let w = noise seed d
       n = len w
   a <- newSignal n
+  -- A leaky integrator: retain 99.8% of the previous value and add soft noise.
+  -- The leak keeps a random walk from wandering indefinitely away from zero.
   let go !i !y = when (i < n) $ do
         let y' = 0.998 * y + 0.02 * unsafeAt w i
         unsafeWrite a i (y' * 4)
@@ -273,12 +355,16 @@ brown seed d = runSTUArray $ do
   go 0 0
   pure a
 
--- | A sawtooth without aliasing (PolyBLEP): the plain one buzzes harshly up high.
+-- | A sawtooth with reduced aliasing (PolyBLEP): smooth its wrap discontinuity
+-- instead of feeding the uncorrected sharp edge into the sampled signal.
 bsaw :: (Float -> Float) -> Float -> Signal
 bsaw freq d = runSTUArray $ do
   let n = samplesIn d
   a <- newSignal n
   let go !i !p = when (i < n) $ do
+        -- Limit the phase step to half a cycle/sample (Nyquist). Recipes supply
+        -- positive frequencies; the two quadratic pieces smooth opposite sides
+        -- of the wrap, leaving the straight ramp alone everywhere else.
         let dt = min 0.5 (freq (fromIntegral i / sr) / sr)
             q0 = p + dt
             q = q0 - fromIntegral (floor q0 :: Int)
@@ -291,6 +377,7 @@ bsaw freq d = runSTUArray $ do
   go 0 0
   pure a
 
+-- | Constant-frequency PolyBLEP saw, in hertz, for a duration in seconds.
 bsawTone :: Float -> Float -> Signal
 bsawTone f = bsaw (const f)
 
@@ -301,6 +388,9 @@ loopOf seconds overlap make = generate n blend
     xs = make (seconds + overlap)
     n = samplesIn seconds
     o = samplesIn overlap
+    -- Crossfade the extra tail into the start. Square-root weights keep power
+    -- steadier for uncorrelated noise; overlap must be positive and no longer
+    -- than the loop. At the seam the tail and preceding sample are neighbours.
     blend i
       | i < o = let k = fromIntegral i / fromIntegral o in at xs i * sqrt k + at xs (i + n) * sqrt (1 - k)
       | otherwise = at xs i
@@ -309,6 +399,7 @@ loopOf seconds overlap make = generate n blend
 semis :: Float -> Float
 semis s = 2 ** (s / 12)
 
+-- | Reference A pitches in hertz, one octave (a factor of two) apart.
 a2, a3, a4 :: Float
 a2 = 110
 a3 = 220
@@ -323,6 +414,7 @@ a4 = 440
 -- | A recipe and its room: how long the room rings, how much of it, and for how
 -- long after the sound ends.
 data Shot = Shot !Float !Float !Float Signal
+  -- ^ Feedback gain, wet gain, extra tail seconds, and lazily built mono recipe.
 
 -- | The station's own rooms: plaster and stone, a short bright ring.
 room :: Signal -> Shot
@@ -340,9 +432,13 @@ render s
       let Shot fb wet tl dry = oneShot s
           -- A gentle top cut takes the glassy edge off everything synthesised.
           (l, r) = stereoHall fb wet tl (lowpass (const 11000) dry)
+          -- Share one peak factor between channels to preserve the stereo
+          -- balance. The epsilon handles silence; 0.9 leaves headroom.
           k = 0.9 / max 1e-6 (max (peakOf l) (peakOf r))
       in (fadeEnd (gain k l), fadeEnd (gain k r))
 
+-- | Largest absolute sample amplitude; silence/empty signals have peak zero.
+-- The fold reduces all samples to one value for stereo normalisation.
 peakOf :: Signal -> Float
 peakOf s = foldr (\i acc -> max acc (abs (unsafeAt s i))) 0 [0 .. len s - 1]
 
@@ -352,6 +448,8 @@ dull = lowpass (const 650) . lowpass (const 650)
 
 -- | A footfall: the heel, then the toe a moment later and softer.
 footfall :: Int -> Float -> Float -> Float -> Signal
+-- seed varies deterministic surface noise; body, click and knock are hertz.
+-- The delayed toe is 45 ms later, softer and shorter than the heel.
 footfall seed body click knock = mix
   [ gain 0.9 (thump (body * 1.9) body 0.08)
   , gain 0.35 (env (perc 0.001 0.012) (lowpass (const click) (pink seed 0.05)))
@@ -360,6 +458,9 @@ footfall seed body click knock = mix
       [ gain 0.4 (thump (body * 2.2) (body * 1.2) 0.05)
       , gain 0.18 (env (perc 0.001 0.01) (lowpass (const click) (pink (seed + 2) 0.04))) ]) ]
 
+-- | Dry recipe and reverb parameters for a one-shot tag. Durations/after offsets
+-- are seconds, oscillator pitches and filter centres are hertz, gains and Q are
+-- dimensionless. Beds are routed elsewhere; the fallback here is empty sound.
 oneShot :: Sound -> Shot
 oneShot s = case s of
   -- A soft step on boards and plaster: a hollow wooden knock under it.
@@ -429,12 +530,15 @@ oneShot s = case s of
   -- A tape run backwards.
   Undo -> room (env (\t -> sin (pi * t / 0.18)) (mix
     [ osc sine (\t -> 900 - 3000 * t) 0.18, gain 0.35 (bandpass 2 (\t -> 2500 - 10000 * t) (pink 10 0.18)) ]))
+  -- A slower downward sweep separates a full restart from the short undo cue.
   Restart -> room (env (\t -> min 1 (t / 0.05) * exp (negate t / 0.15)) (mix
     [ osc sine (\t -> 700 - 1200 * t) 0.4, gain 0.45 (bandpass 1.5 (\t -> 3000 * exp (negate t * 5)) (pink 11 0.4)) ]))
   -- Through a doorway into the next room: air moving.
   Room -> room (env (\t -> sin (pi * t / 0.35)) (bandpass 1.2 (\t -> 400 + 900 * t) (pink 12 0.35)))
+  -- Descending two-note pause and ascending resume make the toggle audible.
   PauseOn -> room (mix [ env (perc 0.003 0.08) (tone sine 660 0.25), after 0.07 (env (perc 0.003 0.1) (tone sine 440 0.3)) ])
   PauseOff -> room (mix [ env (perc 0.003 0.08) (tone sine 440 0.25), after 0.07 (env (perc 0.003 0.1) (tone sine 660 0.3)) ])
+  -- A short selection tick, then rising/falling bell pairs for enter/back.
   MenuMove -> Shot 0.7 0.1 0.2 (env (perc 0.001 0.03) (mix [ tone sine 1500 0.1, gain 0.3 (tone tri 1500 0.1) ]))
   MenuEnter -> hall 0.8 0.28 0.7 (mix [ gain 0.8 (bell 880 0.6), after 0.08 (bell 1318.5 0.8) ])
   MenuBack -> room (mix [ gain 0.8 (bell 1318.5 0.4), after 0.07 (gain 0.8 (bell 880 0.5)) ])
@@ -447,6 +551,19 @@ oneShot s = case s of
     , gain 0.7 (thump 160 70 0.07)
     , gain 0.3 (env (perc 0.001 0.02) (lowpass (const 3500) (pink 41 0.05))) ])
   TalkClose -> room (gain 0.5 (env (perc 0.002 0.05) (lowpass (const 5000) (osc square (\t -> 900 - 3000 * t) 0.12))))
+  -- Her orders. A ticket printer: a row of dots hammered out over the feed's hum.
+  Print -> Shot 0.6 0.06 0.1 (mix
+    [ gain 0.5 (mix [ after (0.012 * fromIntegral i) (env (perc 0.0005 0.006) (bandpass 4 (const 3200) (noise (60 + i) 0.02))) | i <- [0 .. 5 :: Int] ])
+    , gain 0.25 (env (\t -> sin (pi * min 1 (t / 0.09))) (lowpass (const 900) (tone square 140 0.09))) ])
+  -- Paper giving along the perforation: a dry crackle.
+  TearBit -> Shot 0.6 0.05 0.08 (mix
+    [ gain 0.7 (env (perc 0.001 0.02) (bandpass 2.5 (const 2600) (pink 71 0.05)))
+    , gain 0.4 (after 0.018 (env (perc 0.001 0.012) (bandpass 3 (const 4200) (noise 72 0.03)))) ])
+  -- Torn off: a long rip that brightens as it goes, and a soft flap.
+  Tear -> room (mix
+    [ env (\t -> min 1 (t / 0.02) * (if t < 0.32 then 1 else exp (negate (t - 0.32) / 0.03)) * (0.7 + 0.3 * sin (t * 2 * pi * 47)))
+        (bandpass 1.6 (\t -> 1400 + 3200 * t) (pink 73 0.45))
+    , gain 0.45 (after 0.3 (thump 140 60 0.08)) ])
 
   -- The ending.
   -- The flare: everything rising to the white, cut at its height.
@@ -483,6 +600,7 @@ oneShot s = case s of
     [ thump 85 40 0.3
     , gain 0.45 (env (perc 0.001 0.05) (bandpass 2 (const 600) (pink 22 0.2)))
     , gain 0.25 (grains 23 0.25 1400) ])
+  -- A smooth half-sine squared envelope makes the passing whoosh rise and fall.
   BarrierPassed -> room (env (\t -> sin (pi * t / 0.35) ** 2) (bandpass 1.5 (\t -> 2000 - 3500 * t) (pink 24 0.35)))
   -- Left behind: the light runs on, and the dark falls.
   Caught -> hall 0.86 0.4 1.2 (env (\t -> min 1 (t / 0.05) * exp (negate t / 0.35)) (mix
@@ -492,6 +610,8 @@ oneShot s = case s of
   LampCatch -> hall 0.84 0.3 0.7 (mix
     [ bell a4 1.1
     , gain 0.15 (env (perc 0.001 0.02) (bandpass 1 (const 3000) (pink 26 0.05))) ])
+  -- Bright initial crack over a much longer low rumble; nested sines vary the
+  -- rumble's envelope without adding new random state.
   Thunder -> hall 0.88 0.3 1.5 (mix
     [ gain 0.4 (env (perc 0.002 0.08) (bandpass 0.7 (const 1500) (pink 27 0.3)))
     , gain 3 (env (\t -> perc 0.08 0.9 t * (0.7 + 0.3 * sin (t * 9) * sin (t * 3.1))) (lowpass (const 200) (brown 28 3.0))) ])
@@ -513,12 +633,18 @@ oneShot s = case s of
 grains :: Int -> Float -> Float -> Signal
 grains seed d centre = lowpass (const (centre * 1.6)) (bandpass 1.5 (const centre) (generate (len chance) click))
   where
+    -- Independent deterministic noise streams choose when a grain happens and
+    -- its signed amplitude. The threshold approaches one as time passes, making
+    -- late clicks rarer; filters turn single-sample impulses into little rings.
     chance = noise seed d
     value = noise (seed + 100) d
     click i =
       let t = fromIntegral i / sr
       in if unsafeAt chance i > 1 - 0.012 * exp (negate t / (d / 3)) then unsafeAt value i * 3 else 0
 
+-- | Shared era-wave recipe: True falls into the past, False rises into present.
+-- Exponential frequency ratios make smooth pitch glides over 0.45 seconds;
+-- a delayed bell leaves an audible destination after the filtered noise wave.
 shiftSound :: Bool -> Shot
 shiftSound toPast = hall 0.84 0.32 0.8 (mix
   [ env (\t -> sin (pi * min 1 (t / 0.45)) ** 1.5) (bandpass 2 (\t -> if toPast then 2800 * 0.1 ** (t / 0.45) + 220 else 220 * 12 ** (t / 0.45)) (pink (if toPast then 30 else 31) 0.45))
@@ -534,9 +660,13 @@ renderBed s = (gain k l, gain k r)
     r = bedSide s 500
     k = bedPeak s / max 1e-6 (max (peakOf l) (peakOf r))
 
+-- | Peak target before Audio's live bed gain: pulse 0.7, other beds 0.6.
 bedPeak :: Sound -> Float
 bedPeak s = if s == BedPulse then 0.7 else 0.6
 
+-- | One channel of a bed; o offsets noise seeds and some modulation for stereo.
+-- Periods are seconds and frequency multipliers are hertz. BedPulse is the same
+-- on both channels; unsupported one-shot tags produce an empty signal.
 bedSide :: Sound -> Int -> Signal
 bedSide s o = case s of
   -- The past: a calm sea washing in and out, low and soft.
@@ -569,6 +699,8 @@ bedSide s o = case s of
 pulseBar :: Float -> Signal
 pulseBar bar = cut (samplesIn bar) (mix (kicks ++ bass ++ hats))
   where
+    -- bar is seconds for four beats. Offsets below place kicks on beats, bass
+    -- notes on eighths and hats off-beat; cut trims any tail at the bar boundary.
     beat = bar / 4
     kicks = [ after (beat * fromIntegral i) (gain 0.9 (thump 130 45 0.3)) | i <- [0 .. 3 :: Int] ]
     bassNotes = [0, 0, 12, 0, 0, 0, 10, 12] :: [Float]

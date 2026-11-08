@@ -20,6 +20,7 @@ import qualified Graphics.Gloss.Internals.Interface.Simulate.State      as SM
 import qualified Graphics.Gloss.Internals.Interface.Animate.State       as AN
 import Data.IORef
 import System.Mem
+import GHC.Clock (getMonotonicTime)
 
 playWithBackendIO
         :: forall world a
@@ -64,6 +65,10 @@ playWithBackendIO
         renderS_        <- initState
         renderSR        <- newIORef renderS_
 
+        -- Patched for Borrowed Light: when the last major collection ran (see
+        -- the end of 'displayFun').
+        lastMajorR      <- getMonotonicTime >>= newIORef
+
         let displayFun backendRef
              = do
                 -- convert the world to a picture
@@ -85,7 +90,27 @@ playWithBackendIO
                         (applyViewPortToPicture viewPort picture)
 
                 -- perform GC every frame to try and avoid long pauses
-                performGC
+                --
+                -- Patched for Borrowed Light: a minor collection after each frame,
+                -- and a major one at most once a second. 'performGC' copied every
+                -- live object in the heap after every frame: 2 ms a frame in the
+                -- game's second level, 5 ms in its third, whose solver kept a large
+                -- set of states alive. Almost nothing of a frame outlives it, so
+                -- collecting just the young generation keeps the pauses small and
+                -- regular, as intended.
+                --
+                -- The major collection is still needed now and then, for memory
+                -- the runtime cannot see: each frame of the opening film is a new
+                -- bitmap whose 3.7 MB live in C memory, freed by a finalizer that
+                -- only runs once a major collection finds the bitmap dead. With
+                -- minor collections alone the film held on to about a gigabyte.
+                -- Once a second keeps that to about 90 MB, for about a millisecond.
+                now             <- getMonotonicTime
+                lastMajor       <- readIORef lastMajorR
+                if now - lastMajor >= 1
+                  then do performMajorGC
+                          writeIORef lastMajorR now
+                  else performMinorGC
 
         let callbacks
              =  [ Callback.Display      (animateBegin animateSR)
