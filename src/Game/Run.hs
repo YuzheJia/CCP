@@ -128,6 +128,12 @@ stepRun levels input run = case runMode run of
       { gAttempt = gAttempt g + 1, gPrev = input })
 
     stepTitle
+      |tiInstructions input && not (tiInstructions prev)= 
+        run {runGame = g
+        {gShowInstructions = not (gShowInstructions g)
+        , gPrev = input
+        }}
+      |gShowInstructions g = run {runGame = g {gPrev = input}}
       | freshEnter = toLobby
       | otherwise  = run { runGame = g { gPrev = input } }
 
