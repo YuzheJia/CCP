@@ -93,6 +93,7 @@ initialGame level = Game
   , gBump         = 0
   , gPrev         = noInput
   , gArmed        = False
+  , gShowInstructions = False
   , gPartner      = fmap newPartner (lvSpawn2 level)
   }
   where
@@ -215,9 +216,12 @@ stepGame level input g = next { gPrev = input }
     freshRestart = tiRestart input && not (tiRestart prev)
     freshPause   = tiPause input   && not (tiPause prev)
     freshUndo    = tiUndo input    && not (tiUndo prev)
+    freshInstruction = tiInstructions input && not (tiInstructions prev)
     begin = (initialGame level) { gPhase = Playing, gAttempt = gAttempt g + 1 }
-    next = case gPhase g of
+    next =  case gPhase g of
       Menu
+        |freshInstruction -> g {gShowInstructions = not (gShowInstructions g)}
+        |gShowInstructions g -> g
         | freshEnter   -> begin
         | otherwise    -> g
       Playing

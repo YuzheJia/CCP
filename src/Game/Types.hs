@@ -57,6 +57,7 @@ data TickInput = TickInput
   , tiUndo    :: !Bool
   , tiPeek    :: !Bool
   , tiEcho    :: !Bool
+  ,tiInstructions :: Bool
   , tiLobby   :: !Bool          -- ^ leave a level and return to level select
   , tiDirRevealed :: !Bool     -- ^ no direction went down this tick, so if 'tiDir'
                                --   changed, a newer key was let go of, not a press
@@ -69,7 +70,7 @@ data TickInput = TickInput
   } deriving (Eq, Show)
 
 noInput :: TickInput
-noInput = TickInput Nothing False False False False False False False False False
+noInput = TickInput Nothing False False False False False False False False False False
                     Nothing False Nothing False
 
 -- | The player does exactly one of these at a time. Being a sum type, "walking
@@ -238,6 +239,7 @@ data Game = Game
   , gPrev         :: !TickInput    -- ^ last tick's keys, for finding fresh presses
   , gArmed        :: !Bool         -- ^ the held direction was freshly pressed in this
                                    --   screen, so it may repeat
+  , gShowInstructions :: Bool
   , gPartner      :: !(Maybe Partner) -- ^ the second keeper, in a level for two
   } deriving (Eq, Show)
 

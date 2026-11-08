@@ -1,5 +1,5 @@
 -- | The title screen: one tower, split down the middle into its two times.
-module Title (titleScreen) where
+module Title (titleScreen, instructionsPopup) where
 
 import Draw
 import Font
@@ -130,31 +130,12 @@ labels = Pictures
     -- Premise and controls, on the water.
   , Color (hex 0xF2E6D0) (Translate 0 (-236) (textC 14 "Borrow a power cell from the past to light the present"))
   , Color (hex 0xFFE2A8) (Translate 0 (-258) (textC 14 "Every action spends time."))
-  , controlRow
+  , Color (hex 0xF2E6D0) (Translate 0 (-280) (textC 14 "Press 'I' to see instructions"))
   ]
   where
     wordY = 44
     ws size w s = Translate (negate (textW size s)) 0 (weighted size w s)
     wl = weighted
-
-controlRow :: Picture
-controlRow = Translate 0 (-300) (Pictures
-  [ item (-440) "WASD / ARROWS" "Move"
-  , item (-180) "SPACE" "Shift era"
-  , item 18 "Z" "Undo"
-  , item 118 "TAB" "Look"
-  , item 250 "P" "Pause"
-  , item 360 "R" "Restart"
-  ])
-  where
-    item x key what =
-      let w = textW 12 key + 16
-      in Translate x 0 (Pictures
-        [ Color (hexA 0xFFFFFF 0.6) (rect 0 (-7) w 24)
-        , Color (hex 0x0B1014) (rect 1.5 (-5.5) (w - 3) 21)
-        , Color (hex 0xF4EEE2) (Translate (w / 2) 0 (textC 12 key))
-        , Color (hex 0xF4EEE2) (Translate (w + 9) 0 (textL 12 what))
-        ])
 
 -- | The still art, the turning beam and the rain.
 titleScreen :: Float -> Picture
@@ -185,3 +166,40 @@ titleScreen clock = Pictures
       , Color (fade glowK (hex 0xFFE2A8)) (Translate 0 0 (textC 19 "Press Enter to begin"))
       ])
     shift pic dy = Translate 0 dy pic
+
+instructionsPopup :: Picture
+instructionsPopup = Pictures
+  [Color (hexA 0x7D93A0 0.4) (rectC canvasW canvasH)
+  , Color (hex 0x17252D) (rectC 700 440)
+  , Color (hex 0xFFF3D6) (rectangleWire 700 440)
+
+  , label 0 155 30 "HOW TO PLAY"
+  , label 0 100 12 "Bring the power cell from the past to light up the light house"
+  , label 0 70 12 "Travel between past and presnt to solve the puzzles!"
+
+  , Translate 0 (-100) (Pictures
+    [ item (-280) (130) "WASD / ARROWS" "Move"
+    , item (-280) (90) "SPACE" "Travel through time"
+    , item (-280) (50) "Z" "Undo"
+    , item (-280) (10) "TAB" "Privew other timeline"
+    , item (-280) (-30) "P" "Pause"
+    , item (-280) (-70) "R" "Restart"
+    ])
+
+  , Translate 250 (-100) (Pictures
+  [ item (-250) (130) "BOX" "Push to clear a path"
+  , item (-250) (90) "BUTTON" "Hold down to open doors"
+  , item (-250) (50) "MIRROR" "Jump through the mirror"
+  ])
+  ]
+  where
+    label x y size message = Translate x y (Color (hex 0xFFF3D6) (textC size message))
+
+    item x y key what =
+      let w = textW 12 key + 16
+      in Translate x y (Pictures
+        [ Color (hexA 0xFFFFFF 0.6) (rect 0 (-7) w 24)
+        , Color (hex 0x0B1014) (rect 1.5 (-5.5) (w - 3) 21)
+        , Color (hex 0xF4EEE2) (Translate (w / 2) 0 (textC 12 key))
+        , Color (hex 0xF4EEE2) (Translate (w + 9) 0 (textL 12 what))
+        ])

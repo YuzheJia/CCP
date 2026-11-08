@@ -135,7 +135,14 @@ stepRun levels input run = case runMode run of
     toTitle = Run shown u c Title ((initialGame (levels !! shown))
       { gAttempt = gAttempt g + 1, gPrev = input })
 
+    -- I opens and shuts the instructions; while they are open, Enter does nothing.
     stepTitle
+      |tiInstructions input && not (tiInstructions prev)=
+        run {runGame = g
+        {gShowInstructions = not (gShowInstructions g)
+        , gPrev = input
+        }}
+      |gShowInstructions g = run {runGame = g {gPrev = input}}
       | freshEnter && c == 0 = Run 0 u c (Intro 0 0) ((initialGame (levels !! 0))
           { gAttempt = gAttempt g + 1, gPrev = input })
       | freshEnter = toLobby
