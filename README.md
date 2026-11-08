@@ -24,6 +24,9 @@ cabal test spec --test-show-details=direct
 cabal run borrowed-light
 ```
 
+To play fullscreen on the primary monitor, run `cabal run borrowed-light -- --fullscreen`.
+On Windows, Alt+F4 closes the game; Escape retains its in-game navigation action.
+
 `cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to select level N in the hall (and unlock it for development); `--level=4` opens the secret level directly. Add `--pace=N` to wait N ticks (60 a second) after each of the demo's moves.
 
 The game opens on its title screen. The first time, Enter takes a new order (a new

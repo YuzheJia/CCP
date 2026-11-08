@@ -12,6 +12,7 @@
 --                                  The levels before N count as cleared, and the save
 --                                  keeps that, as it keeps any progress
 --   --mute                         start with the sound off; M turns it on and off
+--   --fullscreen                   fill the primary monitor instead of opening a window
 --   --intro                        open on the opening film, whatever the save, to watch it again
 --
 -- Development flags, used to inspect exact moments of the game:
@@ -180,9 +181,11 @@ main = do
   case listToMaybe (mapMaybe (stripPrefix "--dump-sounds=") args) of
     Just dir -> dumpSounds dir >> exitSuccess
     Nothing -> pure ()
-  -- The screen's size, asked before the window exists, turned into the window's.
-  -- '<$>' is 'fmap': 'windowFor' is applied to what the IO action returns.
-  windowSize <- windowFor <$> getScreenSize
+  -- Fullscreen uses the primary monitor's size. Windowed play keeps its usual
+  -- fitted size; resize events update wWindow once the display is open.
+  screenSize <- getScreenSize
+  let fullscreen = "--fullscreen" `elem` args
+      windowSize = if fullscreen then screenSize else windowFor screenSize
   -- Every level the run can reach, campaign first and secret levels after, each
   -- parsed and checked from its two maps ('levelHall' in 'Game.Level'). A malformed
   -- map is a mistake in the code, so the game stops with the parser's reason: 'die'
@@ -349,9 +352,9 @@ main = do
             writeIORef counter (now, 0)
           else writeIORef counter (since, frames + 1)
   playIO
-    -- The window: its title, its size in pixels, and its top left corner 40 pixels
-    -- in from the screen's.
-    (InWindow "Borrowed Light" windowSize (40, 40))
+    -- FullScreen selects the primary monitor through GLFW. Otherwise create the
+    -- titled window with its top left corner 40 pixels in from the screen's.
+    (if fullscreen then FullScreen else InWindow "Borrowed Light" windowSize (40, 40))
     -- What shows wherever nothing is drawn.
     black
     -- How many times a second Gloss means to call the step callback. The game's own
