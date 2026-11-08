@@ -174,22 +174,24 @@ instructionsPopup = Pictures
   , Color (hex 0xFFF3D6) (rectangleWire 700 440)
 
   , label 0 155 30 "HOW TO PLAY"
-  , label 0 100 12 "Bring the power cell from the past to light up the light house"
-  , label 0 70 12 "Travel between past and presnt to solve the puzzles!"
+  , label 0 100 12 "Bring the power cell from the past to light up the lighthouse"
+  , label 0 70 12 "Travel between past and present to solve the puzzles!"
 
   , Translate 0 (-100) (Pictures
     [ item (-280) (130) "WASD / ARROWS" "Move"
     , item (-280) (90) "SPACE" "Travel through time"
     , item (-280) (50) "Z" "Undo"
-    , item (-280) (10) "TAB" "Privew other timeline"
+    , item (-280) (10) "TAB" "Preview other timeline"
     , item (-280) (-30) "P" "Pause"
     , item (-280) (-70) "R" "Restart"
     ])
 
   , Translate 250 (-100) (Pictures
-  [ item (-250) (130) "BOX" "Push to clear a path"
-  , item (-250) (90) "BUTTON" "Hold down to open doors"
-  , item (-250) (50) "MIRROR" "Jump through the mirror"
+  -- Only what the campaign has: plates and doors were cut, and the mirror players
+  -- missed is the one that slides.
+  [ item (-250) (130) "BOX" "Push it in the past"
+  , item (-250) (90) "MIRROR" "Walk into its light to jump"
+  , item (-250) (50) "MIRROR" "Push sled from back or side"
   ])
   ]
   where

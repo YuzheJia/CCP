@@ -310,7 +310,7 @@ A level is two maps of the same size in `campaign` in `src/Game/Level.hs`, seale
 
 Give it a name, a par and a slack, then run the tests. They re-derive the par through the real rules and print it, with the route's actions, the state count and the dead states. The solver proves a level can be won, not that it is any good, so each level should have one idea you can name in a sentence.
 
-With a Chinese input method in Chinese mode, Windows swallows the letter keys before the game sees them. Switch it to English, or use the arrow keys for movement.
+A Chinese, Japanese or Korean input method in its own mode used to swallow the letter keys (W A S D, I and the rest) before the game saw them. On Windows the game now turns input methods off for itself at startup (`keepLetterKeys` in [app/Platform.hs](app/Platform.hs), [cbits/ime.c](cbits/ime.c)), so it plays the same whatever mode the input method is in.
 
 ### Native runtime requirements
 

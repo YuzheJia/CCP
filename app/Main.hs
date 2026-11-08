@@ -14,7 +14,7 @@
 --   --dump-sounds=DIR  write every sound to DIR as a WAV file, and exit
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
 --                    w a s d move, x shift, q echo, W A S D X the press alone, z undo,
---                    T Tab held, e Enter, p pause, r restart, ! Escape, . one idle tick
+--                    T Tab held, e Enter, p pause, r restart, ! Escape, i instructions, . one idle tick
 --   --after=N        then run N more idle ticks
 --   --fps            print measured frames per second to stdout
 --   --trace          print the game state whenever phase, era, cell or inventory change
@@ -38,7 +38,7 @@ import GHC.Clock (getMonotonicTime)
 import Graphics.Gloss.Interface.Environment (getScreenSize)
 import Graphics.Gloss.Interface.IO.Game
 import qualified Lobby
-import Platform (exitWhenWindowCloses)
+import Platform (exitWhenWindowCloses, keepLetterKeys)
 import qualified Render
 import Save
 import TalkBox (introScreen, talkLayer)
@@ -76,6 +76,8 @@ windowFor (screenW, screenH)
 
 main :: IO ()
 main = do
+  -- Before anything makes a window: an input method would otherwise take the letter keys.
+  keepLetterKeys
   args <- getArgs
   case listToMaybe (mapMaybe (stripPrefix "--dump-sounds=") args) of
     Just dir -> dumpSounds dir >> exitSuccess
@@ -374,6 +376,7 @@ scriptInputs = concatMap one
       'r' -> [noInput { tiRestart = True }, noInput]
       'z' -> [noInput { tiUndo = True }, noInput]
       '!' -> [noInput { tiLobby = True }, noInput]  -- Escape: skips the film, leaves a level
+      'i' -> [noInput { tiInstructions = True }, noInput]  -- I: the instructions on the title
       '.' -> [noInput]
       _   -> []
 
