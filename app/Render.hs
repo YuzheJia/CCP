@@ -397,9 +397,10 @@ onTheBoard deadEnd finale scene level g fx = Pictures
     -- The sea swings over halfway across, as most of the tiles do.
     shownEra = seaEra g fx
 
-    -- Two keepers in a level for two: the first in yellow, the second in red. The
-    -- rules speak of "the player", so the second is drawn from the swapped game.
-    keepers = (g, yellowCoat) : [ (swapKeepers g, redCoat) | isJust (gPartner g) ]
+    -- Two keepers in a level for two: the courier on WASD, the lighthouse keeper on
+    -- the arrows. The rules speak of "the player", so the second is drawn from the
+    -- swapped game.
+    keepers = (g, courierLook) : [ (swapKeepers g, keeperLook) | isJust (gPartner g) ]
 
     -- Where a keeper is drawn: their cell, plus a purely visual ease to the next.
     -- A jump through a mirror: the keeper shrinks to nothing where they stood and
@@ -487,7 +488,7 @@ onTheBoard deadEnd finale scene level g fx = Pictures
     actors = Pictures (map actor keepers)
     -- Keep a minimum jump scale of 0.04 so the figure does not invert. A winning
     -- keeper alone steps aside from the lamp; the partner keeps their own pose.
-    actor (gg, coat) =
+    actor (gg, who) =
       let (_, _, phase) = walkOf gg
           jumpK = maybe 1 (\(_, p) -> max 0.04 (abs (1 - 2 * p))) (jumpOf gg)
           (ax, ay) = if gCell gg == gCell g then playerAt else placedAt gg (if partnerRefused then refuseShake else 0)
@@ -499,7 +500,7 @@ onTheBoard deadEnd finale scene level g fx = Pictures
             | aside > 0 && aside < 1 = aside * 2
             | lampLit || isJust endFacing = 0
             | otherwise = phase
-      in at (ax + 42 * aside, ay + 6 - 26 * aside) (Scale jumpK jumpK (keeperIn coat facing stride))
+      in at (ax + 42 * aside, ay + 6 - 26 * aside) (Scale jumpK jumpK (lookWalk who facing stride))
 
     -- Mirrors stand in their own era, and their light only shows there.
     -- A mirror being pushed slides with the keeper, like a crate, and its light
@@ -543,10 +544,10 @@ onTheBoard deadEnd finale scene level g fx = Pictures
       | gPhase g /= Playing || peeking g fx = Blank
       | otherwise = Pictures
           [ if jOpen j
-              then Pictures [ at (cellPos (jTarget j)) (Pictures [landingMark clock, echoFigure clock 0.9])
+              then Pictures [ at (cellPos (jTarget j)) (Pictures [landingMark clock, lookEcho who clock 0.9])
                             , at (placedAt gg 0) (jumpArrow d clock) ]
               else at (cellPos (jTarget j)) blockedLanding
-          | (gg, _) <- keepers, gMotion gg == Settled
+          | (gg, who) <- keepers, gMotion gg == Settled
           , d <- [minBound .. maxBound], Just j <- [mirrorAhead level gg d], visible (jTarget j) ]
     -- A level shown a room at a time: each doorway on to another room glows with the
     -- light of the room beyond, chevrons running out through it, so a way on never
@@ -669,9 +670,9 @@ onTheBoard deadEnd finale scene level g fx = Pictures
         let e = smooth p
             k = lerp e (eraK e0) (eraK e1)
         in at (cellVec (lerp e (fromIntegral x0) (fromIntegral x1)) (lerp e (fromIntegral y0) (fromIntegral y1)))
-              (echoFigure clock k)
+              (lookEcho courierLook clock k)
       Nothing -> case gEcho g of
-        Just (e, c) -> at (cellPos c) (echoFigure clock (eraK e))
+        Just (e, c) -> at (cellPos c) (lookEcho courierLook clock (eraK e))
         Nothing -> Blank
     -- The rule fills a pit as the push starts; defer its floor art until the
     -- falling crate finishes so it does not appear to slide over a finished fill.
@@ -1205,7 +1206,7 @@ rushWorld scene level f g fx = case finaleRun level of
              , if arriving then at lanternAt (victoryRays clock (smooth (arrivingAge / 50))) else Blank
              , ripple
              , refusedRing
-             , at keeperPos (keeper (frDir fr) stride)
+             , at keeperPos (lookWalk courierLook (frDir fr) stride)
              ])
          , ambient era clock 1
          , rain

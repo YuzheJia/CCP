@@ -36,7 +36,7 @@
 -- failure), "Game.Fx" (the cost floating off the keeper, the room on screen, the
 -- rooms seen, how far the screen has closed in), "Draw" (shapes, colours, easing,
 -- the board's place), "Font" (the stroke lettering) and "Figures" (the keepers'
--- coat colours and the power cell). Used by: "Render" only. Its 'mkScene' builds
+-- character heads and the power cell). Used by: "Render" only. Its 'mkScene' builds
 -- one 'HudArt' per level; its 'frame' draws 'hud' every frame of a level and its
 -- 'endingFrame' draws 'hudStopped'; the captions, the hint band, the plates and the
 -- cost text are drawn from its 'onTheBoard', 'overlays' and the ending.
@@ -105,7 +105,7 @@ module Hud
 
 -- 'isJust' asks whether a 'Maybe' holds a value. "Draw" gives the shapes, colours,
 -- easing and the board's place on the canvas; "Font" the stroke lettering; "Figures"
--- the keepers' coat colours and the power cell's icon (Coat (..) imports the type
+-- the characters' head art and the power cell's icon (Look (..) imports the type
 -- with its constructor and fields); "Game.Fx" the decorative state; "Game.Logic" the
 -- questions the rules answer and their words; "Game.Types" the game's data;
 -- "Graphics.Gloss" the 'Picture' type and its constructors. "Data.Set" is imported
@@ -113,7 +113,7 @@ module Hud
 -- Prelude's list functions: Set.null is the set's own.
 import Data.Maybe (isJust)
 import Draw
-import Figures (Coat (..), cellIcon, redCoat, yellowCoat)
+import Figures (Look (..), cellIcon, courierLook, keeperLook)
 import Font
 import Game.Fx
 import Game.Logic
@@ -650,48 +650,39 @@ wayOut key = key `elem` ["Z", "R"]
 -- (The only level for two is the secret one, which is never a teaching level, so it
 -- has no keys line under the board; this legend takes its place.) In canvas units,
 -- down from 'underPlay', at the watch's place in play: "Shared clock" centred under
--- the plate, then three rows 32 units apart, each a small hood in that keeper's
--- coat colour (none for the shared key), the key cap, and a note after it. The rows
+-- the plate, then three rows 32 units apart, each a character head
+-- (none for the shared key), the key cap, and a note after it. The rows
 -- start 14 units in from the canvas's left edge.
 duoLegend :: Skin -> Picture
 duoLegend sk = Pictures
   [ Color (skDim sk) (Translate wx (underPlay - 19) (textC 11 "Shared clock"))
-  , row (underPlay - 41) (Just yellowCoat) "WASD" ""
-  , row (underPlay - 73) (Just redCoat) "ARROWS" ""
+  , row (underPlay - 41) (Just courierLook) "WASD" ""
+  , row (underPlay - 73) (Just keeperLook) "ARROWS" ""
   , row (underPlay - 105) Nothing "SPACE" "both"
   ]
   where
     -- A pattern binding: only the first of the three is wanted, '_' ignores the rest.
     (wx, _, _) = playWatch
     lx = negate canvasW / 2 + 14
-    -- One row at baseline @y@. 'maybe' d f m gives d for 'Nothing' and f x for
-    -- 'Just' x; here f is a composition ('.' runs the right-hand function first):
-    -- draw the hood in that coat, then move it beside the key.
-    row y coat key note = Pictures
-      [ maybe Blank (Translate (lx + 9) (y + 5) . hood) coat
+    -- Each row draws the selected character's head beside its key cap.
+    -- Maybe maps Nothing to Blank for the shared Space key.
+    row y who key note = Pictures
+      [ maybe Blank (Translate (lx + 9) (y + 5) . lookHead) who
       , Translate (lx + 26) y (keyCap (skRule sk) (skInk sk) key)
       , Color (skDim sk) (Translate (lx + 26 + capW key + 8) y (textL 11 note))
-      ]
-    -- A keeper's hooded head, 9 units in radius: a shadow, the coat's main colour,
-    -- a face (a warm skin tone) a little low in the hood, and two dark eyes.
-    hood c = Pictures
-      [ Color (hexA 0x000000 0.5) (ngon 20 10.5)
-      , Color (coatMain c) (ngon 20 9)
-      , Color (hex 0xF6D9B6) (Translate 0 (-1.5) (ngon 16 5.2))
-      , Color (hex 0x3A2A1A) (Pictures [ Translate x (-1) (ngon 6 0.9) | x <- [-2, 2] ])
       ]
 
 -- | The keys a level is introduced with. A level for two names each keeper's keys.
 --
--- With @duo@, moving is split by keeper (W A S D for yellow, the arrows for red,
+-- With @duo@, moving is split by character (W A S D for the courier, arrows for the keeper,
 -- each at a step's price), Space shifts both, and the rest of 'taughtKeys' follows
 -- without its own move and shift lines. In that comprehension, k@(key, _) names the
 -- whole pair k and its first part key (an as-pattern), and the condition after the
 -- comma keeps only the pairs whose key is not one of the two replaced.
 introKeys :: Bool -> Rules -> [(String, String)]
 introKeys duo rules
-  | duo = [ ("WASD", "Yellow  -" ++ show (ruStepCost rules) ++ " s")
-          , ("ARROWS", "Red  -" ++ show (ruStepCost rules) ++ " s")
+  | duo = [ ("WASD", "Courier  -" ++ show (ruStepCost rules) ++ " s")
+          , ("ARROWS", "Keeper  -" ++ show (ruStepCost rules) ++ " s")
           , ("SPACE", "Both  -" ++ show (ruShiftCost rules) ++ " s") ]
           ++ [ k | k@(key, _) <- taughtKeys rules, key `notElem` ["WASD", "SPACE"] ]
   | otherwise = taughtKeys rules

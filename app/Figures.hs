@@ -16,7 +16,7 @@
 -- these pictures change from frame to frame, so they are built again every frame
 -- they are shown.
 --
--- Used by "Render", for nearly all of it, and by "Hud", for the two coats and the
+-- Used by "Render", for nearly all of it, and by "Hud", for the two heads and the
 -- power cell's icon on the watch. It uses "Draw" for shapes, colours, positions and
 -- easing, "Game.Types" for 'Dir' and 'Era', and "Station" for its soft pools of
 -- light and the cells that carry wall lamps.
@@ -41,19 +41,14 @@
 -- an alpha) from "Draw". Angles are in degrees, and Gloss turns a picture clockwise.
 -- Art that points a way is drawn pointing up (+y) and then turned by 'faceAngle'.
 module Figures
-  ( keeper
-  , keeperIn
-  -- Coat (..) exports the type together with its constructor and all its fields,
-  -- so Hud can read coatMain.
-  , Coat (..)
-  , yellowCoat
-  , redCoat
+  ( Look (..)
+  , courierLook
+  , keeperLook
   , trueTower
   , passageLamp
   , powerCell
   , crate
   , crossingMark
-  , echoFigure
   , footprintMark
   , landingMark
   , heldPlateGlow
@@ -82,144 +77,461 @@ import Game.Types  -- Dir and Era, the only game types the art needs
 import Graphics.Gloss
 import Station (pool, sconceCells)  -- soft pools of light; the cells with wall lamps
 
--- The keeper -------------------------------------------------------------------
+-- The walkers ------------------------------------------------------------------
 
--- | The lighthouse keeper in a yellow oilskin. @phase@ runs 0..1 across a step.
---
--- The first keeper, and the only one in a level for one. The arguments are the way
--- the keeper faces and the step's phase, exactly as for 'keeperIn'. It is written
--- point-free, by partial application: 'keeperIn' is given only its first argument,
--- the coat, and what comes back is a function still waiting for the other two, so
--- @keeper d p@ is @keeperIn yellowCoat d p@. Render uses it for the keeper running
--- the ending's rush; in play every keeper is drawn with 'keeperIn' and its own coat.
-keeper :: Dir -> Float -> Picture
-keeper = keeperIn yellowCoat
+-- | Who walks the board, drawn the three ways the game needs: the courier always,
+-- and the lighthouse keeper beside her in a level for two.
+data Look = Look
+  { lookWalk :: Dir -> Float -> Picture
+    -- ^ The figure, facing a way. The second argument runs 0..1 across a step.
+  , lookEcho :: Float -> Float -> Picture
+    -- ^ Their outline in pale light, where a jump would set them down: the clock,
+    -- and how strongly it shows.
+  , lookHead :: Picture
+    -- ^ A head about 21 units across, for the legend of keys.
+  }
 
--- | The oilskin, so two keepers can be told apart at a glance.
---
--- A record of three colours. The fields are declared together because they share a
--- type; each is still its own accessor function, such as @coatMain :: Coat -> Color@.
---
--- @coatMain@ is the body of the coat, and also the little hooded head beside each
--- keeper's keys in the list under the watch in a level for two ("Hud").
--- @coatDark@ is the coat's shaded side: its right-hand panel, the arm in profile,
--- the seam down the back of the hood and the hood's peak in profile. @coatHood@ is
--- the hood around the face. The outline, boots and skin are the same for every
--- keeper.
-data Coat = Coat { coatMain, coatDark, coatHood :: Color }
--- ^ Body, shaded panels and hood colours, respectively; shared outlines stay fixed.
+courierLook, keeperLook :: Look
+courierLook = Look courier courierEcho courierHead
+keeperLook = Look lightKeeper keeperEcho keeperHead
 
--- | The two coats: yellow for the first keeper (W A S D in a level for two), red for
--- the second (the arrow keys). Render pairs the first with the game as it is and the
--- second with the game with the keepers swapped. A record can be built by position,
--- as here: the three colours are main, dark and hood, in the order of the fields.
--- The hood is a lighter tint of the main colour and the dark a deeper shade.
-yellowCoat, redCoat :: Coat
-yellowCoat = Coat (hex 0xF7C81E) (hex 0xC4920F) (hex 0xFFD93E)
-redCoat = Coat (hex 0xE5533A) (hex 0xA9361F) (hex 0xF4765B)
+type Pt = (Float, Float)
 
--- | A keeper in the coat @oilskin@, facing @facing@, at @phase@ of a step.
---
--- @phase@ is 0 standing still and runs from 0 to 1 across one step (8 ticks, from
--- 'stepTicks'); per unit of phase the body hops once and the legs swing once. Render
--- passes 0 to hold a keeper still (while the lamp is lit), and up to 2 while the
--- keeper steps aside from the lamp at a win, which gives two hops.
---
--- Before its 1.08 scale the figure runs from its boots near y = -21 to the top of
--- its hood near y = 28, so it fills most of the height of its 76-unit cell. There are
--- three drawings: from the front (facing down the screen, the face showing), from
--- the back (facing up the screen), and in profile facing left. Facing right is the
--- left profile mirrored.
-keeperIn :: Coat -> Dir -> Float -> Picture
-keeperIn oilskin facing phase = Scale 1.08 1.08 (Pictures
-  -- The shadow is outside the bob, so it stays on the floor while the body hops.
-  [ Color (hexA 0x000000 0.45) (Translate 0 (-20) (ellipse 16 17 7))
-  , Translate 0 bob figure
-  ])
-  -- A where clause names the pieces used above. Its bindings can see the arguments
-  -- (oilskin, facing, phase) and each other, in any order.
+-- | The outline every figure is drawn in.
+figureInk :: Color
+figureInk = hex 0x17100B
+
+-- | A filled shape with the outline round it: the stroke goes down first and the
+-- fill over it, so half the stroke shows outside the shape.
+blob :: Color -> Float -> [Pt] -> Picture
+blob fill w pts = Pictures [Color figureInk (segs w (closed pts)), Color fill (Polygon pts)]
+
+closed :: [Pt] -> [Pt]
+closed ps = ps ++ take 1 ps
+
+-- | Mirrored across the figure's middle, in the same winding.
+flipX :: [Pt] -> [Pt]
+flipX = reverse . map (\(x, y) -> (negate x, y))
+
+-- | How a step moves a figure: the bob and the stride the walkers have always had,
+-- and the hair that lags behind them. In order: how high the body rises, how far
+-- a foot lifts, hair swinging across with the step, hair tips staying low as the
+-- body rises, and hair streaming behind, seen from the side. Each is 0 standing
+-- still.
+data Gait = Gait !Float !Float !Float !Float !Float
+
+gaitAt :: Float -> Gait
+gaitAt phase = Gait bob (s * 3) (s * 1.4) (negate (0.5 * bob)) (abs s * 1.6)
   where
-    -- One hop per step: |sin (pi * phase)| is 0 at both ends of a step and 1 half way,
-    -- so the body rises up to 2.2 units and lands as the step ends.
+    s = sin (phase * 2 * pi)
     bob = 2.2 * abs (sin (phase * pi))
-    -- The legs' swing: one whole sine wave per step, up to 3 units either way,
-    -- positive in the first half of the step and negative in the second.
-    stride = sin (phase * 2 * pi) * 3
-    -- Near-black brown. Each part is drawn first in this colour and slightly larger,
-    -- then filled, so the figure keeps a dark rim on any floor.
-    outline = hex 0x17100B
-    coat = coatMain oilskin
-    coatShade = coatDark oilskin
-    hood = coatHood oilskin
-    boots = hex 0x2A1B12
-    skin = hex 0xEBC8A0
-    -- Down the screen is towards the viewer, so facing down shows the face. Scale
-    -- (-1) 1 mirrors the left profile across the vertical axis to face right.
-    figure = case facing of
+
+-- | On the board: the shadow, and over it the figure turned the way it faces,
+-- bobbing. Seen from the right is seen from the left, mirrored.
+stood :: Float -> Dir -> Picture -> Picture -> Picture -> Picture
+stood bob facing front back side = Scale 1.08 1.08 (Pictures
+  [ Color (hexA 0x000000 0.45) (Translate 0 (-20) (ellipse 16 17 7))
+  , Translate 0 bob (case facing of
       DirDown  -> front
       DirUp    -> back
       DirLeft  -> side
-      DirRight -> Scale (-1) 1 side
-    -- Two legs either side of the centre line, the left lifted by @a@ and the right
-    -- by @b@: each an 8 by 10 block of outline with a 6 by 8 boot inside it.
-    legs a b = Pictures
-      [ Color outline (Pictures [rect (-9) (-21 + a) 8 10, rect 1 (-21 + b) 8 10])
-      , Color boots (Pictures [rect (-8) (-20 + a) 6 8, rect 2 (-20 + b) 6 8])
+      DirRight -> Scale (-1) 1 side)
+  ])
+
+figureLegs :: Color -> Float -> Float -> Picture
+figureLegs boots a b = Pictures
+  [ Color figureInk (Pictures [rect (-9) (-21 + a) 8 10, rect 1 (-21 + b) 8 10])
+  , Color boots (Pictures [rect (-8) (-20 + a) 6 8, rect 2 (-20 + b) 6 8])
+  ]
+
+-- | The coat or jacket: one shape, lit from the left.
+trunkShape :: [Pt]
+trunkShape = [(-14, -12), (14, -12), (10.5, 11), (-10.5, 11)]
+
+figureTrunk :: Color -> Color -> Picture
+figureTrunk main shade = Pictures
+  [ Color figureInk (Polygon [(-16, -14), (16, -14), (12, 12), (-12, 12)])
+  , Color main (Polygon trunkShape)
+  , Color shade (Polygon [(3, -12), (14, -12), (10.5, 11), (2, 11)])
+  ]
+
+-- The courier ------------------------------------------------------------------
+
+-- Drawn from assets/source/courier.webp: a yellow hi-vis delivery jacket, white
+-- hair in two tails tied with black bows, a curl of hair on top, and a black
+-- insulated box on her back with a steaming bowl on it.
+
+coCoat, coCoatShade, coStripe, coStripeShade, coDark, coDarkHi, coBuckle, coIcon,
+  coLid, coLidShade, coHair, coHairShade, coHairDeep, coRibbon, coRibbonHi, coSkin,
+  coEye, coMouth, coBoots :: Color
+coCoat = hex 0xF7C81E
+coCoatShade = hex 0xC4920F
+coStripe = hex 0xEAE8E2
+coStripeShade = hex 0xB9B5AC
+coDark = hex 0x2C2B33
+coDarkHi = hex 0x4C4A56
+coBuckle = hex 0x9C9AA4
+coIcon = hex 0xA9A7B2
+coLid = hex 0xF2BC1A
+coLidShade = hex 0xB98A10
+coHair = hex 0xF2EFF7
+coHairShade = hex 0xCDC5DD
+coHairDeep = hex 0x9C92B4
+coRibbon = hex 0x1D1A21
+coRibbonHi = hex 0x56505F
+coSkin = hex 0xF3D5BB
+coEye = hex 0x7B3438
+coMouth = hex 0xC98E7E
+coBoots = hex 0x2A2530
+
+-- | Her left tail seen from the front: from under the bow, out over the shoulder
+-- and down past it. @s@ swings the tip across, @d@ drops it.
+tailFront :: Float -> Float -> [Pt]
+tailFront s d =
+  [ (-10, 25), (-14.2, 25), (-17.4, 20.8), (-18.6, 14), (-18, 6)
+  , (-16.8 + s * 0.6, -1 + d * 0.5), (-15.2 + s, -7 + d), (-13.6 + s * 0.6, -2.4 + d * 0.5)
+  , (-12.8, 5), (-12.2, 13), (-10.4, 19.6) ]
+
+-- | The shadowed inner half of that tail.
+tailFrontShade :: Float -> Float -> [Pt]
+tailFrontShade s d =
+  [ (-12.6, 19), (-14.8, 15), (-15.2, 8), (-14.8 + s * 0.6, d * 0.5), (-15 + s, -5.4 + d)
+  , (-13.8 + s * 0.6, -1.6 + d * 0.5), (-13.2, 6), (-12.6, 13) ]
+
+-- | A black bow, its knot at (x, y), turned @tilt@ degrees.
+bow :: Float -> Float -> Float -> Picture
+bow x y tilt = Translate x y (Rotate tilt (Pictures
+  [ Color coRibbon (Pictures
+      [ tri (0, 0) (-4.6, 3) (-4.6, -3), tri (0, 0) (4.6, 3) (4.6, -3)
+      , tri (-0.6, 0) (-2.4, -5) (-0.6, -4.2), tri (0.6, 0) (2.4, -5) (0.6, -4.2) ])
+  , Color coRibbonHi (Pictures [tri (-1.4, 0.4) (-3.8, 2) (-3.8, 0.6), tri (1.4, 0.4) (3.8, 2) (3.8, 0.6)])
+  , Color figureInk (ngon 8 1.7)
+  ]))
+
+-- | The curl on top of her head, swung about its root by @tilt@ degrees.
+ahoge :: Float -> Float -> Picture
+ahoge x tilt = Translate x 28.4 (Rotate tilt (Translate 0 (-28.4) (Pictures
+  [ Color figureInk (segs 3.4 curl), Color coHair (segs 1.5 curl) ])))
+  where curl = [(0.4, 28.4), (0.9, 32.4), (3.1, 35.2), (5.9, 35.1), (7, 32.7), (5.5, 31.1)]
+
+-- | The courier. @phase@ runs 0..1 across a step.
+courier :: Dir -> Float -> Picture
+courier facing phase = stood bob facing front back side
+  where
+    Gait bob stride sway dip trail = gaitAt phase
+    capOutline cx = Color figureInk (Translate cx 17 (ngon 20 14.2))
+    -- the head of hair, its lower right in shadow
+    hairCap cx = Pictures
+      [ Color coHairShade (Translate cx 17 (ngon 20 12.6))
+      , Color coHair (Translate (cx - 1.3) 17.8 (ngon 20 11.4))
       ]
-    -- The coat: a trapezoid wider at the hem (32 units) than at the shoulders (24),
-    -- its fill set 2 units inside the outline, and the right-hand part of it in the
-    -- darker shade, as if lit from the left.
-    trunk = Pictures
-      [ Color outline (Polygon [(-16, -14), (16, -14), (12, 12), (-12, 12)])
-      , Color coat (Polygon [(-14, -12), (14, -12), (10.5, 11), (-10.5, 11)])
-      , Color coatShade (Polygon [(3, -12), (14, -12), (10.5, 11), (2, 11)])
-      ]
-    -- The hood: a 16-sided disc of radius 13 in the outline colour under one of
-    -- radius 11 in the hood colour, 15 units up. The prime is part of the name: plain
-    -- @head@ would shadow the Prelude's list function, which -Wall warns about.
-    head' = Pictures
-      [ Color outline (Translate 0 15 (ngon 16 13))
-      , Color hood (Translate 0 15 (ngon 16 11))
-      ]
-    -- From the front. Each foot only ever rises (max 0 drops the negative half of
-    -- the swing): the left foot in the first half of the step, the right in the
-    -- second. Then the coat, its zip (a dark strip down the middle), two buttons, the
-    -- hood, the face (a dark oval with skin inside, set in the hood) and two eyes.
+    tails =
+      let l = tailFront sway dip
+          r = flipX (tailFront (negate sway) dip)
+      in Pictures
+        [ Color figureInk (Pictures [segs 3 (closed l), segs 3 (closed r)])
+        , Color coHair (Polygon l)
+        , Color coHairShade (Polygon r)
+        , Color coHairShade (Polygon (tailFrontShade sway dip))
+        , Color coHairDeep (Polygon (flipX (tailFrontShade (negate sway) dip)))
+        ]
+    bows = Pictures [bow (-11.8) 22.6 20, bow 11.8 22.6 (-20)]
+    curl = ahoge 0.4 (negate sway * 4)
+    frontLegs = figureLegs coBoots (max 0 stride) (max 0 (negate stride))
+    fringe = [ (-8.5, 14.2), (-6.5, 15.6), (-4.6, 13.6), (-2.6, 15.8), (-0.4, 13.4)
+             , (1.8, 15.6), (3.9, 13.8), (5.9, 15.8), (7.9, 14.2) ]
+    -- the steaming bowl on the box
+    bowl = Color coIcon (Pictures
+      [ rect (-6) (-3.4) 12 1.3
+      , Polygon [ (5.2 * cos a, -3.4 + 3.6 * sin a) | i <- [0 .. 8 :: Int], let a = pi + pi * fromIntegral i / 8 ]
+      , segs 1 [(-2.6, -1), (-1.8, 0.8), (-2.6, 2.6)]
+      , segs 1 [(0, -1), (0.8, 0.8), (0, 2.6)]
+      , segs 1 [(2.6, -1), (3.4, 0.8), (2.6, 2.6)]
+      ])
+    backHair = [ (-12.2, 12), (-12, 9.6), (-9.8, 7.4), (-7.2, 9), (-4.6, 6.2), (-1.4, 8.2), (1.6, 5.8)
+               , (4.6, 8.4), (7.4, 6.4), (10, 8.6), (12, 9.8), (12.2, 12) ]
+
     front = Pictures
-      [ legs (max 0 stride) (max 0 (negate stride))
-      , trunk
-      , Color outline (rect (-1) (-12) 2 21)
-      , Color outline (Pictures [Translate (-5) (-2) (ngon 5 1.2), Translate (-5) 4 (ngon 5 1.2)])
-      , head'
-      , Color outline (Translate 0 13 (ellipse 12 7.5 6.5))
-      , Color skin (Translate 0 13 (ellipse 12 6.2 5.2))
-      , Color outline (Pictures [rect (-3.5) 13 2 2.2, rect 1.5 13 2 2.2])
+      [ frontLegs
+      , tails
+      , figureTrunk coCoat coCoatShade
+      -- the hi-vis band, shaded with the coat
+      , Color coStripe (Polygon [(-13.1, -6.4), (13.1, -6.4), (12.7, -3.2), (-12.7, -3.2)])
+      , Color coStripeShade (Polygon [(2.6, -6.4), (13.1, -6.4), (12.7, -3.2), (2.4, -3.2)])
+      , Color figureInk (rect (-0.8) (-12) 1.6 22)
+      , Color coDark (Pictures [rect (-3.6) 3.4 2 2, rect (-3.6) (-1.2) 2 2])
+      -- the box's straps over her shoulders
+      , Color coDark (Pictures
+          [ Polygon [(-9.6, 11), (-6, 11), (-6.8, -1.4), (-10.4, -1.4)]
+          , Polygon [(6, 11), (9.6, 11), (10.4, -1.4), (6.8, -1.4)] ])
+      , Color coBuckle (Pictures [rect (-9.8) 1.4 3 1.6, rect 6.8 1.4 3 1.6])
+      , capOutline 0, hairCap 0
+      -- the black collar and its buckle, under her chin
+      , Color coDark (rect (-5.4) 3.2 10.8 3.4), Color coBuckle (rect (-1.4) 4 2.8 1.8)
+      , Color figureInk (Translate 0 12 (ellipse 16 8.9 7.7))
+      , Color coSkin (Translate 0 12 (ellipse 16 7.6 6.4))
+      , Color coHair (Polygon ((-8.8, 19.4) : fringe ++ [(8.8, 19.4)]))
+      , Color coHairDeep (segs 1.1 fringe)
+      -- the locks framing her face
+      , Color coHair (Pictures
+          [ Polygon [(-9.4, 17), (-7.2, 16), (-6.9, 9), (-7.6, 4.6), (-9.8, 6.4), (-10.4, 11)]
+          , Polygon [(9.4, 17), (7.2, 16), (6.9, 9), (7.6, 4.6), (9.8, 6.4), (10.4, 11)] ])
+      , Color figureInk (Pictures
+          [ segs 1.3 [(-7.2, 16), (-6.9, 9), (-7.6, 4.6), (-9.8, 6.4)]
+          , segs 1.3 [(7.2, 16), (6.9, 9), (7.6, 4.6), (9.8, 6.4)] ])
+      , Color coEye (Pictures [rect (-4.7) 9.4 2.3 3.2, rect 2.4 9.4 2.3 3.2])
+      , Color coMouth (rect (-0.7) 7.1 1.4 0.8)
+      , bows
+      , curl
       ]
-    -- From the back: the same legs and coat, a brown pack 12 by 11 with dark lines
-    -- along its top and bottom, the hood with no face, and a dark seam down the back
-    -- of the hood, drawn last so it lies over it.
+
     back = Pictures
-      [ legs (max 0 stride) (max 0 (negate stride))
-      , trunk
-      , Color (hex 0x8C5A2B) (rect (-6) (-4) 12 11)
-      , Color outline (Pictures [rect (-6) 6 12 1.2, rect (-6) (-4) 12 1.2])
-      , head'
-      , Color coatShade (rect (-1) 6 2 16)
+      [ frontLegs
+      , figureTrunk coCoat coCoatShade
+      , Color coStripe (Polygon [(-13.1, -6.4), (-2, -6.4), (-2, -3.2), (-12.7, -3.2)])
+      , Color coStripeShade (Polygon [(-2, -6.4), (13.1, -6.4), (12.7, -3.2), (-2, -3.2)])
+      -- the box
+      , Color figureInk (rect (-13.6) (-10) 27.2 24.6)
+      , Color coDark (rect (-12) (-8.4) 24 21.4)
+      , Color coDarkHi (rect (-12) (-8.4) 1.6 21.4)
+      , Color coLid (rect (-12) 9.4 24 3.6), Color coLidShade (rect 3 9.4 9 3.6)
+      , Color figureInk (rect (-12) 8.6 24 0.9)
+      , bowl
+      , tails
+      -- her hair down the back, over the top of the box
+      , Color figureInk (Pictures [Translate 0 17 (ngon 20 14.2), segs 3 backHair])
+      , Color coHair (Pictures
+          [ Translate 0 17 (ngon 20 12.6)
+          , Polygon ((-12.3, 17) : backHair ++ [(12.3, 17)]) ])
+      , Color coHairShade (Polygon [ (4.6, 8.4), (7.4, 6.4), (10, 8.6), (12, 9.8), (12.2, 12), (12.3, 17)
+                                   , (11.6, 21.4), (9.6, 24.6), (7.6, 20), (6.4, 13) ])
+      , Color coHairDeep (segs 1 [(0, 29.4), (0, 19.4)])
+      , bows
+      , curl
       ]
-    -- In profile, facing left. The two feet move opposite ways, one up as the other
-    -- goes down. A dark arm hangs at the coat's side; the face sits towards the left
-    -- of the hood with one eye at its front; a dark flap over the top of the face is
-    -- the hood's peak.
+
+    -- Facing left. The box rides on her back, at +x; the near tail hangs from the
+    -- back of her head over it, the far one shows just behind.
+    tailSide dx dy =
+      let s = trail + sway * 0.4
+      in [ (4 + dx, 25.4 + dy), (8.8 + dx, 25.6 + dy), (12 + dx, 21.6 + dy), (13.2 + dx, 15 + dy)
+         , (12.8 + dx, 7 + dy), (11.8 + dx + s * 0.6, 1 + dy + dip * 0.5), (10.4 + dx + s, -4.6 + dy + dip)
+         , (8.8 + dx + s * 0.6, 0.4 + dy + dip * 0.5), (8.4 + dx, 8 + dy), (7.8 + dx, 15 + dy), (5.4 + dx, 20.6 + dy) ]
+    sideFringe = [(-12.2, 14.2), (-10.4, 15.2), (-8.6, 13.6), (-6.4, 15.4), (-3.8, 15.6)]
     side = Pictures
-      [ legs stride (negate stride)
-      , trunk
-      , Color coatShade (rect (-3) (-9) 7 13)
-      , head'
-      , Color outline (Translate (-5) 13 (ellipse 10 6 6))
-      , Color skin (Translate (-6) 13 (ellipse 10 4.8 4.8))
-      , Color outline (rect (-9) 13 2 2.2)
-      , Color coatShade (Polygon [(-13, 22), (-4, 26), (2, 15), (-11, 19)])
+      [ figureLegs coBoots stride (negate stride)
+      -- the box, standing proud of her back
+      , Color figureInk (rect 3.4 (-10) 14 24.4)
+      , Color coDark (rect 5 (-8.4) 10.8 21.2)
+      , Color coDarkHi (rect 5 (-8.4) 1.6 21.2)
+      , Color coLid (rect 5 9.2 10.8 3.6), Color coLidShade (rect 11.6 9.2 4.2 3.6)
+      , Color figureInk (rect 5 8.4 10.8 0.9)
+      , Color figureInk (Polygon [(-16, -14), (5.4, -14), (5.4, 12), (-12, 12)])
+      , Color coCoat (Polygon [(-14, -12), (4, -12), (4, 11), (-10.5, 11)])
+      , Color coStripe (Polygon [(-13.1, -6.4), (4, -6.4), (4, -3.2), (-12.7, -3.2)])
+      -- the arm, with the band round the sleeve, and the strap over the shoulder
+      , Color figureInk (rect (-4.4) (-10) 9 15.6)
+      , Color coCoatShade (rect (-3) (-8.6) 6.2 12.8)
+      , Color coStripeShade (rect (-3) (-5.6) 6.2 2.4)
+      , Color coDark (rect (-1) 4.4 4 6.6)
+      , blob coHairDeep 3 (tailSide 2.6 1.6)
+      , capOutline 1.4, hairCap 1.4
+      , Color coDark (rect (-9.8) 3.2 9 3.4)
+      , Color figureInk (Translate (-5.4) 12.2 (ngon 16 6.9))
+      , Color coSkin (Translate (-6.4) 12.2 (ngon 16 5.6))
+      , Color coHair (Polygon ((-12.8, 15.6) : sideFringe ++ [(-3.4, 19.6), (-12, 19.6)]))
+      , Color coHairDeep (segs 1.1 sideFringe)
+      , Color coEye (rect (-10.6) 9.4 2.2 3.2)
+      -- the lock in front of her ear
+      , Color coHair (Polygon [(-2.2, 17.4), (0.8, 16.8), (0.6, 9), (-0.6, 5.6), (-2.2, 7.6)])
+      , Color figureInk (segs 1.3 [(0.8, 16.8), (0.6, 9), (-0.6, 5.6), (-2.2, 7.6), (-2.2, 17.4)])
+      , blob coHair 3 (tailSide 0 0)
+      , Color coHairShade (Polygon [(8.6, 7), (11.2, 12), (11.6, 5), (10.4 + trail + sway * 0.4, -3 + dip), (9.2, 1)])
+      , bow 6.4 23.4 (-10)
+      , ahoge 0 (negate sway * 4 + trail * 3)
       ]
+
+-- | Where a jump would set her down: her outline, tails and all, in pale light.
+-- @k@ is how strongly it shows, lower in the era the player is not looking at.
+courierEcho :: Float -> Float -> Picture
+courierEcho clock k = echoOf clock k
+  [Polygon l, Polygon r]
+  [segs 1.6 (take 9 l), segs 1.6 (drop 2 r)]
+  where
+    l = tailFront 0 0
+    r = flipX l
+
+courierHead :: Picture
+courierHead = Pictures
+  [ Color (hexA 0x000000 0.5) (ngon 20 10.5)
+  , Color coCoat (Polygon [(-7, -10), (7, -10), (5, -5), (-5, -5)])
+  , Color coHair (ngon 20 9)
+  , Color (hex 0xF6D9B6) (Translate 0 (-1.8) (ngon 16 5.2))
+  , Color coHair (Polygon legendFringe)
+  , legendEyes
+  , bow (-8) 5 25, bow 8 5 (-25)
+  ]
+
+-- The lighthouse keeper ---------------------------------------------------------
+
+-- Drawn from her portrait: long black hair, a brown field jacket worn open over a
+-- black shirt, pale piping on its edges, flap pockets, a brass patch on the sleeve.
+
+keJacket, keJacketShade, keJacketDeep, kePiping, keShirt, keBrass, keHair, keHairDeep,
+  keSheen, keSheenHi, keSkin, keEye, keMouth, keBoots :: Color
+keJacket = hex 0x75523F
+keJacketShade = hex 0x523829
+keJacketDeep = hex 0x3E2A20
+kePiping = hex 0xC9B9A6
+keShirt = hex 0x24212A
+keBrass = hex 0xC29A45
+keHair = hex 0x2B2633
+keHairDeep = hex 0x18151D
+keSheen = hex 0x5D5674
+keSheenHi = hex 0x8A84A6
+keSkin = hex 0xF0D0B4
+keEye = hex 0x4A4048
+keMouth = hex 0xBE8A7C
+keBoots = hex 0x1F1A17
+
+-- | Her hair seen from the front, falling behind her to the small of her back.
+keeperBackHair :: Float -> Float -> [Pt]
+keeperBackHair s d =
+  [ (-12.4, 22), (12.4, 22), (15.4, 14), (16.2, 3), (15 + s, -7 + d), (11, -6.2)
+  , (-11, -6.2), (-15 + s, -7 + d), (-16.2, 3), (-15.4, 14) ]
+
+-- | The lighthouse keeper. @phase@ runs 0..1 across a step.
+lightKeeper :: Dir -> Float -> Picture
+lightKeeper facing phase = stood bob facing front back side
+  where
+    Gait bob stride sway dip trail = gaitAt phase
+    frontLegs = figureLegs keBoots (max 0 stride) (max 0 (negate stride))
+    -- a lock over each shoulder; the right one mirrors the left but swings the same way
+    lock s =
+      [ (-10.4, 18), (-7.6, 16), (-7.4, 8), (-7.4 + s * 0.4, -1 + dip * 0.5), (-8.8 + s * 0.7, -3.8 + dip)
+      , (-10.2 + s * 0.3, -0.6 + dip * 0.5), (-10.8, 8) ]
+    fringe = [ (-8.7, 12.6), (-6.7, 14.6), (-5.2, 12), (-3, 14.2), (-1.2, 11.6), (0.6, 14.6)
+             , (2.6, 12.4), (4.6, 14.6), (6.4, 12.2), (8.3, 13.8) ]
+
+    front = Pictures
+      [ blob keHairDeep 3 (keeperBackHair sway dip)
+      , frontLegs
+      , figureTrunk keJacket keJacketShade
+      -- the jacket open on her shirt, piped down both edges
+      , Color keShirt (Polygon [(-4.4, 11), (4.4, 11), (3.6, -12), (-3.6, -12)])
+      , Color kePiping (Pictures [segs 1.1 [(-4.4, 11), (-3.6, -12)], segs 1.1 [(4.4, 11), (3.6, -12)]])
+      , Color keJacketShade (rect (-11.6) (-4.6) 5.8 5), Color keJacketDeep (rect 5.8 (-4.6) 5.6 5)
+      , Color kePiping (Pictures [rect (-11.8) 0.2 6.2 1, rect 5.6 0.2 6.2 1])
+      , Color keBrass (rect (-14.4) (-9.6) 3.8 1.7)
+      , Color figureInk (Translate 0 17 (ngon 20 14.2))
+      , Color keHair (Translate 0 17 (ngon 20 12.6))
+      , Color keSheen (Pictures
+          [ Polygon [(-9.6, 23), (-5.8, 26.6), (-0.6, 27.9), (3.2, 27.5), (-0.8, 25.6), (-5.4, 24.4), (-8.8, 21)]
+          , Polygon [(4.8, 26.6), (8, 24.6), (9, 22.6), (6.2, 24.4)] ])
+      , Color keSheenHi (Polygon [(-6.6, 25.4), (-3, 27), (-1.6, 26.4), (-4.6, 25.2)])
+      , Color keShirt (rect (-5.4) 3.2 10.8 3.4)
+      , Color figureInk (Translate 0 12 (ellipse 16 8.9 7.7))
+      , Color keSkin (Translate 0 12 (ellipse 16 7.6 6.4))
+      , Color keHair (Polygon ((-8.9, 19.4) : fringe ++ [(8.9, 19.4)]))
+      , Color figureInk (segs 1.1 fringe)
+      -- eyes half under their lids
+      , Color keEye (Pictures [rect (-4.9) 9.2 2.7 2.1, rect 2.2 9.2 2.7 2.1])
+      , Color figureInk (Pictures [rect (-5.1) 11.1 3.1 0.9, rect 2 11.1 3.1 0.9])
+      , Color keMouth (rect (-0.7) 7 1.4 0.7)
+      , blob keHair 2.4 (lock sway), blob keHair 2.4 (flipX (lock (negate sway)))
+      , Color keSheen (Pictures [segs 1 [(-9, 14), (-8.9, 4)], segs 1 [(9, 14), (8.9, 4)]])
+      ]
+
+    mass = [ (-12.6, 18), (12.6, 18), (15, 12), (15.4, 2), (14 + sway, -7.6 + dip), (9.6, -5.6), (5.6, -8)
+           , (1.2, -5.8), (-3.4, -8), (-7.6, -5.8), (-12 + sway, -7.6 + dip), (-15.4, 2), (-15, 12) ]
+    back = Pictures
+      [ frontLegs
+      , figureTrunk keJacket keJacketShade
+      , Color keJacketDeep (rect (-11) 5 22 1)
+      , Color keBrass (rect 10.6 (-9.6) 3.8 1.7)
+      , Color figureInk (Pictures [Translate 0 17 (ngon 20 14.2), segs 3 (closed mass)])
+      , Color keHair (Pictures [Translate 0 17 (ngon 20 12.6), Polygon mass])
+      , Color keHairDeep (Pictures
+          [ segs 1 [(-2.4, 22), (-3, 8), (-2.4, -4)], segs 1 [(5, 22), (5.4, 8), (5.6, -4)]
+          , segs 1 [(-9, 16), (-10.4, 4), (-10 + sway * 0.5, -4)] ])
+      , Color keSheen (Pictures
+          [ segs 1.3 [(-6, 25), (-6.8, 14), (-6.2, 3)], segs 1.3 [(1.5, 27), (1.2, 13), (2, 0)]
+          , segs 1.3 [(7.6, 24), (8.6, 12), (8.2, 2)]
+          , Polygon [(-9.6, 22.4), (-4.6, 26.4), (1.6, 27.8), (6.8, 26.4), (9.8, 22.6), (5.6, 24.4), (0.4, 25.4), (-5, 24.6)] ])
+      , Color keSheenHi (Polygon [(-3.4, 26.2), (1.6, 27.2), (4.4, 26.4), (0.6, 26)])
+      ]
+
+    -- Facing left: her hair falls down her back, at +x, and one lock over her
+    -- shoulder in front of the ear.
+    backFall = [ (1, 24), (9, 24.6), (13.2, 18), (14.6, 8), (14.4 + trail * 0.6, -1.5 + dip * 0.5)
+               , (12.2 + trail, -7.4 + dip), (8.6, -4.6), (6.2, 2), (4.6, 10) ]
+    sideLock = [ (-2.2, 17.6), (0.8, 17.2), (0.6, 7), (0.2 + trail * 0.3, -1 + dip * 0.5)
+               , (-1.4 + trail * 0.5, -3.6 + dip), (-2.6, 1), (-2.4, 9) ]
+    sideFringe = [(-12.2, 13), (-10.4, 14.6), (-8.6, 12.4), (-6.4, 14.4), (-3.8, 15.4)]
+    side = Pictures
+      [ figureLegs keBoots stride (negate stride)
+      , figureTrunk keJacket keJacketShade
+      , Color keShirt (Polygon [(-11.2, 11), (-8.4, 11), (-9.6, -12), (-13.2, -12)])
+      , Color kePiping (segs 1.1 [(-8.4, 11), (-9.6, -12)])
+      , Color keJacketShade (rect (-8) (-4.6) 4.6 5), Color kePiping (rect (-8.2) 0.2 5 1)
+      -- the arm, with its cuff and the brass patch
+      , Color figureInk (rect (-4.4) (-10) 9 15.6)
+      , Color keJacketShade (rect (-3) (-8.6) 6.2 12.8)
+      , Color keJacketDeep (rect (-3) (-8.6) 6.2 1.6)
+      , Color keBrass (rect (-2.4) 0.6 5 1.7)
+      , blob keHair 3 backFall
+      , Color keHairDeep (segs 1 [(8, 20), (10.4, 8), (10 + trail * 0.6, -3)])
+      , Color keSheen (Pictures [segs 1.3 [(5, 20), (7.4, 10), (7.4, 2)], segs 1.3 [(11.2, 18), (12.4, 8)]])
+      , Color figureInk (Translate 1.4 17 (ngon 20 14.2))
+      , Color keHair (Translate 1.4 17 (ngon 20 12.6))
+      , Color keSheen (Polygon [(-8.6, 23.4), (-3.6, 27), (2.6, 28.4), (8, 26.4), (3, 26), (-3, 24.6)])
+      , Color keSheenHi (Polygon [(-2.4, 26.6), (2.6, 27.6), (4.6, 27), (0.6, 26.4)])
+      , Color keShirt (rect (-9.8) 3.2 9 3.4)
+      , Color figureInk (Translate (-5.4) 12.2 (ngon 16 6.9))
+      , Color keSkin (Translate (-6.4) 12.2 (ngon 16 5.6))
+      , Color keHair (Polygon ((-12.8, 15.4) : sideFringe ++ [(-3.4, 19.6), (-12.2, 19.6)]))
+      , Color figureInk (segs 1.1 sideFringe)
+      , Color keEye (rect (-10.8) 9.2 2.4 2.1), Color figureInk (rect (-11) 11.1 2.8 0.9)
+      , blob keHair 2.4 sideLock
+      , Color keSheen (segs 1 [(-0.8, 15), (-0.9, 4)])
+      ]
+
+-- | Where a jump would set her down: her outline, long hair and all, in pale light.
+keeperEcho :: Float -> Float -> Picture
+keeperEcho clock k = echoOf clock k
+  [Polygon hair]
+  [segs 1.6 (take 5 (drop 1 hair)), segs 1.6 (drop 6 hair ++ take 1 hair)]
+  where hair = keeperBackHair 0 0
+
+keeperHead :: Picture
+keeperHead = Pictures
+  [ Color (hexA 0x000000 0.5) (ngon 20 10.5)
+  , Color keHairDeep (Polygon [(-9, 0), (9, 0), (10, -9), (-10, -9)])
+  , Color keJacket (Polygon [(-7, -10), (7, -10), (5, -5), (-5, -5)])
+  , Color keHair (ngon 20 9)
+  , Color keSkin (Translate 0 (-1.8) (ngon 16 5.2))
+  , Color keHair (Polygon legendFringe)
+  , legendEyes
+  ]
+
+legendFringe :: [Pt]
+legendFringe = [(-5.4, 1), (5.4, 1), (5, -0.6), (3, 0.2), (1, -0.8), (-1, 0.2), (-3, -0.8), (-5, 0)]
+
+legendEyes :: Picture
+legendEyes = Color (hex 0x3A2A1A) (Pictures [Translate x (-2.4) (ngon 6 0.9) | x <- [-2, 2]])
+
+-- | An echo: a walker's body and head in pale light over a soft halo, with
+-- whatever hair is their own given as fills and as edges.
+echoOf :: Float -> Float -> [Picture] -> [Picture] -> Picture
+echoOf clock k hairFills hairEdges = Scale 1.08 1.08 (Pictures
+  [ Color (hexA 0x9CE7FF (0.16 * k)) (Translate 0 (-2) (ngon 24 (24 + 2 * sin (clock * 0.08))))
+  , Color (hexA 0x0A2A33 (0.35 * k)) (Translate 0 (-20) (ellipse 16 15 6))
+  , Color (hexA 0x9CE7FF (0.55 * k)) (Pictures (hairFills ++ [Polygon trunkShape, Translate 0 17 (ngon 20 12.6)]))
+  , Color (hexA 0xE6FAFF (0.85 * k)) (Pictures (hairEdges ++
+      [ segs 1.6 (closed trunkShape)
+      , Translate 0 17 (ring 20 11.8 1.6 1)
+      ]))
+  ])
 
 -- The power cell ---------------------------------------------------------------
 
@@ -358,34 +670,6 @@ crossingMark era = Color shade (Pictures
       Present -> hexA 0x9CC7D8 0.6
 
 -- The echo ---------------------------------------------------------------------
-
--- | The keeper's echo: their outline in pale light. @k@ is how strongly it shows,
--- lower when it stands in the era the player is not looking at.
---
--- @clock@ (ticks) makes the halo breathe. The same body and hood as 'keeperIn', at
--- the same 1.08 scale, but as pale blue light with no legs or face: a faint halo, a
--- soft shadow, the body and hood filled translucent, and a brighter outline round
--- both. For the echo Render passes k = 1 in the era on show and 0.4 in the other,
--- blending between them while it walks back across a shift. Render also uses this
--- figure, at k = 0.9, for the keeper's reflection where a mirror would put them.
-echoFigure :: Float -> Float -> Picture
-echoFigure clock k = Scale 1.08 1.08 (Pictures
-  -- The halo: radius 24, breathing 2 units either way every 2 pi / 0.08, about 79
-  -- ticks.
-  [ Color (hexA 0x9CE7FF (0.16 * k)) (Translate 0 (-2) (ngon 24 (24 + 2 * sin (clock * 0.08))))
-  , Color (hexA 0x0A2A33 (0.35 * k)) (Translate 0 (-20) (ellipse 16 15 6))
-  -- The coat's fill shape and the hood's, as in 'keeperIn'.
-  , Color (hexA 0x9CE7FF (0.55 * k)) (Polygon [(-14, -12), (14, -12), (10.5, 11), (-10.5, 11)])
-  , Color (hexA 0x9CE7FF (0.55 * k)) (Translate 0 15 (ngon 16 11))
-  -- The outline: the path repeats its first point at the end, so 'segs' closes it.
-  -- A name in backticks is used as an infix operator: p `atY` y is atY p y.
-  , Color (hexA 0xE6FAFF (0.85 * k)) (Pictures
-      [ segs 1.6 [(-14, -12), (14, -12), (10.5, 11), (-10.5, 11), (-14, -12)]
-      , ring 16 11 1.6 1 `atY` 15
-      ])
-  ])
-  -- Translate with its arguments the other way round, so it reads well infix.
-  where atY p y = Translate 0 y p
 
 -- | One of the footprints the echo would walk back along. @k@ fades the older ones.
 --
