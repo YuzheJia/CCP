@@ -2,6 +2,14 @@
 {-# LANGUAGE FlexibleContexts #-}
 -- | Player-sized actions over the real 'stepGame': the intended route, and the
 -- search that re-checks the level through the implementation itself.
+-- Tests use the routes and cheapest-first searches; Main keeps and advances
+-- the resumable dead-end search between frames. This module does no IO
+-- and imports no graphics. A search edge presses one key and waits for animation
+-- to settle, using the same Game.Logic rules as play. Costs are budget seconds,
+-- not elapsed ticks; animation still advances at 60 ticks per second.
+-- Map coordinates are integer cells, x rightwards and y downwards. Time, history
+-- and decorative state are omitted from the one-keeper key on purpose: dead-end
+-- reachability asks whether the board can be solved with replenished time.
 module Game.Solution
   ( Action (..)
   , intendedRoute
@@ -50,12 +58,21 @@ import Data.Word (Word32, Word64)
 import Game.Logic
 import Game.Types
 
-data Action = Go !Dir | ShiftEra | SendEcho
+-- | One fresh player command, not one animation tick. Go can walk, push or jump
+-- according to the board. The bang forces its direction; deriving supplies
+-- equality, ordering (for containers) and printable diagnostics.
+-- Go carries the direction; ShiftEra changes the shared era; SendEcho requests
+-- the optional echo mechanic, which ordinary campaign rules disable.
+data Action = Go !Dir | ShiftEra | SendEcho -- ^ Move, shift or echo command.
   deriving (Eq, Ord, Show)
 
+-- | Candidate commands in deterministic order, including echo even if disabled.
+-- Enum/Bounded on Dir enumerate its four constructors; refused moves are filtered
+-- by comparing resulting keys rather than by duplicating the rules here.
 allActions :: [Action]
 allActions = ShiftEra : SendEcho : map Go [minBound .. maxBound]
 
+-- | Human-readable keyboard name for a command; used in test/route diagnostics.
 actionLabel :: Action -> String
 actionLabel ShiftEra      = "Space"
 actionLabel SendEcho      = "E"
@@ -81,6 +98,7 @@ intendedRoute = concat
   , left 1                                 -- onto the lighthouse at (2,2)
   ]
   where
+    -- Each helper repeats a direction n times; concat above joins route segments.
     up n    = replicate n (Go DirUp)
     down n  = replicate n (Go DirDown)
     left n  = replicate n (Go DirLeft)
@@ -91,6 +109,8 @@ intendedRoute = concat
 -- takes minutes and gigabytes, so the tests and the demo replay this instead.
 -- W A S D are steps and @_@ is a shift.
 knownRoute :: Level -> Maybe [Action]
+-- Lookup is by exact level name. (<$>) maps only a successful Maybe result;
+-- a missing name leaves Nothing, telling the caller to use a real search.
 knownRoute level = map key <$> lookup (lvName level) routes
   where
     routes =
@@ -98,6 +118,8 @@ knownRoute level = map key <$> lookup (lvName level) routes
         , "WWW_DDDDWWWWWSAWASAAWWDDDDDSASSSAAAWWADWDDWAWSSSDSSAAWASSD_SSS"
           ++ replicate 17 'A' ++ replicate 9 'W' )
       ]
+    -- The stored alphabet uses underscore for shifts; the fallback also treats
+    -- any other non-direction character as a shift, so this is trusted data.
     key c = case c of
       'W' -> Go DirUp
       'A' -> Go DirLeft
@@ -128,10 +150,14 @@ startPlaying level = stepGame level noInput { tiEnter = True } (initialGame leve
 applyAction :: Level -> Action -> Game -> Game
 applyAction level action g = settle (stepGame level press g)
   where
+    -- Record update syntax copies noInput and replaces only the named fields.
+    -- Both direction fields are set so the same command works for keeper one.
     press = case action of
       Go dir   -> noInput { tiDir = Just dir, tiDir1 = Just dir }
       ShiftEra -> noInput { tiShift = True }
       SendEcho -> noInput { tiEcho = True }
+    -- Idle ticks finish movement but spend no extra budget. A terminal phase
+    -- returns immediately; continuing to wait there could never settle a win.
     settle s
       | gPhase s == Playing && gMotion s /= Settled = settle (stepGame level noInput s)
       | otherwise = s
@@ -141,22 +167,27 @@ applyAction level action g = settle (stepGame level press g)
 -- would be merged. A level without an echo keeps no footprints, so for it these add
 -- nothing.
 data StateKey = StateKey
-  { skEra     :: !Era
-  , skCell    :: !Cell
-  , skHasCell :: !Bool
-  , skPhase   :: !Phase
-  , skCrates  :: !(Set.Set Cell)
-  , skFilled  :: !(Set.Set Cell)
-  , skTrail   :: ![Spot]
-  , skEcho    :: !(Maybe Spot)
+  { skEra     :: !Era -- ^ Shared era used for collision and pickup.
+  , skCell    :: !Cell -- ^ Settled first-keeper cell, x right and y down.
+  , skHasCell :: !Bool -- ^ Whether keeper one carries the power cell.
+  , skPhase   :: !Phase -- ^ Playing or terminal status; wins must stay distinct.
+  , skCrates  :: !(Set.Set Cell) -- ^ Crates, shared by both eras.
+  , skFilled  :: !(Set.Set Cell) -- ^ Pits permanently filled by consumed crates.
+  , skTrail   :: ![Spot] -- ^ Most recent footprint first, including its era.
+  , skEcho    :: !(Maybe Spot) -- ^ Stationary echo's era and cell, if any.
   , skMirrors :: ![(Cell, Mirror)]  -- ^ the movable ones only: the rest never change
   } deriving (Eq, Ord, Show)
 
+-- | Forget transient fields of a settled one-keeper game. Map.toList orders
+-- mirrors by cell, making the retained movable mirrors canonical for equality.
+-- Fixed mirrors come from the Level; the second keeper needs DuoKey instead.
 stateKey :: Game -> StateKey
 stateKey g = StateKey (gEra g) (gCell g) (gHasCell g) (gPhase g) (gCrates g) (gFilled g)
                       (gTrail g) (gEcho g)
                       (filter (mMovable . snd) (Map.toList (gMirrors g)))
 
+-- | Exhaustive reachable-state result. Costs and the winning route use seconds;
+-- the dead list ignores the actual level budget and includes no unreachable keys.
 data SearchResult = SearchResult
   { srStates   :: !(Map.Map StateKey Int)    -- ^ cheapest cost to reach each state
   , srGoal     :: !(Maybe (Int, [Action]))   -- ^ cheapest cost to win, and a route
@@ -176,12 +207,15 @@ deadStates level =
   -- A finished search always has its set, so the empty set is never used.
   fromMaybe Set.empty (deadSearchResult (finishDeadSearch (startDeadSearch level)))
 
+-- | Work carried between Dijkstra iterations. A strict record field forces the
+-- outer container, not every element. Maps own the best known costs and games;
+-- the priority queue may still contain older, more expensive entries.
 data Explored = Explored
-  { exQueue   :: !(Set.Set (Int, StateKey))
-  , exCosts   :: !(Map.Map StateKey Int)
-  , exGames   :: !(Map.Map StateKey Game)
-  , exParents :: !(Map.Map StateKey (StateKey, Action))
-  , exEdges   :: ![(StateKey, StateKey)]
+  { exQueue   :: !(Set.Set (Int, StateKey)) -- ^ Cost in seconds, then tie-break key.
+  , exCosts   :: !(Map.Map StateKey Int) -- ^ Least cost found for each key.
+  , exGames   :: !(Map.Map StateKey Game) -- ^ Representative game for that cost.
+  , exParents :: !(Map.Map StateKey (StateKey, Action)) -- ^ Best route's last edge.
+  , exEdges   :: ![(StateKey, StateKey)] -- ^ All accepted directed edges, reversed.
   }
 
 -- | Cheapest-first over the real rules. The budget is refilled before each action
@@ -198,6 +232,8 @@ search level allowed start = SearchResult
   , srDeadEnds = [k | k <- Map.keys costs, not (k `Set.member` canWin)]
   }
   where
+    -- This where block shares the explored graph between all three result
+    -- fields. Laziness means merely constructing SearchResult can defer work.
     startKey = stateKey start
     explored = explore Explored
       { exQueue = Set.singleton (0, startKey)
@@ -210,6 +246,8 @@ search level allowed start = SearchResult
     edges = exEdges explored
     isWon k = skPhase k == Won
 
+    -- Set orders pairs lexicographically, so minView supplies the cheapest
+    -- queued state. Stale costs and terminal states need no further expansion.
     explore ex = case Set.minView (exQueue ex) of
       Nothing -> ex
       Just ((cost, key), queue)
@@ -218,6 +256,9 @@ search level allowed start = SearchResult
         | otherwise ->
             explore (foldl' (relax cost key (exGames ex Map.! key)) ex { exQueue = queue } allActions)
 
+    -- A strict left fold tries the six commands without retaining a chain of
+    -- pending accumulator updates. Every non-self edge is kept for the backward
+    -- reachability pass, even if it does not improve the cheapest route.
     relax cost key g ex action
       | not (allowed g action) || nextKey == key = ex
       | maybe True (nextCost <) (Map.lookup nextKey (exCosts ex)) = linked
@@ -228,6 +269,8 @@ search level allowed start = SearchResult
           }
       | otherwise = linked
       where
+        -- Read the actual charge from stepGame. Refilled time removes the level
+        -- budget constraint; rejected commands cannot invent a useful edge.
         ready = refill g
         next = applyAction level action ready
         nextKey = stateKey next
@@ -237,6 +280,8 @@ search level allowed start = SearchResult
     refill g = g { gRemaining = plentyOfTime, gHistory = [], gFeedback = Nothing, gBump = 0 }
     plentyOfTime = 1000000 :: Int
 
+    -- Follow best parents back to the start, prepending commands so the result
+    -- is already in play order. The start has no parent.
     routeTo = go []
       where
         go route k = case Map.lookup k (exParents explored) of
@@ -248,6 +293,8 @@ search level allowed start = SearchResult
     canWin = spread (Set.fromList (filter isWon (Map.keys costs)))
                     (filter isWon (Map.keys costs))
     spread done [] = done
+    -- Membership suppresses revisits, so cycles in the puzzle graph terminate.
+    -- A comprehension filters predecessors not yet known to lead to a win.
     spread done (k : rest) =
       let new = [p | p <- Map.findWithDefault [] k predecessors, not (p `Set.member` done)]
       in spread (foldr Set.insert done new) (new ++ rest)
@@ -319,7 +366,7 @@ data DeadSearch
 
 -- | The work still to do, as a lazy chain. Evaluating a link runs one unit of work
 -- and gives the next link, or the finished result once there is nothing left.
-data Steps = Step Steps | Done DeadEnds
+data Steps = Step Steps | Done DeadEnds -- ^ Deferred tail, or immutable result.
 
 -- | The dead states of a finished search, packed: their keys back to back in one
 -- unboxed array, and a hash table of their numbers, so a lookup is one packing and
@@ -349,6 +396,8 @@ advanceDeadSearch n search0 = case search0 of
   Searched _ _ -> search0
   Searching steps0 -> go n steps0
   where
+    -- Do not inspect steps at zero: inspecting its constructor would run another
+    -- unit. Step's field is intentionally lazy; adding a bang would defeat this.
     go k steps
       | k <= 0 = Searching steps
       | otherwise = case steps of
@@ -386,6 +435,11 @@ knownDeadEnd s key = case s of
 deadSteps :: Level -> Steps
 deadSteps level = Lazy.runST (Lazy.strictToLazyST (newEnv level) >>= loop Exploring)
   where
+    -- strictToLazyST runs each mutable unit completely before exposing a Step.
+    -- Lazy.runST hides the state-thread type s, so no mutable array escapes.
+    -- Sharing an evaluated Step shares its result; it does not rerun mutations.
+    -- Allocation at stage changes is also part of a unit, so n bounds work units,
+    -- not milliseconds; Main measures and adjusts the amount it requests.
     loop stage env = do
       next <- Lazy.strictToLazyST (unit env stage)
       case next of
@@ -398,7 +452,7 @@ deadSteps level = Lazy.runST (Lazy.strictToLazyST (newEnv level) >>= loop Explor
 -- | Everything a search keeps between units. Arrays that grow sit in an 'STRef', so
 -- a bigger copy can replace them; each starts small and doubles when full.
 data Env s = Env
-  { enLevel   :: !Level
+  { enLevel   :: !Level -- ^ Immutable rules and maps used by every expansion.
   , enFresh   :: !Game
     -- ^ the level's fresh start, which every game expanded is rebuilt from
   , enFixed   :: !(Map.Map Cell Mirror)
@@ -467,14 +521,17 @@ data Backward s = Backward
 
 -- | The result, while it is being packed: what 'DeadEnds' holds, still writable.
 data Packed s = Packed
-  { pkWords  :: !(STUArray s Int Word64)
-  , pkStarts :: !(STUArray s Int Int)
-  , pkTable  :: !(STUArray s Int Int32)
+  { pkWords  :: !(STUArray s Int Word64) -- ^ Dead keys only, in 64-bit words.
+  , pkStarts :: !(STUArray s Int Int) -- ^ Word offsets, with a final sentinel.
+  , pkTable  :: !(STUArray s Int Int32) -- ^ Dead-state index plus one, or zero.
   }
 
 -- | A search with only the start state found.
 newEnv :: Level -> ST s (Env s)
 newEnv level = do
+  -- Counters are indexed by the derived Enum values. Capacities below count
+  -- elements, not bytes: Word64 keys, Int offsets and Int32 state/edge links.
+  -- Arrays grow independently; -1 ends an edge chain while 0 empties a hash slot.
   counts <- newArray (fromEnum (minBound :: Counter), fromEnum (maxBound :: Counter)) 0
   keys <- newArray (0, 255) 0 >>= newSTRef
   starts <- newArray (0, 63) 0 >>= newSTRef
@@ -528,6 +585,8 @@ gameAt env key = (enFresh env)
 -- | One unit of work in the given stage: the next stage, or the finished result.
 unit :: Env s -> Stage s -> ST s (Either DeadEnds (Stage s))
 unit env stage = case stage of
+  -- Exhaust discovery before walking backwards: a late edge could otherwise
+  -- make a supposedly dead state live. Only then can exact result sizes be known.
   Exploring -> do
     more <- expandNext env
     if more then pure (Right Exploring) else Right . Spreading <$> beginSpreading env
@@ -546,10 +605,10 @@ unit env stage = case stage of
 -- States are expanded in the order they were numbered, so the ones waiting are
 -- simply the numbers from 'Expanded' up to 'StatesFound', and their keys are
 -- already in the key store. No game is kept between units: each is rebuilt from its
--- key ('gameAt'). That is what keeps a search out of the way of the major
--- collection Gloss runs after every frame, which copies every boxed value still
--- alive: measured in play, a queue of the games waiting made each of those
--- collections take two thirds of a millisecond longer.
+-- key ('gameAt'). This also reduces major-collection work. The old Gloss loop
+-- collected after every frame; the vendored loop now requests it once a second.
+-- In the earlier measurements, retaining a queue of games made each collection
+-- take two thirds of a millisecond longer.
 --
 -- As in 'search': only a state still being played is expanded, every action in
 -- 'allActions' is tried on its refilled game, and an action that leaves the state
@@ -566,6 +625,8 @@ expandNext env = do
       when (skPhase key == Playing) (forM_ allActions (try here (gameAt env key)))
       pure True
   where
+    -- Each action starts from the same refilled game, not the previous action's
+    -- result. Interning first identifies self-loops and newly discovered wins.
     try here g action = do
       let next = applyAction (enLevel env) action g
           key = stateKey next
@@ -604,6 +665,9 @@ intern env key = do
   hashes <- readSTRef (enHashes env)
   starts <- readSTRef (enStarts env)
   size <- getNumElements table
+  -- Sizes are powers of two, so bitwise AND wraps a probe without division.
+  -- A collision is not equality: compare hash, length and every packed word.
+  -- At most half-full tables always have an empty slot to end a failed probe.
   let mask = size - 1
       probe i = do
         slot <- unsafeRead table i
@@ -636,6 +700,8 @@ addState :: Env s -> Int -> Word32 -> Int -> ST s Int
 addState env slot h end = do
   n <- counter env StatesFound
   table <- readSTRef (enTable env)
+  -- Store index+1 so state zero can coexist with the empty-slot marker. Starts
+  -- already contains this key's beginning; append its end as the next sentinel.
   unsafeWrite table slot (fromIntegral n + 1)
   starts <- roomFor (enStarts env) (n + 1)
   unsafeWrite starts (n + 1) end
@@ -671,6 +737,9 @@ place table mask i v = do
 -- does not mind.
 link :: Env s -> Int -> Int -> ST s ()
 link env from to = do
+  -- Prepend edge e to the destination's incoming list: froms[e] is the source,
+  -- earlier[e] is the old head, latest[to] becomes e. These are edge numbers,
+  -- not neighbouring state numbers; following earlier eventually reaches -1.
   e <- counter env MovesFound
   froms <- roomFor (enFrom env) e
   earlier <- roomFor (enEarlier env) e
@@ -682,7 +751,8 @@ link env from to = do
   setCounter env MovesFound (e + 1)
 
 -- | The array in the 'STRef', first replaced by a bigger copy if index @i@ does not
--- fit. Doubling means each element is copied about once more in all, and an
+-- fit. Doubling gives amortised constant growth cost per inserted element: the
+-- total number of copied slots is linear in the final capacity. An
 -- element-by-element copy of the biggest array here (The Long Way Round's keys,
 -- about a million words) still takes under a millisecond.
 roomFor :: MArray (STUArray s) e (ST s) => STRef s (STUArray s Int e) -> Int -> ST s (STUArray s Int e)
@@ -692,6 +762,8 @@ roomFor ref i = do
   if i < size
     then pure arr
     else do
+      -- newArray_ leaves unused slots unspecified. Only initialised prefixes are
+      -- read as data; callers initialise every newly used counter, offset or key.
       let size' = until (> i) (* 2) (max 16 size)
       arr' <- newArray_ (0, size' - 1)
       forM_ [0 .. size - 1] $ \j -> unsafeRead arr j >>= unsafeWrite arr' j
@@ -705,6 +777,8 @@ roomFor ref i = do
 beginSpreading :: Env s -> ST s (Backward s)
 beginSpreading env = do
   n <- counter env StatesFound
+  -- (<$>) applies the constructor to the first allocation; (<*>) supplies the
+  -- next allocated array. Both actions stay inside ST, in left-to-right order.
   back <- Backward <$> newArray (0, n - 1) False <*> newArray (0, n - 1) 0
   won <- readSTRef (enWon env)
   mapM_ (reach env back) won
@@ -716,6 +790,8 @@ beginSpreading env = do
 reach :: Env s -> Backward s -> Int -> ST s ()
 reach env back c = do
   already <- unsafeRead (bwCanWin back) c
+  -- Mark before pushing: even duplicate incoming edges cannot push a state
+  -- twice, so a stack with one slot per discovered state is sufficient.
   unless already $ do
     unsafeWrite (bwCanWin back) c True
     top <- counter env OnStack
@@ -748,6 +824,8 @@ spreadBack env back = do
               e <- unsafeRead latest (fromIntegral c)
               walk e
               pop (k - 1)
+      -- Follow the destination's linked edge chain, reaching each source.
+      -- Negative indices are sentinels and must never reach unsafeRead.
       walk e = unless (e < 0) $ do
         from <- unsafeRead froms (fromIntegral e)
         reach env back (fromIntegral from)
@@ -764,14 +842,17 @@ beginPacking env = do
   winners <- counter env CanWin
   used <- counter env WordsUsed
   winWords <- counter env CanWinWords
+  -- Reach counted both states and key words, avoiding another sizing pass.
+  -- Even with no dead states the table has two empty slots; its word array is
+  -- empty and its starts array holds just the terminating zero.
   let dead = n - winners
       size = until (>= 2 * dead) (* 2) 2
   Packed <$> newArray (0, used - winWords - 1) 0
          <*> newArray (0, dead) 0
          <*> newArray (0, size - 1) 0
 
--- | Copy the keys of the next 256 states that cannot win into the result, and put
--- them in its table. 'False' once every state has been looked at.
+-- | Scan the next 256 discovered states, copying only the dead keys into the
+-- result and entering them in its table. 'False' once every state has been looked at.
 pack :: Env s -> Backward s -> Packed s -> ST s Bool
 pack env back packed = do
   n <- counter env StatesFound
@@ -802,6 +883,8 @@ finishPacking :: Env s -> Packed s -> ST s DeadEnds
 finishPacking env packed = do
   dead <- counter env DeadPacked
   at <- counter env DeadWords
+  -- unsafeFreeze avoids copying. Ownership passes to DeadEnds here; no later
+  -- Step may mutate these arrays. The final offset closes the last key range.
   unsafeWrite (pkStarts packed) dead at
   DeadEnds dead <$> unsafeFreeze (pkWords packed)
                 <*> unsafeFreeze (pkStarts packed)
@@ -817,6 +900,8 @@ isDeadEnd ends key = runST $ do
   h <- hashWords buf 0 end
   let table = deTable ends
       mask = numElements table - 1
+      -- Lookups use the same hash, wrapping and full equality as insertion.
+      -- The first empty slot proves absence, since keys were never deleted.
       probe i = case table `unsafeAt` i of
         0 -> pure False
         slot -> do
@@ -856,6 +941,8 @@ deadEndSet ends =
 keyBound :: StateKey -> Int
 keyBound key = 2 + (1 + 10 * numbers) `div` 8
   where
+    -- Include collection lengths, the optional echo's worst case and coordinates.
+    -- Ten bytes cover a zigzagged 64-bit Int; the extra words allow flags/padding.
     numbers = 10 + 2 * Set.size (skCrates key) + 2 * Set.size (skFilled key)
                  + 3 * length (skTrail key) + 3 * length (skMirrors key)
 
@@ -882,6 +969,9 @@ writeKey buf at key = do
   pure ((p7 + 7) `shiftR` 3)
   where
     -- The era, whether the cell is carried, and the phase share the first byte.
+    -- Bit 0 is era, bit 1 possession, bits 2 upwards encode Phase. Remaining
+    -- fields are player x/y, crates, filled pits, trail, echo tag/spot, mirrors.
+    -- Sets use ascending cell order so equivalent sets have identical bytes.
     flags = fromIntegral (fromEnum (skEra key)) .|. (if skHasCell key then 2 else 0)
             .|. (phaseCode (skPhase key) `shiftL` 2)
     -- One byte at byte position @p@ of the array; the next position. The first byte
@@ -900,6 +990,8 @@ writeKey buf at key = do
     varint !p !z
       | z < 0x80 = byte p z
       | otherwise = byte p ((z .&. 0x7f) .|. 0x80) >>= \p' -> varint p' (z `shiftR` 7)
+    -- Zigzag makes negative coordinates short too. Positions p are byte offsets,
+    -- whereas at and the returned end are word offsets; eight bytes make a word.
     int p n = varint p (zigzag n)
     pair p (x, y) = int p x >>= \p' -> int p' y
     spot p (era, c) = int p (fromEnum era) >>= \p' -> pair p' c
@@ -916,6 +1008,9 @@ writeKey buf at key = do
 hashWords :: STUArray s Int Word64 -> Int -> Int -> ST s Word32
 hashWords buf from to = go from (fromIntegral (to - from))
   where
+    -- Bang patterns evaluate the index/hash each iteration rather than building
+    -- arithmetic thunks. The mixing arithmetic wraps as Word64; the result is
+    -- truncated to Word32 only at the end. Bounds are [from,to), in words.
     go !i !h
       | i >= to = pure (fromIntegral h)
       | otherwise = do
@@ -930,6 +1025,9 @@ hashWords buf from to = go from (fromIntegral (to - from))
 unpackKey :: (Int -> Word64) -> StateKey
 unpackKey word = case runUnpack keyU 0 of Got key _ -> key
   where
+    -- Only consume data produced by writeKey, not untrusted bytes. Length prefixes
+    -- delimit collections, and the echo tag delimits its optional spot. Canonical
+    -- set ordering justifies the unchecked fromDistinctAscList constructors.
     keyU = do
       flags <- byteU
       cell <- pairU
@@ -950,6 +1048,8 @@ unpackKey word = case runUnpack keyU 0 of Got key _ -> key
         , skEcho = echo
         , skMirrors = mirrors
         }
+    -- Word index = byte index div 8; the remainder selects the little-endian byte.
+    -- This is bit packing, independent of the host's in-memory byte order.
     byteU = Unpack $ \b ->
       Got (fromIntegral (word (b `shiftR` 3) `shiftR` (8 * (b .&. 7))) .&. 0xff) (b + 1)
     varintU :: Unpack Word64
@@ -967,15 +1067,19 @@ unpackKey word = case runUnpack keyU 0 of Got key _ -> key
 -- | Reads a packed key a byte at a time: given the next byte's index, a value and
 -- the index after it. Strict in both, so a key is read in one pass with no thunks
 -- left behind, since every state expanded is read back this way.
-newtype Unpack a = Unpack { runUnpack :: Int -> Got a }
+newtype Unpack a = Unpack { runUnpack :: Int -> Got a } -- ^ Read at a byte offset.
 
 -- | A value read, and the index of the byte after it.
-data Got a = Got !a !Int
+data Got a = Got !a !Int -- ^ Value (forced to WHNF) and next byte offset.
 
+-- | Map a decoded value while preserving the byte position. This type-class
+-- instance is what permits (<$>) in the small field decoders above.
 instance Functor Unpack where
   fmap f (Unpack u) = Unpack (\b -> case u b of Got a b' -> Got (f a) b')
   {-# INLINE fmap #-}
 
+-- | Decode a function then its argument, threading the consumed-byte position.
+-- pure consumes no input. These operations let independent fields be combined.
 instance Applicative Unpack where
   pure a = Unpack (\b -> Got a b)
   {-# INLINE pure #-}
@@ -984,6 +1088,8 @@ instance Applicative Unpack where
       Got a b'' -> Got (f a) b'')
   {-# INLINE (<*>) #-}
 
+-- | Decode a value then choose a decoder with it, needed for lengths and tags.
+-- INLINE invites GHC to remove this small wrapper in the hot unpacking path.
 instance Monad Unpack where
   Unpack u >>= k = Unpack (\b -> case u b of Got a b' -> runUnpack (k a) b')
   {-# INLINE (>>=) #-}
@@ -1017,6 +1123,8 @@ phaseOfCode c = case c of
 
 -- | A mirror in one byte: its era, its face, whether it moves, and its bend if any.
 mirrorCode :: Mirror -> Word64
+-- Bit 0 is era, bits 1-2 the first face, bit 3 movability, and bits 4 upwards
+-- the optional second face plus one (zero means no bend). Values are internal.
 mirrorCode m = fromIntegral (fromEnum (mEra m) .|. (fromEnum (mFace m) `shiftL` 1)
                              .|. (if mMovable m then 8 else 0)
                              .|. (maybe 0 ((+ 1) . fromEnum) (mBend m) `shiftL` 4))
@@ -1039,9 +1147,11 @@ mirrorOfCode c = Mirror
 -- the tests, which ask it whether two keepers can light the lamp, and whether one,
 -- with the other standing still, cannot.
 
-data DuoAction = Go1 !Dir | Go2 !Dir | ShiftBoth
+-- | One fresh command for keeper one, keeper two, or both through the era key.
+data DuoAction = Go1 !Dir | Go2 !Dir | ShiftBoth -- ^ Actor-tagged direction or shift.
   deriving (Eq, Ord, Show)
 
+-- | Shared shift followed by each keeper's four directions; echoes are excluded.
 duoActions :: [DuoAction]
 duoActions = ShiftBoth : map Go1 [minBound .. maxBound] ++ map Go2 [minBound .. maxBound]
 
@@ -1056,6 +1166,8 @@ duoLabel a = case a of
     DirLeft -> "a"
     DirRight -> "d"
 
+-- | Turn a command into one tick's fresh input. The actor-specific direction
+-- chooses the keeper; tiDir also keeps the ordinary input representation intact.
 duoPress :: DuoAction -> TickInput
 duoPress a = case a of
   Go1 d -> noInput { tiDir = Just d, tiDir1 = Just d }
@@ -1080,10 +1192,15 @@ applyDuo level a g = settle (stepGame level (duoPress a) g)
 -- | All a level for two can tell apart once both keepers stand still.
 type DuoKey = (Era, Cell, Bool, Maybe (Cell, Bool), Phase, Set.Set Cell, [(Cell, Mirror)])
 
+-- | Settled state for the current two-island puzzle, retaining each carrier.
+-- This key omits filled pits and echoes: duoSearch is for this fixture, whose
+-- maps have no pits and whose baseRules disable echoes, not arbitrary duo levels.
 duoKey :: Game -> DuoKey
 duoKey g = ( gEra g, gCell g, gHasCell g, fmap (\p -> (ptCell p, ptHasCell p)) (gPartner g)
            , gPhase g, gCrates g, filter (mMovable . snd) (Map.toList (gMirrors g)) )
 
+-- | Number of states discovered and, if found, a cheapest win in budget seconds.
+-- The search stops at its first minimal win, so drStates need not be exhaustive.
 data DuoResult = DuoResult
   { drStates :: !Int                        -- ^ states reached
   , drGoal   :: !(Maybe (Int, [DuoAction])) -- ^ cheapest cost to win, and a route
@@ -1095,16 +1212,22 @@ duoSearch :: Level -> (DuoAction -> Bool) -> Game -> DuoResult
 duoSearch level allowed start = go (Set.singleton (0, k0)) (Map.singleton k0 0)
                                    (Map.singleton k0 start) Map.empty
   where
+    -- Unlike search, allowed depends only on the command, so filter once. This
+    -- supports tests where one keeper must remain still throughout the route.
     k0 = duoKey start
     acts = filter allowed duoActions
     go queue costs games parents = case Set.minView queue of
       Nothing -> DuoResult (Map.size costs) Nothing
       Just ((cost, key), rest)
         | cost > Map.findWithDefault cost key costs -> go rest costs games parents
+        -- With non-negative action prices, the first popped win is cheapest.
         | phaseOf key == Won -> DuoResult (Map.size costs) (Just (cost, routeTo parents key))
         | phaseOf key /= Playing -> go rest costs games parents
         | otherwise ->
             let g = refill (games Map.! key)
+                -- Relax one edge, preserving the previous maps if the command
+                -- changes no key or offers no lower cost. Parents track only
+                -- improvements, sufficient to reconstruct the first win.
                 step (q, cs, gs, ps) a =
                   let next = applyDuo level a g
                       nk = duoKey next
@@ -1113,6 +1236,7 @@ duoSearch level allowed start = go (Set.singleton (0, k0)) (Map.singleton k0 0)
                      else (Set.insert (nc, nk) q, Map.insert nk nc cs, Map.insert nk next gs, Map.insert nk (key, a) ps)
                 (q', cs', gs', ps') = foldl' step (rest, costs, games, parents) acts
             in go q' cs' gs' ps'
+    -- Project the phase without assigning names to the other tuple components.
     phaseOf (_, _, _, _, p, _, _) = p
     refill g = g { gRemaining = 1000000, gHistory = [], gFeedback = Nothing, gBump = 0 }
     routeTo parents = walk []

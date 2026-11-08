@@ -1,4 +1,12 @@
--- | The one level, and the parser that refuses to build a bad one.
+-- | Campaign and prototype maps, the original test fixture, and the parser that
+-- refuses malformed levels. Game.Types defines the returned Level records;
+-- Game.Logic supplies dynamic collision, and Game.Run selects levels for play.
+-- This module validates map structure, not solvability or the claimed par: the
+-- tests use Game.Solution to establish those through the real rules.
+-- Rows run from top to bottom and columns from left to right, starting at zero.
+-- Coordinates are cells, with y growing downwards, not Gloss canvas units.
+-- Budgets, pars and slack are seconds of action cost, unrelated to real time.
+-- Map strings are source data: every character, including #, occupies one cell.
 module Game.Level
   ( pastRows, presentRows
   , parseLevel
@@ -16,6 +24,9 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Game.Types
 
+-- | Past half of Harrow Point, the original fixture. The gap at (4,2) opens
+-- the western partition; the eastern partition is sealed. The power cell at
+-- (10,2) therefore requires another era crossing beyond that eastern wall.
 pastRows :: [String]
 pastRows =
   [ "#############"
@@ -29,6 +40,9 @@ pastRows =
   , "#############"
   ]
 
+-- | Present half of the fixture. Spawn (2,6) and lamp (2,2) share the west room.
+-- Only this era opens the eastern partition at (8,6); the past's western gap
+-- is closed here. Alternating passages force the outward and homeward shifts.
 presentRows :: [String]
 presentRows =
   [ "#############"
@@ -45,6 +59,8 @@ presentRows =
 -- | The original station, kept as the tests' fixture: its map, route and dressing are
 -- pinned there.
 theLevel :: Either String Level
+-- (<$>) changes only a successful Right Level, preserving any Left error.
+-- The record update keeps the parsed maps while adding fixture metadata.
 theLevel = (\l -> l { lvName = "Harrow Point Light Station", lvDressed = True, lvPar = 108 })
   <$> parseLevel 128 pastRows presentRows
 
@@ -52,7 +68,13 @@ theLevel = (\l -> l { lvName = "Harrow Point Light Station", lvDressed = True, l
 -- its par, which a test re-derives with the solver, plus slack that shrinks as the
 -- game goes on. Short on purpose: it is played in about three minutes.
 campaign :: Either String [Level]
+-- sequence turns [Either error Level] into Either error [Level], preserving
+-- order and stopping at the first malformed map. The room helper adds par/slack;
+-- each following transformation adds explanatory or ending metadata.
 campaign = sequence
+  -- Clear the Way: the shared crate blocks the first route east; its past recess
+  -- lets it be moved out of the way. The upper gaps then require both eras to
+  -- reach the wick and return to the present lamp.
   [ withLesson "Crates only move in the past. In the present they are rusted solid."
     <$> room baseRules "Clear the Way" 48 20
       -- Push the crate into its recess in the past: in the present it is rusted
@@ -79,6 +101,9 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
+  -- Two Alignments: one crate occupies useful launch space, and the past sled
+  -- must serve two alignments. The present sled gives the return crossing from
+  -- the isolated wick, so a jump is part of a route rather than a one-off trick.
   , withLesson "Push a mirror from its back or sides. Step into its light to jump through."
     <$> room baseRules "Two Alignments" 80 16
       -- Aim the past mirror at the battery alcove and clear its launch cell.
@@ -104,6 +129,10 @@ campaign = sequence
       , "#############"
       , "#############"
       ]
+  -- The Long Way Round: the shortcut crate prevents an early return to the hub.
+  -- The other crates restrict launch cells, beams and gallery movement; the
+  -- fixed and sliding mirrors connect rooms whose floors do not meet directly.
+  -- withPassage names only the walls the ending breaks, not a playable route.
   , withLesson "Four rooms. A mirror set in the wall never moves: it is a one-way door."
     . withPassage [(11, 3), (10, 3), (6, 3), (0, 3)]
     <$> room baseRules "The Long Way Round" 306 40
@@ -159,6 +188,10 @@ campaign = sequence
 
 -- | Levels the hall never lists. Each is found from the end of the level before it.
 secretLevels :: Either String [Level]
+-- Two Keepers: the two corner mirrors turn crossings round the water column.
+-- The vault crate and jetty gate enforce an order that needs the other keeper;
+-- the T marker provides that second starting position. It is reachable by the
+-- ending or development flag, while lvSecret keeps it out of the ordinary hall.
 secretLevels = sequence
   [ (\l -> l { lvSecret = True })
     . withLesson "Two keepers, one era. A corner mirror turns you out of its other face, as far as you stood."
@@ -196,6 +229,8 @@ secretLevels = sequence
 
 -- | Everything the run can reach: the campaign, then its secret levels.
 levelHall :: Either String [Level]
+-- (<*>) combines a second successful Either value with the function inside the
+-- first. A parse error in either list prevents constructing a partial run.
 levelHall = (++) <$> campaign <*> secretLevels
 
 -- | The first four-room level, before levels 3 and 4 were merged. Its west room asks
@@ -301,11 +336,16 @@ theLongReflection =
 withPassage :: [Cell] -> Level -> Level
 withPassage cells level = level { lvPassage = cells }
 
+-- | Attach a level's short teaching line; it changes no map, rule or budget.
+-- The returned record shares every field except lvLesson with the input.
 withLesson :: String -> Level -> Level
 withLesson lesson level = level { lvLesson = lesson }
 
 -- | The single-screen hard level that the four-room one grew out of; its vault is
 -- this map. Kept to build on.
+-- Its two crates obstruct the crossing track and launch area. Moving them in
+-- the past lets the south-facing sled reach the wick's isolated cell; the
+-- north-facing present sled provides a route towards the lamp above the track.
 crowdedTrack :: Either String Level
 crowdedTrack = room baseRules "Crowded Track" 112 12
   [ "#############"
@@ -407,6 +447,10 @@ echoLevels =
   ]
 
 -- | Walking and switching, and what each costs. No echo yet.
+-- The present corridor leads towards the lamp, but contains no wick. Shift
+-- into the past at shared floor, follow its U-shaped corridor to (5,6), then
+-- retrace the route and return to the present to deliver it. Walls prevent a
+-- direct crossing between the two arms.
 firstLight :: Either String Level
 firstLight = room baseRules "First Light" 48 20
   [ "#############"
@@ -434,6 +478,9 @@ firstLight = room baseRules "First Light" 48 20
 -- campaign's checks, since the player's weight on a plate can change their pars.
 extraLevels :: Either String [Level]
 extraLevels = sequence $ theLongReflection : harrowPointBelow : firstLight : oneWayIn : crowdedTrack : echoLevels ++
+  -- First Push: the shared crate plugs the past partition. Push it east to enter
+  -- the wick's side, then use the present floor to return to the lamp; the past
+  -- alcove under the east room makes changing era necessary for collection.
   [ room baseRules "First Push" 42 16
       [ "#############"
       , "#############"
@@ -455,6 +502,9 @@ extraLevels = sequence $ theLongReflection : harrowPointBelow : firstLight : one
       , "#############"
       , "#############"
       ]
+  -- The Plug: the crate occupies the centre of a small past cross. Move it off
+  -- the north/south route so the upper present corridor can reach the lower
+  -- past corridor containing the wick, then come back to the present lamp.
   , room baseRules "The Plug" 56 12
       [ "#############"
       , "#############"
@@ -476,6 +526,9 @@ extraLevels = sequence $ theLongReflection : harrowPointBelow : firstLight : one
       , "#############"
       , "#############"
       ]
+  -- The Buried Lamp: the crate's recess lies above the present lamp. The lower
+  -- floor changes shape between eras; use those shared cells to approach and
+  -- reposition the crate, reach the eastern wick spur, and leave the lamp free.
   , room baseRules "The Buried Lamp" 64 12
       [ "#############"
       , "#...#########"
@@ -497,6 +550,9 @@ extraLevels = sequence $ theLongReflection : harrowPointBelow : firstLight : one
       , "######G######"
       , "#############"
       ]
+  -- The Held Door: slide the crate right onto the plate to keep the present
+  -- door open after walking away. The wick is behind the partition in the past;
+  -- the present door is the connection back to the lamp's side.
   , room baseRules "The Held Door" 54 12
       [ "#############"
       , "#############"
@@ -518,6 +574,9 @@ extraLevels = sequence $ theLongReflection : harrowPointBelow : firstLight : one
       , "#############"
       , "#############"
       ]
+  -- The Bridge: the only past crossing to the wick is a pit. Bring the crate
+  -- into its row and push it into the pit to make permanent floor; the present
+  -- wall at the same coordinate prevents simply shifting across the gap.
   , room baseRules "The Bridge" 44 12
       [ "#############"
       , "#############"
@@ -539,6 +598,9 @@ extraLevels = sequence $ theLongReflection : harrowPointBelow : firstLight : one
       , "#############"
       , "#############"
       ]
+  -- The Wrong Way First: the wick lies east, but the lamp is beyond the western
+  -- pit. Get to the right of the crate via present floor and push it west into
+  -- that pit before returning for the wick; pushing it east cannot build home.
   , room baseRules "The Wrong Way First" 64 8
       [ "#############"
       , "#############"
@@ -567,6 +629,9 @@ room :: Rules -> String -> Int -> Int -> [String] -> [String] -> Either String L
 room rules name par slack past present =
   (\l -> l { lvName = name, lvPar = par, lvRules = rules }) <$> parseLevel (par + slack) past present
 
+-- | Membership in an era's static floor set. This deliberately ignores crates,
+-- mirrors, filled pits and open doors: use Game.Logic.openCell for current
+-- collision. Out-of-map cells are absent from the sets and return False.
 walkable :: Level -> Era -> Cell -> Bool
 walkable level era cell = cell `Set.member` cells
   where
@@ -574,7 +639,9 @@ walkable level era cell = cell `Set.member` cells
       Past    -> lvPast level
       Present -> lvPresent level
 
--- | Cells open in exactly one era, in (x, y) order: the two passages.
+-- | Static floor differences, grouped Past then Present, in (x,y) order within
+-- each group. The original fixture has two passages; general levels have many.
+-- Set.difference removes shared floor, without consulting dynamic occupants.
 passageCells :: Level -> [(Era, Cell)]
 passageCells level =
   [ (Past, c)    | c <- Set.toAscList (lvPast level `Set.difference` lvPresent level) ] ++
@@ -583,15 +650,23 @@ passageCells level =
 -- | Marks with their cells, for one map, after checking its shape and alphabet.
 scanMap :: String -> Int -> Int -> String -> [String] -> Either String [(Char, Cell)]
 scanMap name width height allowed rows
+  -- Check the outer size before traversing, so missing rows cannot silently
+  -- become a smaller map. Each following row has the width of the past map.
   | length rows /= height =
       Left (name ++ ": expected " ++ show height ++ " rows, found " ++ show (length rows))
+  -- traverse keeps each successful row or the first Left error; concat flattens
+  -- the validated rows. zip supplies zero-based coordinates, including walls.
   | otherwise = concat <$> traverse scanRow (zip [0 ..] rows)
   where
+    -- Keep y in scope for errors and each character's cell; a ragged row cannot
+    -- be accepted just because the characters it does contain are valid.
     scanRow (y, row)
       | length row /= width =
           Left (name ++ ": row " ++ show (y :: Int) ++ " has width " ++ show (length row)
                 ++ ", expected " ++ show width)
       | otherwise = traverse (scanChar y) (zip [0 ..] row)
+    -- Alphabet checking happens before interpreting marks, so unknown symbols
+    -- never disappear through a later filter.
     scanChar y (x, c)
       | c `elem` allowed = Right (c, (x, y))
       | otherwise = Left (name ++ ": unexpected character " ++ show c
@@ -609,6 +684,9 @@ mirrorMarks = fixedMirrorMarks ++ movableMirrorMarks
 
 -- | The face a mark looks out of, and a corner mirror's second face.
 mirrorShape :: Char -> Maybe (Dir, Maybe Dir)
+-- Straight and compass marks share directions but differ in movability, which
+-- mirrorsIn decides separately. Corner marks always have two distinct faces;
+-- Nothing lets callers reject/filter every non-mirror mark.
 mirrorShape c = case c of
   '^' -> Just (DirUp, Nothing)
   'v' -> Just (DirDown, Nothing)
@@ -624,6 +702,8 @@ mirrorShape c = case c of
   'F' -> Just (DirDown, Just DirRight)
   _   -> Nothing
 
+-- | Require a single named marker in already scanned cells. Return its cell or
+-- distinguish missing and duplicate markers in the error; no default is chosen.
 exactlyOne :: String -> Char -> [(Char, Cell)] -> Either String Cell
 exactlyOne name mark marks = case [c | (m, c) <- marks, m == mark] of
   [cell] -> Right cell
@@ -631,44 +711,65 @@ exactlyOne name mark marks = case [c | (m, c) <- marks, m == mark] of
   many   -> Left (name ++ ": " ++ show (length many) ++ " copies of " ++ show mark)
 
 -- | Validates dimensions, alphabet and markers, and that both maps are sealed
--- by walls. Markers are walkable; they add no collision of their own. A crate has
+-- by walls. Spawn, wick and lamp markers are floor; their labels add no collision. A crate has
 -- one position shared by both eras, written on the past map, on floor in both.
 -- A pit blocks the past until a crate fills it. A plate, on the past map, is floor
 -- in both eras so a crate can rest on it. A door, on the present map, is a wall until
--- every plate holds a crate. A mirror stands in the era of the map it is on: one set
+-- every plate is held (by a crate, keeper or echo in the rules). A mirror stands
+-- in the era of the map it is on: one set
 -- in the wall (^ v < >) is solid there for good, and a movable one (n s e w) stands
 -- on floor that it leaves behind when pushed. The budget
 -- is in seconds: the cheapest possible cost plus the level's slack.
 parseLevel :: Int -> [String] -> [String] -> Either String Level
 parseLevel budget past present = do
+  -- nub removes duplicate widths: one positive width means all past rows agree.
+  -- The pattern guard w > 0 rejects zero-width rows; an empty map also fails.
+  -- Either's do notation short-circuits at the first Left without any IO.
   width <- case nub (map length past) of
     [w] | w > 0 -> Right w
     _           -> Left "past: rows are empty or of different widths"
   let height = length past
+  -- Era-specific alphabets keep B/C/pits/plates in the past and G/S/T/doors in
+  -- the present. Both maps must share the past's width and height.
   pastMarks    <- scanMap "past" width height ("#.BC~P" ++ mirrorMarks) past
   presentMarks <- scanMap "present" width height ("#.GSDT" ++ mirrorMarks) present
   powerCell <- exactlyOne "past" 'B' pastMarks
   goal      <- exactlyOne "present" 'G' presentMarks
   spawn     <- exactlyOne "present" 'S' presentMarks
+  -- T is optional but unique. A two-keeper level still requires the ordinary S.
   spawn2    <- case [c | ('T', c) <- presentMarks] of
     []  -> Right Nothing
     [c] -> Right (Just c)
     _   -> Left "present: more than one 'T'; a level has at most two keepers"
+  -- These let bindings share validated marks throughout the remaining checks.
+  -- Static floor excludes fixed glass, pits and doors. Sliding mirrors have
+  -- floor underneath; their current position is blocked later by Game.Logic.
   let open marks = Set.fromList [c | (m, c) <- marks, m `notElem` ("#~D" ++ fixedMirrorMarks)]
+      -- A pattern generator Just ... <- [...] discards Nothing, selecting only
+      -- mirrors. A Map holds one mirror per cell; detect any collision below
+      -- before the overwritten entry could hide a second era's mirror.
       mirrorsIn era marks = [ (c, Mirror era face (m `elem` movableMirrorMarks) bend)
                             | (m, c) <- marks, Just (face, bend) <- [mirrorShape m] ]
       movable = [ c | (c, m) <- Map.toList mirrors, mMovable m ]
       mirrors = Map.fromList (mirrorsIn Past pastMarks ++ mirrorsIn Present presentMarks)
+      -- Sets forget scan order and provide membership/subset checks. Crates
+      -- belong to both eras even though only the past map writes their marker.
       marked mark marks = Set.fromList [c | (m, c) <- marks, m == mark]
       pits = marked '~' pastMarks
       crates = marked 'C' pastMarks
       plates = marked 'P' pastMarks
       doors = marked 'D' presentMarks
       onBorder (x, y) = x == 0 || y == 0 || x == width - 1 || y == height - 1
+      -- A plate beside a present door would let the keeper start entering while
+      -- still holding the plate. Reject that geometry rather than strand them.
       besideDoors = [ p | p <- Set.toList plates, d <- [minBound .. maxBound]
                         , stepCell d p `Set.member` doors ]
+      -- Include all special non-wall cells, not just floor: a border pit, door
+      -- or fixed mirror would otherwise escape the sealed-border check.
       leaks = filter onBorder (Set.toList (open pastMarks) ++ Set.toList (open presentMarks)
                                ++ Set.toList pits ++ Set.toList doors ++ Map.keys mirrors)
+  -- Shared crates must not overlap either spawn or a sliding mirror, and must
+  -- have present floor beneath them. These checks concern initial placement.
   if maybe False (`Set.member` crates) spawn2
     then Left ("a crate stands on the second spawn at " ++ show spawn2)
   else if spawn `Set.member` crates
@@ -678,16 +779,24 @@ parseLevel budget past present = do
   else if not (crates `Set.isSubsetOf` open presentMarks)
     then Left ("a crate stands in a present wall at "
                ++ show (Set.toList (crates `Set.difference` open presentMarks)))
+  -- A plate needs present floor too, since a shared crate may rest on it.
   else if not (plates `Set.isSubsetOf` open presentMarks)
     then Left ("a plate is in a present wall, where no crate could rest, at "
                ++ show (Set.toList (plates `Set.difference` open presentMarks)))
+  -- Doors use the single all-plates circuit. Having only one half of the circuit
+  -- is treated as a map authoring error, rather than a special door behaviour.
   else if Set.null plates /= Set.null doors
     then Left "plates and doors need each other: a level has both or neither"
+  -- Map construction collapses duplicate cells; comparing counts recovers the
+  -- otherwise lost evidence of mirrors occupying one cell in opposite eras.
   else if Map.size mirrors /= length (mirrorsIn Past pastMarks ++ mirrorsIn Present presentMarks)
     then Left "a cell has a mirror in both eras; give each mirror its own cell"
   else if not (null besideDoors)
     then Left ("a plate is next to a door, so the player could hold it open while walking in, at "
                ++ show besideDoors)
+  -- Only after every check succeeds construct the Level. Metadata defaults are
+  -- overwritten by room/theLevel; no route search or positive-budget check runs
+  -- here, so structural validity alone does not promise a playable level.
   else if null leaks
     then Right Level
       { lvWidth = width, lvHeight = height
