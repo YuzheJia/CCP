@@ -1,18 +1,22 @@
-# Rebuild the courier's portrait, app/Portrait.hs, from her character sheet.
+# Rebuild a talk-box portrait from its character sheet:
 #
-#   blender -b --factory-startup --python tools/make-portrait.py -- assets/source/courier.webp app/Portrait.hs
+#   blender -b --factory-startup --python tools/make-portrait.py -- assets/source/courier.webp app/Portrait.hs courier
+#   blender -b --factory-startup --python tools/make-portrait.py -- assets/source/keeper.webp app/KeeperPortrait.hs keeper
 #
-# The sheet is pixel art drawn large (about 7 screen pixels to one of its own). This
+# A sheet is pixel art drawn large (several screen pixels to one of its own). This
 # finds that grid, gives the picture a 40-colour palette, takes the commonest colour
 # of the middle of each grid cell, and writes the result as rows of letters, one per
-# pixel, which the game turns into a bitmap.
+# pixel, which the game turns into a bitmap. A sheet on a white ground instead of a
+# clear one has the white that reaches its edges keyed out first.
 #
-# Her blink and her talking mouth are pixels laid over those rows. Their positions
-# below are for this sheet: a new drawing needs new ones.
+# The blink and the talking mouth are pixels laid over those rows. Their positions
+# below are for these sheets: a new drawing needs new ones.
 import bpy, sys, os, numpy as np
+from collections import deque
 
 argv = sys.argv[sys.argv.index("--") + 1:]
 src, hs = argv[0], argv[1]
+sheet = argv[2] if len(argv) > 2 else "courier"
 K = 40
 rng = np.random.default_rng(3)
 
@@ -21,7 +25,22 @@ w, h = img.size
 a = np.empty(w * h * 4, dtype=np.float32)
 img.pixels.foreach_get(a)
 f = a.reshape(h, w, 4)[::-1].astype(np.float64)
-rgb, alpha = f[..., :3] * 255, f[..., 3]
+rgb, alpha = f[..., :3] * 255, f[..., 3].copy()
+
+# A white ground: clear every near-white pixel joined to the edge of the sheet.
+if (alpha < 0.5).mean() < 0.01:
+    pale = (rgb > 228).all(2)
+    seen = np.zeros((h, w), bool)
+    todo = deque((y, x) for y in range(h) for x in (0, w - 1) if pale[y, x])
+    todo.extend((y, x) for x in range(w) for y in (0, h - 1) if pale[y, x])
+    while todo:
+        y, x = todo.popleft()
+        if seen[y, x]: continue
+        seen[y, x] = True
+        for yy, xx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+            if 0 <= yy < h and 0 <= xx < w and pale[yy, xx] and not seen[yy, xx]:
+                todo.append((yy, xx))
+    alpha[seen] = 0
 
 # The grid: the period and offset that make its cells most nearly one colour.
 grey = rgb.mean(2) * (alpha > 0.5)
@@ -31,8 +50,9 @@ def spread(p, ox, oy):
     ids = (ys[:, None] * (xs.max() + 1) + xs[None, :]).ravel()
     n = np.bincount(ids); s = np.bincount(ids, grey.ravel()); s2 = np.bincount(ids, (grey ** 2).ravel())
     return (s2 - s * s / np.maximum(n, 1)).sum()
+lo, hi = {"courier": (7.0, 10.01), "keeper": (6.0, 12.01)}[sheet]
 _, p, ox, oy = min((spread(p, ox, oy), p, ox, oy)
-                   for p in np.arange(7.0, 10.01, 0.1)
+                   for p in np.arange(lo, hi, 0.1)
                    for ox in np.arange(0, p, 1.0) for oy in np.arange(0, p, 1.0))
 
 # The palette.
@@ -71,22 +91,32 @@ letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 rows = ["".join("." if v < 0 else letters[v] for v in row) for row in grid]
 colours = {letters[j]: int(pal[j][0]) * 65536 + int(pal[j][1]) * 256 + int(pal[j][2]) for j in range(K)}
 
-# Her face, by hand, for this sheet. The letters are palette entries: find the skin
+# The face, by hand, for each sheet. The letters are palette entries: find the skin
 # and the dark lash colours in the rows if the sheet changes.
-skin, lash, lid, lip = 'B', 'k', 'C', 'b'
 def block(x0, x1, y0, y1, c): return [(x, y, c) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
-blink = block(72, 76, 61, 70, skin) + block(89, 93, 60, 68, skin) + block(94, 94, 60, 61, skin) \
-      + block(72, 76, 61, 61, lash) + block(73, 77, 62, 62, lid) \
-      + block(89, 94, 60, 60, lash) + block(90, 95, 61, 61, lid)
-mouth_open = block(83, 86, 78, 78, lash) + [(83, 79, lash), (84, 79, lip), (85, 79, lip), (86, 79, lash)] + block(84, 85, 80, 80, lash)
-mouth_shut = block(83, 86, 78, 79, skin) + block(84, 85, 79, 79, lash)
+blink, mouth_open, mouth_shut = {
+    "courier": lambda: (
+        block(72, 76, 61, 70, 'B') + block(89, 93, 60, 68, 'B') + block(94, 94, 60, 61, 'B')
+        + block(72, 76, 61, 61, 'k') + block(73, 77, 62, 62, 'C')
+        + block(89, 94, 60, 60, 'k') + block(90, 95, 61, 61, 'C'),
+        block(83, 86, 78, 78, 'k') + [(83, 79, 'k'), (84, 79, 'b'), (85, 79, 'b'), (86, 79, 'k')] + block(84, 85, 80, 80, 'k'),
+        block(83, 86, 78, 79, 'B') + block(84, 85, 79, 79, 'k')),
+    # The keeper's eyes shut under the lashes already drawn above them.
+    "keeper": lambda: (
+        block(66, 70, 50, 58, 'l') + block(87, 90, 50, 57, 'l')
+        + block(66, 70, 50, 50, 'z') + block(87, 90, 50, 50, 'z'),
+        block(78, 81, 69, 69, 'C') + [(78, 70, 'C'), (79, 70, 'G'), (80, 70, 'G'), (81, 70, 'C')] + block(79, 80, 71, 71, 'C'),
+        block(78, 81, 69, 70, 'l') + block(79, 80, 69, 69, 'B')),
+}[sheet]()
 
-def patch(ps): return "[ " + "\n  , ".join("(%d, %d, '%s')" % t for t in ps) + " ]"
+who = {"courier": ("The courier's", "her"), "keeper": ("The lighthouse keeper's", "their")}[sheet]
+module = os.path.splitext(os.path.basename(hs))[0]
+def patch(ps): return "[ " + "\n  , ".join("(%d, %d, '%s')" % t for t in ps) + " ]" if ps else "[]"
 with open(hs, "w", newline="\n") as fh:
-    fh.write('''-- | The courier's portrait for the talk box, pixel by pixel: %d by %d, from the
+    fh.write('''-- | %s portrait for the talk box, pixel by pixel: %d by %d, from the
 -- character sheet, at its own pixel grid. Generated by tools/make-portrait.py; edit
--- the patches here by hand if her face changes.
-module Portrait
+-- the patches here by hand if %s face changes.
+module %s
   ( portraitW, portraitH
   , portraitPalette
   , portraitRows
@@ -102,13 +132,13 @@ portraitH = %d
 -- | Each letter of 'portraitRows' and its colour; @.@ is clear.
 portraitPalette :: [(Char, Int)]
 portraitPalette =
-''' % (W, H, W, H))
+''' % (who[0], W, H, who[1], module, W, H))
     fh.write("  [ " + "\n  , ".join("('%s', 0x%06X)" % kv for kv in colours.items()) + " ]\n\n")
     fh.write("portraitRows :: [String]\nportraitRows =\n")
     fh.write("  [ " + "\n  , ".join('"%s"' % r for r in rows) + " ]\n\n")
-    fh.write("-- | Pixels (column, row, colour) laid over the rows: her eyes shut, for a blink.\n"
-             "blinkPatch :: [(Int, Int, Char)]\nblinkPatch =\n  " + patch(blink) + "\n\n")
-    fh.write("-- | Her mouth open on a letter, and shut between words.\n"
-             "mouthOpenPatch, mouthShutPatch :: [(Int, Int, Char)]\nmouthOpenPatch =\n  " + patch(mouth_open)
+    fh.write("-- | Pixels (column, row, colour) laid over the rows: %s eyes shut, for a blink.\n"
+             "blinkPatch :: [(Int, Int, Char)]\nblinkPatch =\n  " % who[1] + patch(blink) + "\n\n")
+    fh.write("-- | %s mouth open on a letter, and shut between words.\n"
+             "mouthOpenPatch, mouthShutPatch :: [(Int, Int, Char)]\nmouthOpenPatch =\n  " % who[1].capitalize() + patch(mouth_open)
              + "\nmouthShutPatch =\n  " + patch(mouth_shut) + "\n")
-print("wrote", hs, ":", W, "by", H, "pixels, grid", round(p, 2))
+print("wrote", hs, ":", W, "by", H, "pixels, grid", round(p, 2), "offset", ox, oy)

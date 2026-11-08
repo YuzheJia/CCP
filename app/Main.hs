@@ -7,13 +7,16 @@
 --                                  of winning it, and hand over the keyboard
 --   borrowed-light --level=N       select level N in the lobby, counting from 1; a secret
 --                                  level, which the lobby never lists, is opened directly
+--   --talk                         with --demo, keep the talks: the demo waits at each one
+--                                  until Enter has moved it on, then plays on
 --   --mute                         start with the sound off; M turns it on and off
 --   --intro                        open on the opening film, whatever the save, to watch it again
 --
 -- Development flags, used to inspect exact moments of the game:
 --   --dump-sounds=DIR  write every sound to DIR as a WAV file, and exit
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
---                    w a s d move, x shift, q echo, W A S D X the press alone, z undo,
+--                    w a s d move, I J K L the arrows (the second keeper in a level for two),
+--                    x shift, q echo, W A S D X the press alone, z undo,
 --                    T Tab held, e Enter, p pause, r restart, ! Escape, i instructions, . one idle tick
 --   --after=N        then run N more idle ticks
 --   --fps            print measured frames per second to stdout
@@ -41,7 +44,7 @@ import qualified Lobby
 import Platform (exitWhenWindowCloses, keepLetterKeys)
 import qualified Render
 import Save
-import TalkBox (introScreen, talkLayer)
+import TalkBox (endingLayer, introScreen, talkLayer)
 import Video (frameAt, loadVideo, newPlayer, vdAudio, vdAudioRate, videoScale, videoTicks)
 import System.Environment (getArgs)
 import System.Exit (die, exitSuccess)
@@ -61,6 +64,7 @@ data World = World
   , wMuted  :: !Bool
   , wStory  :: !Story        -- ^ the courier's talk
   , wTalks  :: !Bool         -- ^ off for the demo, whose keys would only be taken by it
+  , wWaitTalk :: !Bool       -- ^ a demo that keeps its talks: it waits at each one
   , wIntroLen :: !Int        -- ^ ticks the opening film runs; 0 with no film, or once
                              --   it has been shown, so it plays once a session
   }
@@ -102,6 +106,7 @@ main = do
         | watchFilm = start1 { runIndex = 0, runMode = Intro 0 0, runGame = initialGame (levels !! 0) }
         | otherwise = start1
       demo = "--demo" `elem` args
+      talkDemo = demo && "--talk" `elem` args
       scenes =
         [ Render.mkScene (place i l, lvName l) (i + 1 < shownTotal) (teaches i l) l
         | (i, l) <- zip [0 ..] levels ]
@@ -127,8 +132,10 @@ main = do
         , wSaved = saved
         , wCues = [ CueIntro | watchFilm ]
         , wMuted = "--mute" `elem` args
-        , wStory = noStory
-        , wTalks = not demo
+        -- A secret level opened by number is entered at once, as if from the hall.
+        , wStory = if demo && not talkDemo then noStory else notice levels start0 { runMode = Lobby } start0 noStory
+        , wTalks = not demo || talkDemo
+        , wWaitTalk = talkDemo
         , wIntroLen = if demo then 0 else maybe 0 videoTicks video
         }
       -- An inspection script is played instantly through the same ticks as the
@@ -183,7 +190,9 @@ main = do
             pure (Render.fitted (wWindow w) (introScreen (maybe 2 videoScale video) frame age held))
           Lobby -> pure (Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w))
           InLevel -> pure (Render.renderWith talk (scenes !! i) (levels !! i) shown (wFx w) (wWindow w))
-          Ending f -> pure (Render.renderEnding (scenes !! i) (levels !! i) (beyond i) f g (wFx w) (wWindow w)))
+          Ending f -> pure (Pictures
+            [ Render.renderEnding (scenes !! i) (levels !! i) (beyond i) f g (wFx w) (wWindow w)
+            , Render.fitted (wWindow w) (endingLayer (wStory w) f (fxClock (wFx w))) ]))
     (\event (t, w) -> pure (t, onEvent event w))
     (\_ (t, w) -> do
         now <- getMonotonicTime
@@ -272,6 +281,8 @@ onFrame levels elapsed w
 oneTick :: [Level] -> World -> World
 oneTick levels w =
   let (input, script) = case wScript w of
+        -- A demo that keeps its talks waits at each one, and the keyboard answers it.
+        pending@(_ : _) | wWaitTalk w, isJust (stTalk (wStory w)) -> (tickInput (wKeys w), pending)
         (i : rest) -> (i, rest)
         []         -> (tickInput (wKeys w), [])
       -- An open talk takes the keys, and the board waits for it.
@@ -363,6 +374,11 @@ scriptInputs = concatMap one
       's' -> actionInputs (Go DirDown)
       'a' -> actionInputs (Go DirLeft)
       'd' -> actionInputs (Go DirRight)
+      -- The arrows, which move the second keeper in a level for two.
+      'I' -> duoInputs (Go2 DirUp)
+      'K' -> duoInputs (Go2 DirDown)
+      'J' -> duoInputs (Go2 DirLeft)
+      'L' -> duoInputs (Go2 DirRight)
       'x' -> actionInputs ShiftEra
       'q' -> actionInputs SendEcho
       'X' -> [noInput { tiShift = True }]  -- the press alone, to inspect mid-wave

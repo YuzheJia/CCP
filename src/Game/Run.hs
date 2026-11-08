@@ -239,9 +239,10 @@ data Finale = Finale
 finale :: Stage -> Int -> Finale
 finale stage age = Finale stage age restingDash
 
--- | How long each stage with a fixed length lasts, in ticks.
+-- | How long each stage with a fixed length lasts, in ticks. The lamp burns long
+-- enough for the card that says it is all over to be believed.
 litTicks, flareTicks, arrivalTicks :: Int
-litTicks = 210
+litTicks = 300
 flareTicks = 80
 arrivalTicks = 230
 

@@ -1,12 +1,19 @@
--- | The courier's talk, on screen: her portrait rising from the bottom left, a
--- tilted black speech box with a white rim and a yellow shadow, a name tag, the line
--- typing out in the pixel font, and, on the board, a marker on what she is talking
--- about. Everything is drawn in whole pixels three canvas units square, the size of
--- the portrait's own pixels, so the box, the letters and her face are one grid.
+-- | The talk, on screen: the speaker's portrait rising from a bottom corner, a
+-- tilted black speech box with a white rim and a shadow in the speaker's colour, a
+-- name tag, the line typing out in the pixel font, and, on the board, a marker on
+-- what they are talking about. The courier stands at the left in yellow; the
+-- lighthouse keeper at the right in red, the colour of their coat on the board, with
+-- the box turned about to face them. Everything is drawn in whole pixels three
+-- canvas units square, the size of the portraits' own pixels, so the box, the
+-- letters and the faces are one grid.
+--
+-- Also the card that says every order is delivered, in the same style: once falsely,
+-- as the last listed lamp burns, and once truly, after the last talk of all.
 --
 -- Also the opening film's screen, which shares the pixel font.
 module TalkBox
   ( talkLayer
+  , endingLayer
   , introScreen
   ) where
 
@@ -15,12 +22,13 @@ import qualified Data.ByteString as BS
 import Data.List (foldl')
 import qualified Data.Map.Strict as Map
 import Draw
-import Game.Run (introSkipTicks)
+import Game.Run (Finale (..), Stage (..), introSkipTicks)
 import Game.Story
 import Game.Types (Era (..))
 import Graphics.Gloss
+import qualified KeeperPortrait as KP
 import PixelFont
-import Portrait
+import qualified Portrait as CP
 
 -- | One pixel, in canvas units.
 px :: Float
@@ -29,10 +37,11 @@ px = 3
 snap :: Float -> Float
 snap v = px * fromIntegral (round (v / px) :: Int)
 
-ink, rim, sun, muted, night :: Int
+ink, rim, sun, ember, muted, night :: Int
 ink = 0x0D0B12   -- the box
 rim = 0xF4F1EA   -- its edge, and the letters
 sun = 0xF6B31C   -- her jacket: the shadow, the tag, words that matter
+ember = 0xE5533A -- the keeper's coat on the board, for their box the same
 muted = 0x8C8796
 night = 0x05080A
 
@@ -65,34 +74,75 @@ scaled k (cx, cy) = map (\(x, y) -> (cx + (x - cx) * k, cy + (y - cy) * k))
 moved :: (Float, Float) -> [(Float, Float)] -> [(Float, Float)]
 moved (dx, dy) = map (\(x, y) -> (x + dx, y + dy))
 
--- The portrait ---------------------------------------------------------------------
+-- The faces -------------------------------------------------------------------------
 
-portraitBitmap :: Picture
-portraitBitmap = bitmapOfByteString portraitW portraitH (BitmapFormat TopToBottom PxRGBA) bytes True
+-- | A portrait, and the pixels laid over it to blink and to talk.
+data Face = Face
+  { fcPicture :: Picture
+  , fcBlink, fcOpen, fcShut :: Picture
+  , fcW, fcH :: Int
+  }
+
+-- | A face from a portrait's rows of letters, its palette and its patches.
+faceOf :: Int -> Int -> [(Char, Int)] -> [String]
+       -> [(Int, Int, Char)] -> [(Int, Int, Char)] -> [(Int, Int, Char)] -> Face
+faceOf w h palette rows blink open shut = Face
+  { fcPicture = Scale px px (bitmapOfByteString w h (BitmapFormat TopToBottom PxRGBA) bytes True)
+  , fcBlink = patch blink, fcOpen = patch open, fcShut = patch shut
+  , fcW = w, fcH = h
+  }
   where
-    colours = Map.fromList portraitPalette
-    bytes = BS.pack (concatMap pixel (concat portraitRows))
+    colours = Map.fromList palette
+    bytes = BS.pack (concatMap pixel (concat rows))
     pixel c = case Map.lookup c colours of
       Nothing -> [0, 0, 0, 0]
       Just v -> [fromIntegral (v `div` 65536), fromIntegral (v `div` 256 `mod` 256), fromIntegral (v `mod` 256), 255]
+    -- Pixels laid over the portrait, in its own coordinates, centred like the bitmap.
+    patch ps = Pictures
+      [ Color (hex v) (rect (fromIntegral x * px - wf / 2) (hf / 2 - fromIntegral (y + 1) * px) px px)
+      | (x, y, c) <- ps, Just v <- [Map.lookup c colours] ]
+    wf = fromIntegral w * px
+    hf = fromIntegral h * px
 
--- | Pixels laid over the portrait, in its own coordinates, centred like the bitmap.
-patch :: [(Int, Int, Char)] -> Picture
-patch ps = Pictures
-  [ Color (hex v) (rect (fromIntegral x * px - w / 2) (h / 2 - fromIntegral (y + 1) * px) px px)
-  | (x, y, c) <- ps, Just v <- [lookup c portraitPalette] ]
-  where
-    w = fromIntegral portraitW * px
-    h = fromIntegral portraitH * px
+courierFace, keeperFace :: Face
+courierFace = faceOf CP.portraitW CP.portraitH CP.portraitPalette CP.portraitRows
+                     CP.blinkPatch CP.mouthOpenPatch CP.mouthShutPatch
+keeperFace = faceOf KP.portraitW KP.portraitH KP.portraitPalette KP.portraitRows
+                    KP.blinkPatch KP.mouthOpenPatch KP.mouthShutPatch
 
-blinkPic, mouthOpenPic, mouthShutPic :: Picture
-blinkPic = patch blinkPatch
-mouthOpenPic = patch mouthOpenPatch
-mouthShutPic = patch mouthShutPatch
+-- | How a speaker is drawn: their face, the colour of their shadow, tag and loud
+-- words, their name and what they are, and whether they stand at the right.
+data Voice = Voice
+  { vcFace   :: Face
+  , vcAccent :: Int
+  , vcName   :: String
+  , vcRole   :: String
+  , vcRight  :: Bool
+  }
 
--- | Where the portrait stands: its left edge just off screen, its bottom below it.
-portraitAt :: (Float, Float)
-portraitAt = (-645 + fromIntegral portraitW * px / 2, -420 + fromIntegral portraitH * px / 2)
+voiceOf :: Speaker -> Voice
+voiceOf who = case who of
+  Courier -> Voice courierFace sun speakerName "COURIER" False
+  Keeper -> Voice keeperFace ember "KEEPER" "LIGHTHOUSE" True
+
+voiceOfTalk :: Talk -> Voice
+voiceOfTalk = voiceOf . lnWho . currentLine
+
+-- | The layout is drawn for the left; a speaker at the right sees it turned about.
+-- Shapes are mirrored point by point; a run of text @w@ units wide that starts at
+-- @x@ starts at @-(x + w)@ instead, so it still reads left to right.
+side :: Voice -> [(Float, Float)] -> [(Float, Float)]
+side v = if vcRight v then map (\(x, y) -> (negate x, y)) else id
+
+startX :: Voice -> Float -> Float -> Float
+startX v x w = if vcRight v then negate (x + w) else x
+
+-- | Where the portrait stands: an edge just off screen, its bottom below it.
+portraitAt :: Voice -> (Float, Float)
+portraitAt v =
+  ( startX v (-645) w + w / 2
+  , -420 + fromIntegral (fcH (vcFace v)) * px / 2 )
+  where w = fromIntegral (fcW (vcFace v)) * px
 
 -- The box ---------------------------------------------------------------------------
 
@@ -103,31 +153,36 @@ rimShape = [(-336, -396), (600, -378), (615, -210), (-315, -228)]
 boxCentre :: (Float, Float)
 boxCentre = (140, -300)
 
--- | The speech tail, pointing up at her.
+-- | The speech tail, pointing up at the speaker.
 tailRim, tailInk :: [(Float, Float)]
 tailRim = [(-324, -252), (-321, -306), (-381, -228)]
 tailInk = [(-312, -261), (-309, -297), (-363, -239)]
 
-tagShape, subTagShape :: [(Float, Float)]
+tagShape :: [(Float, Float)]
 tagShape = [(-321, -246), (-150, -240), (-141, -192), (-312, -198)]
-subTagShape = [(-162, -237), (-39, -233), (-33, -207), (-156, -211)]
+
+-- | The tag under the name, saying what the speaker is: long enough for the
+-- courier's, and longer for a longer word.
+subTagShape :: String -> [(Float, Float)]
+subTagShape role = [(-162, -237), (-39 + extra, -233), (-33 + extra, -207), (-156, -211)]
+  where extra = max 0 (fromIntegral (pixelW role - pixelW "COURIER") * 2)
 
 textLeft, textTop :: Float
 textLeft = -282
 textTop = -255
 
--- | Pixels a line of her talk may take across.
+-- | Pixels a line of talk may take across.
 textWidth :: Int
 textWidth = 286
 
--- | The words she leans on, in capitals, are in yellow.
+-- | The words a speaker leans on, in capitals, are in their colour.
 loud :: String -> Bool
 loud w = let letters = filter isAlpha w in length letters >= 2 && all isUpper letters
 
 -- | Part of a line typed so far, each word in its colour. Letters of one colour in a
 -- row are drawn together, so a line is a handful of pictures, not one per letter.
-typedLine :: Int -> String -> Picture
-typedLine shown s = Pictures (go 0 (runs (zip (take shown s) (colours s))))
+typedLine :: Int -> Int -> String -> Picture
+typedLine accent shown s = Pictures (go 0 (runs (zip (take shown s) (colours s))))
   where
     -- The colour of each letter, from the word it belongs to in the whole line.
     colours str = concatMap (\w -> replicate (length w) (loud w)) (chunks str)
@@ -140,13 +195,13 @@ typedLine shown s = Pictures (go 0 (runs (zip (take shown s) (colours s))))
       ((_, l) : _) -> let (same, rest) = span ((== l) . snd) xs in (map fst same, l) : runs rest
     go _ [] = []
     go x ((part, l) : rest) =
-      Translate (fromIntegral x * px) 0 (Color (hex (if l then sun else rim)) (pixelText px part))
+      Translate (fromIntegral x * px) 0 (Color (hex (if l then accent else rim)) (pixelText px part))
         : go (x + pixelW part + 1) rest
 
 -- | The box and everything on it, popped up by @k@ (0 to 1) and at opacity @a@.
 box :: Float -> Float -> Talk -> Int -> Picture
 box k a t clock = Pictures
-  [ Color (fade a (hex sun)) (pixelPoly (moved (12, -12) (shape rimShape)))
+  [ Color (fade a (hex (vcAccent v))) (pixelPoly (moved (12, -12) (shape rimShape)))
   , Color (fade a (hex rim)) (pixelPoly (shape rimShape))
   , Color (fade a (hex rim)) (pixelPoly (shape tailRim))
   , Color (fade a (hex ink)) (pixelPoly (shape boxShape))
@@ -154,46 +209,58 @@ box k a t clock = Pictures
   , if k > 0.9 then fadePicture a body else Blank
   ]
   where
-    shape = scaled (0.72 + 0.28 * k) boxCentre
+    v = voiceOfTalk t
+    shape = side v . scaled (0.72 + 0.28 * k) boxCentre
     said = currentLine t
     rows = pixelWrap textWidth (lnText said)
+    left = startX v textLeft (fromIntegral textWidth * px)
     -- Letters shown on each row, counting the one space each row break took.
-    shownRows = snd (foldl' (\(left, acc) r -> (max 0 (left - length r - 1), acc ++ [min (length r) left]))
+    shownRows = snd (foldl' (\(remaining, acc) r -> (max 0 (remaining - length r - 1), acc ++ [min (length r) remaining]))
                              (typedChars t, []) rows)
+    counter = show (tkLine t + 1) ++ "/" ++ show (length (tkLines t))
     body = Pictures $
-      [ Translate textLeft (textTop - fromIntegral (i * pixelLineH) * px) (typedLine n r)
+      [ Translate left (textTop - fromIntegral (i * pixelLineH) * px) (typedLine (vcAccent v) n r)
       | (i, (r, n)) <- zip [0 :: Int ..] (zip rows shownRows) ]
       ++ [ next | lineTyped t ]
-      ++ [ Translate 573 (-226) (Color (hex muted) (pixelTextC 2 (show (tkLine t + 1) ++ "/" ++ show (length (tkLines t))))) ]
+      ++ [ Translate (if vcRight v then -573 else 573) (-226) (Color (hex muted) (pixelTextC 2 counter)) ]
     bob = if (clock `div` 14) `mod` 2 == 0 then 0 else -px
-    next = Translate 0 bob (Pictures
-      [ Color (hex sun) (pixelPoly [(552, -345), (576, -345), (564, -360)])
+    -- Bottom right of the box, whichever way it faces.
+    nextX = if vcRight v then -270 else 0
+    next = Translate nextX bob (Pictures
+      [ Color (hex (vcAccent v)) (pixelPoly [(552, -345), (576, -345), (564, -360)])
       , Color (hex muted) (Translate 474 (-345) (pixelText 2 "ENTER"))
       ])
 
--- | The name tag over the box's corner.
-tag :: Float -> Picture
-tag a = fadePicture a (Pictures
-  [ Color (hex sun) (pixelPoly subTagShape)
-  , Color (hex ink) (Translate (-129) (-213) (pixelText 2 "COURIER"))
-  , Color (hex rim) (pixelPoly tagShape)
-  , Color (hex ink) (Translate (-297) (-204) (pixelText 4 speakerName))
+-- | The name tag over the box's corner by the speaker.
+tag :: Voice -> Float -> Picture
+tag v a = fadePicture a (Pictures
+  [ Color (hex (vcAccent v)) (pixelPoly (side v (subTagShape (vcRole v))))
+  , Color (hex ink) (Translate (startX v (-129) (wide 2 (vcRole v))) (-213) (pixelText 2 (vcRole v)))
+  , Color (hex rim) (pixelPoly (side v tagShape))
+  , Color (hex ink) (Translate (startX v (-297) (wide 4 (vcName v))) (-204) (pixelText 4 (vcName v)))
   ])
+  where wide k s = fromIntegral (pixelW s) * k
 
+-- | The speaker's face, slid off to their side by @slide@, talking while their
+-- line types.
 portrait :: Float -> Talk -> Int -> Picture
-portrait slide t clock = Translate (fst portraitAt - snap (slide * 150)) (snd portraitAt + bob) (Pictures
-  [ Scale px px portraitBitmap
-  , if blinking then blinkPic else Blank
+portrait slide t clock = Translate (x + offside) (y + bob) (Pictures
+  [ fcPicture face
+  , if blinking then fcBlink face else Blank
   , mouth
   ])
   where
+    v = voiceOfTalk t
+    face = vcFace v
+    (x, y) = portraitAt v
+    offside = (if vcRight v then 1 else -1) * snap (slide * 150)
     typing = not (lineTyped t)
     -- A blink every few seconds, a little irregular.
     blinking = clock `mod` 233 < 7 || clock `mod` 541 < 6
     letter = drop (max 0 (typedChars t - 1)) (lnText (currentLine t))
     mouth
-      | typing && (tkAge t `div` 5) `mod` 2 == 0 && take 1 letter /= " " = mouthOpenPic
-      | typing = mouthShutPic
+      | typing && (tkAge t `div` 5) `mod` 2 == 0 && take 1 letter /= " " = fcOpen face
+      | typing = fcShut face
       | otherwise = Blank
     bob = if typing && (tkAge t `div` 10) `mod` 2 == 1 then px else 0
 
@@ -205,10 +272,14 @@ thingName th = case th of
   TheLamp -> "LAMP"
   TheCrate -> "CRATE"
   TheSled -> "MIRROR"
+  TheWay -> "WAY ON"
+  TheKeeper -> "KEEPER"
+  TheShard -> "SHARD"
+  TheCorner -> "CORNER MIRROR"
 
--- | The board dims around what she is talking about; brackets close on its cell and
--- an arrow over it carries its name. @f@ is the board's stand; @age@ the ticks the
--- line has been up.
+-- | The board dims around what is being talked about; brackets close on its cell
+-- and an arrow over it carries its name. @f@ is the board's stand; @age@ the ticks
+-- the line has been up.
 marker :: Float -> Look -> Int -> Int -> Picture
 marker f lk age clock = Pictures
   [ Color (hexA night (0.5 * open)) (Translate cx cy (ring 48 (cell * (0.75 + 6 * (1 - open))) 2200 1))
@@ -256,31 +327,78 @@ marker f lk age clock = Pictures
       , Color (hex sun) (Translate (left + nameW + fromIntegral (pixelW " - ") * 2 + 2) (-4) (pixelText 2 era))
       ]
 
--- | Everything the talk draws over the level, in canvas units: the marker on the
--- board (whose stand is @f@), then her portrait and the box.
+-- | Everything the talk draws over the level, in canvas units: the card if the
+-- story is over, the marker on the board (whose stand is @f@), then the speaker's
+-- portrait and the box.
 talkLayer :: Story -> Float -> Int -> Picture
-talkLayer s f clock = case (stTalk s, stClosing s) of
-  (Just t, _) | talkShown t ->
-    let k = smooth (fromIntegral (tkShown t) / fromIntegral popTicks)
-        -- Overshoots a little as it lands, like a box slapped down.
-        pop = min 1.04 (k * 1.04) - (if k >= 1 then 0.04 else 0)
-    in Pictures
-         [ maybe Blank (\lk -> marker f lk (tkAge t) clock) (lnLook (currentLine t))
-         , portrait (1 - k) t clock
-         , raised (box pop 1 t clock)
-         , raised (tag k)
-         ]
-  (_, Just (t, n)) ->
-    let gone = fromIntegral n / fromIntegral closeTicks
-    in Pictures
-         [ portrait (smooth gone) t { tkAge = 10 ^ (6 :: Int) } clock
-         , raised (box (1 - 0.3 * gone) (1 - gone) t { tkAge = 10 ^ (6 :: Int) } clock)
-         , raised (tag (1 - gone))
-         ]
-  _ -> Blank
+talkLayer s f clock = Pictures
+  [ maybe Blank (\n -> endCard True (smooth (fromIntegral n / 40)) clock) (stTheEnd s)
+  , talking
+  ]
   where
-    -- The box stands a little off the bottom, so its yellow shadow shows.
+    talking = case (stTalk s, stClosing s) of
+      (Just t, _) | talkShown t ->
+        let k = smooth (fromIntegral (tkShown t) / fromIntegral popTicks)
+            -- Overshoots a little as it lands, like a box slapped down.
+            pop = min 1.04 (k * 1.04) - (if k >= 1 then 0.04 else 0)
+        in Pictures
+             [ maybe Blank (\lk -> marker f lk (tkAge t) clock) (lnLook (currentLine t))
+             , portrait (1 - k) t clock
+             , raised (box pop 1 t clock)
+             , raised (tag (voiceOfTalk t) k)
+             ]
+      (_, Just (t, n)) ->
+        let gone = fromIntegral n / fromIntegral closeTicks
+        in Pictures
+             [ portrait (smooth gone) t { tkAge = 10 ^ (6 :: Int) } clock
+             , raised (box (1 - 0.3 * gone) (1 - gone) t { tkAge = 10 ^ (6 :: Int) } clock)
+             , raised (tag (voiceOfTalk t) (1 - gone))
+             ]
+      _ -> Blank
+    -- The box stands a little off the bottom, so its shadow shows.
     raised = Translate 0 15
+
+-- | Over a level's ending: the card that says every order is delivered, as the lamp
+-- burns, until the flare takes it; then the talk, on the board as it stands there.
+endingLayer :: Story -> Finale -> Int -> Picture
+endingLayer s f clock = Pictures [ endCard False shown clock, talkLayer s 1 clock ]
+  where
+    age = fromIntegral (fnAge f) :: Float
+    shown = case fnStage f of
+      Lit -> smooth ((age - 100) / 30)
+      Flare -> 1 - smooth (age / 10)
+      _ -> 0
+
+-- The end card --------------------------------------------------------------------
+
+-- | Every order delivered, the end, thank you for playing: in the box's own style, a
+-- tilted black panel over the board with a white rim and a yellow shadow. @really@
+-- after the true end, which says so. Faded in by @k@.
+endCard :: Bool -> Float -> Int -> Picture
+endCard really k clock
+  | k <= 0.01 = Blank
+  | otherwise = Translate 0 (snap (150 + 24 * (1 - k))) (fadePicture k (Pictures
+      [ Color (hex sun) (pixelPoly (moved (12, -12) panelRim))
+      , Color (hex rim) (pixelPoly panelRim)
+      , Color (hex ink) (pixelPoly panel)
+      , Color (hex rim) (Translate 0 66 (pixelTextC 5 "ALL ORDERS DELIVERED"))
+      , Color (hex muted) (Translate 0 18 (pixelTextC 3 subtitle))
+      , Color (hex sun) (Translate 0 (-18) (pixelTextC 6 "THE END"))
+      , Color (hex muted) (Translate 0 (-72) (pixelTextC 2 "THANK YOU FOR PLAYING"))
+      , sparks
+      ]))
+  where
+    panel = [(-348, -111), (345, -99), (354, 96), (-339, 84)]
+    panelRim = [(-357, -120), (354, -108), (363, 105), (-348, 93)]
+    subtitle
+      | really = "EVERY ONE. FOR REAL THIS TIME."
+      | otherwise = "EVERY LAMP LIT, EVERY ONE ON TIME"
+    -- A few pixel stars twinkling round the title.
+    sparks = Pictures
+      [ Color (hex sun) (Translate x y (if on then plus else rect 0 0 px px))
+      | (i, (x, y)) <- zip [0 :: Int ..] [(-318, 60), (300, 51), (-282, -60), (318, -45), (-210, 75), (234, -78)]
+      , let on = ((clock + i * 17) `div` 20) `mod` 3 /= 0 ]
+    plus = Pictures [rect 0 (-px) px (3 * px), rect (-px) 0 (3 * px) px]
 
 -- The opening film's screen ------------------------------------------------------
 

@@ -139,6 +139,7 @@ allChecks level = concat
   , soundChecks level
   , introChecks
   , storyChecks
+  , endingStoryChecks
   ]
 
 -- 1. ---------------------------------------------------------------------------
@@ -2203,7 +2204,7 @@ storyChecks = case levelHall of
           Nothing -> st
           Just _ -> through key (play st [key, noInput])
         done = through enter talking
-        looks b = [ lk | Line _ (Just lk) <- beatLines first (runGame (snd entered)) b ]
+        looks b = [ lk | Line _ _ (Just lk) <- beatLines first (runGame (snd entered)) b ]
         playing = (runGame (snd done)) { gPrev = noInput }
         inLevel = Run 0 0 0 InLevel playing
         withCell = inLevel { runGame = playing { gHasCell = True } }
@@ -2259,7 +2260,7 @@ storyChecks = case levelHall of
         in fmap tkBeat (stTalk s1) == Just RustedCrate && stTalk s2 == Nothing
     , check "story: level 2's talk points at a mirror on a sled, which can move" $
         let g2 = runGame (stepRun levels enter (Run 1 1 1 Lobby (initialGame second)))
-            sleds = [ lk | Line _ (Just lk) <- beatLines second g2 ArriveSecond, lkThing lk == TheSled ]
+            sleds = [ lk | Line _ _ (Just lk) <- beatLines second g2 ArriveSecond, lkThing lk == TheSled ]
         in not (null sleds)
            && all (\lk -> maybe False mMovable (Map.lookup (lkCell lk) (lvMirrors second))) sleds
     , check "story: Escape still leaves a level mid-talk, and the talk with it" $
@@ -2273,3 +2274,78 @@ storyChecks = case levelHall of
            && not (null [ () | CueTalkBlip _ <- heard ])
     ]
   _ -> [check "story: the campaign has two levels" False]
+
+-- | The story's own talks: every order seemingly delivered as the last listed lamp
+-- burns, the lamp gone out, the keeper in the secret level, and the true end.
+endingStoryChecks :: [Check]
+endingStoryChecks = case levelHall of
+  Right levels | length levels >= 4 ->
+    let play = foldl' (storyTick levels)
+        through key st = case stTalk (fst st) of
+          Nothing -> st
+          Just _ -> through key (play st [key, noInput])
+        third = levels !! 2
+        secret = levels !! 3
+        -- One shift from lighting the last listed lamp.
+        nearWin = (startPlaying third) { gEra = Past, gCell = lvGoal third, gHasCell = True, gPrev = noInput }
+        before = Run 2 2 2 InLevel nearWin
+        lit = play (noStory, before) [space]
+        celebrating = play lit (replicate deliveredAt noInput)
+        stageOf st = case runMode (snd st) of
+          Ending f -> Just (fnStage f, fnAge f)
+          _ -> Nothing
+        beatOf st = fmap tkBeat (stTalk (fst st))
+        closed = through enter celebrating
+        -- On, a tick at a time, until the keeper can walk again.
+        beckoning = case dropWhile ((/= Just Beckon) . fmap fst . stageOf)
+                                   (take 2000 (iterate (\st -> play st [noInput]) closed)) of
+          st : _ -> st
+          [] -> closed
+        -- The secret level, just arrived in from the ending.
+        arrived = Run 3 2 3 InLevel ((initialGame secret) { gPhase = Playing, gPrev = noInput })
+        fromEnding = arrived { runIndex = 2, runMode = Ending (finale Arrival 0) }
+        meeting = notice levels fromEnding arrived noStory
+        meetingLines = maybe [] tkLines (stTalk meeting)
+        -- And cleared, for the first time.
+        won = arrived { runCompleted = 4, runGame = (runGame arrived) { gPhase = Won } }
+        lastTalk = notice levels arrived won noStory
+        ended = through enter (play (lastTalk, won) (replicate 60 noInput))
+    in
+    [ check "ending: as the last listed lamp burns, the courier says every order is delivered" $
+        beatOf celebrating == Just AllDelivered && stageOf celebrating == Just (Lit, deliveredAt)
+        && beatOf (play lit (replicate (deliveredAt - 1) noInput)) == Nothing
+    , check "ending: the lamp burns on until she is done, and flares just after" $
+        let waited = play celebrating (replicate 200 noInput)
+        in stageOf waited == Just (Lit, deliveredAt) && isJust (stTalk (fst waited))
+           && stTalk (fst closed) == Nothing
+           && fmap fst (stageOf (play closed (replicate (litTicks - deliveredAt) noInput))) == Just Flare
+    , check "ending: once she can walk again, she sees the light went into the wall" $
+        case stTalk (fst beckoning) of
+          Just t -> tkBeat t == LampOut && tkWait t > 0
+                    && Look (head (lvPassage third)) Present TheWay
+                         `elem` [ lk | Line _ _ (Just lk) <- tkLines t ]
+          Nothing -> False
+    , check "ending: once the story has been seen to its end, the ending says nothing" $
+        let again = play (noStory, before { runCompleted = 4 }) (space : replicate (deliveredAt + 5) noInput)
+        in stTalk (fst again) == Nothing && stageOf again == Just (Lit, deliveredAt + 5)
+    , check "secret level: the keeper meets the courier, who points them out" $
+        fmap tkBeat (stTalk meeting) == Just KeeperMeets
+        && any ((== Keeper) . lnWho) meetingLines && any ((== Courier) . lnWho) meetingLines
+        && fmap lnLook (take 1 meetingLines)
+             == [ fmap (\p -> Look (ptCell p) Present TheKeeper) (gPartner (runGame arrived)) ]
+        && Look (lvPowerCell secret) Past TheShard `elem` [ lk | Line _ _ (Just lk) <- meetingLines ]
+    , check "secret level: when the speaker changes, their box pops up afresh" $
+        let shown = play (meeting, arrived) (replicate (arrivalWait + 30) noInput)
+            typed = play shown [enter, noInput]
+            turned = play typed [enter]
+        in fmap (lnWho . currentLine) (stTalk (fst typed)) == Just Courier
+           && fmap (lnWho . currentLine) (stTalk (fst turned)) == Just Keeper
+           && fmap tkShown (stTalk (fst turned)) == Just 0
+    , check "secret level: clearing it the first time opens the last talk, then the end card" $
+        fmap tkBeat (stTalk lastTalk) == Just LastLight
+        && stTalk (fst ended) == Nothing && isJust (stTheEnd (fst ended))
+        && stTalk (notice levels arrived { runCompleted = 4 } won noStory) == Nothing
+    , check "secret level: leaving it puts the end card away" $
+        stTheEnd (notice levels won (won { runMode = Lobby }) (fst ended)) == Nothing
+    ]
+  _ -> [check "ending: the hall has a secret level after three" False]

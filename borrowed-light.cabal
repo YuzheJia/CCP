@@ -35,6 +35,7 @@ executable borrowed-light
                     Figures
                     Font
                     Hud
+                    KeeperPortrait
                     Lobby
                     PixelFont
                     Platform
