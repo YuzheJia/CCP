@@ -1,0 +1,12 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "borrowed-light:lib:borrowed-light"
+    - path: "app"
+      component: "borrowed-light:exe:borrowed-light"
+    - path: "test"
+      component: "borrowed-light:test:spec"
+    - path: "vendor/gloss-1.13.2.2"
+      component: "gloss:lib:gloss"
+    - path: "vendor/gloss-rendering-1.13.2.1"
+      component: "gloss-rendering:lib:gloss-rendering"
