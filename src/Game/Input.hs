@@ -47,9 +47,10 @@ data GameKey
   | KSpace | KEnter | KRestart | KPause | KUndo | KPeek | KEcho
     -- Space shifts the era, Enter starts, retries and goes on, and R, P, Z, Tab and
     -- E restart, pause, undo, look at the other era and send the echo.
-  | KInstructions| KLobby
+  | KInstructions| KLobby | KCancel
     -- I opens the instructions on the title; Escape goes back to the hall (from a
-    -- level) or to the title (from the hall), and skips the opening film.
+    -- level) or to orders (from the hall), and skips the opening film.
+    -- Delete/Backspace is KCancel: ask to cancel the chosen order.
 
   deriving (Eq, Ord, Show)
 
@@ -128,6 +129,7 @@ tickInput keys = TickInput
   , tiEcho    = down KEcho
   , tiInstructions = down KInstructions
   , tiLobby   = down KLobby
+  , tiCancel  = down KCancel
   -- True when no direction key went down since the last tick. If 'tiDir' changes
   -- anyway, a newer key was let go of and an older one shows through, which
   -- 'Game.Logic' must not take as a press. The list comprehension keeps only the

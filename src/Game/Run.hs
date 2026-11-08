@@ -6,11 +6,14 @@
 -- title, the opening film, the level hall, a level, or an ending), which level is
 -- selected, how many levels are cleared and unlocked, and how to move between them.
 -- Its main entry point is 'stepRun', one tick at a time. The app's Main calls it
--- once a tick, 60 times a second, with the keys held down that tick, keeps the 'Run'
+-- through Game.Orders.stepCampaign, which handles the orders desk and intercepts
+-- transitions to and from it. Main steps once a tick, 60 times a second, with the
+-- keys held down that tick, keeps the 'Run'
 -- it returns, and hands the run before and after (or their boards) to 'Game.Fx',
 -- 'Game.Sound' and 'Game.Story', which work out the effects, the sounds and the
--- courier's talk by comparing the two. The save file keeps only 'runCompleted' and
--- 'runIndex'; a half-played board is never saved.
+-- courier's talk by comparing the two. Each saved order keeps 'runCompleted' and
+-- 'runIndex', plus its time, era-shift count and timestamp; a half-played board is
+-- never saved.
 --
 -- It also holds the ending of the last listed level (level 3, The Long Way Round):
 -- the stages 'Lit', 'Flare', 'Opening', 'Beckon', 'Rush' and 'Arrival'; the straight
@@ -86,7 +89,7 @@ import Game.Fx (roomCols, roomRows, roomOf)
 import Game.Logic
 import Game.Types
 
--- | Where the run is: the title, the opening film, the level hall, a level, or a
+-- | Where the run is: the title, orders, opening film, level hall, a level, or a
 -- level's ending. The opening counts ticks since it began, and how long Enter (or
 -- Space) has been held down to skip it.
 --
@@ -101,9 +104,9 @@ import Game.Types
 -- thunk). State that is rebuilt every tick for minutes would otherwise pile up a
 -- chain of such thunks. 'Eq' is derived so screens can be compared ('Game.Story'
 -- and the tests do), and 'Show' for the @--trace@ output.
-data RunMode = Title | Intro !Int !Int | Lobby | InLevel | Ending !Finale
--- ^ Title is the menu; Intro holds age and skip ticks; Lobby selects a level;
--- InLevel plays it; Ending holds its stage and rush.
+data RunMode = Title | Orders | Intro !Int !Int | Lobby | InLevel | Ending !Finale
+-- ^ Title is the menu; Orders selects a save; Intro holds age and skip ticks;
+-- Lobby selects a level; InLevel plays it; Ending holds its stage and rush.
   deriving (Eq, Ord, Show)
 
 -- | @runCompleted@ is the number of campaign levels cleared. @runUnlocked@ is
@@ -219,6 +222,8 @@ startRunAt levels i completed
 stepRun :: [Level] -> TickInput -> Run -> Run
 stepRun levels input run = case runMode run of
   Title    -> stepTitle
+  -- The orders screen is stepped by "Game.Orders", which knows the saves.
+  Orders   -> run { runGame = g { gPrev = input } }
   Intro age held -> stepIntro age held
   Lobby    -> stepLobby
   InLevel  -> stepLevel

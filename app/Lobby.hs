@@ -40,9 +40,10 @@ import Graphics.Gloss
 -- scaled by the largest factor at which all of it fits the window, so its 16:10
 -- shape is kept, and black bars cover the strips of window on either side of it (or
 -- above and below), hiding anything drawn past the canvas's edges.
-renderLobby :: [Level] -> Run -> Float -> (Int, Int) -> Picture
-renderLobby levels run clock (winW, winH) = Pictures
-  [ Scale k k (lobbyScreen levels run clock)
+-- @over@ adds the active order and save slip in canvas units before scaling.
+renderLobby :: [Level] -> Run -> Float -> Picture -> (Int, Int) -> Picture
+renderLobby levels run clock over (winW, winH) = Pictures
+  [ Scale k k (Pictures [lobbyScreen levels run clock, over])
   , bars
   ]
   where
@@ -93,7 +94,7 @@ lobbyScreen levels run clock = Pictures
   , Pictures [levelCard i level | (i, level) <- zip [0 ..] levels, not (lvSecret level)]
   -- The keys, in two quieter lines at the foot of the canvas.
   , Color (hex 0xDCE6E7) (Translate 0 (-326) (textC 13 "W S OR ARROWS   SELECT       ENTER   PLAY"))
-  , Color (hex 0x89A4AA) (Translate 0 (-355) (textC 11 "ESC TITLE SCREEN       PROGRESS SAVES AUTOMATICALLY"))
+  , Color (hex 0x89A4AA) (Translate 0 (-355) (textC 11 "ESC YOUR ORDERS       SAVED EVERY TIME A ROOM IS CLEARED"))
   ]
   where
     -- The index of the selected level, from 0. In the hall the run's level is the

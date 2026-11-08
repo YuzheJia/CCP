@@ -11,7 +11,8 @@
 -- 'titleScreen' while the game is in its Menu phase, with the ambient clock, and
 -- lays 'instructionsPopup' over it while the instructions are open (the I key opens
 -- and shuts them, in stepTitle in "Game.Run"). "Draw" supplies the colours,
--- shapes, noise and baking, and "Font" the lettering.
+-- shapes, noise and baking, and "Font" the lettering. OrdersScreen reuses
+-- titleBackground without the lettering or prompt behind its tickets.
 --
 -- Units: canvas units, 1280 across and 800 up, with the origin at the centre of
 -- the screen and y growing upwards (Gloss's way, unlike the map's rows). The
@@ -24,25 +25,20 @@
 -- as top-level values, and flattened with 'bake', so a frame only builds the beam,
 -- the rain and the prompt afresh. Every "random" placement uses 'rnd', which gives
 -- the same number for the same inputs, so the baked art is the same every time.
-module Title (titleScreen, instructionsPopup) where
+module Title (titleScreen, titleBackground, instructionsPopup) where
 
 import Draw
 import Font
 import Graphics.Gloss
 
--- | Everything that holds still, drawn once.
---
--- The headland, the tower and the words, flattened by 'bake' into a few long lists
--- of polygons grouped by colour. A top-level value with no arguments is worked out
--- the first time it is drawn and then shared by every later frame. @bake $ x@ is
--- bake applied to x: '$' is function application at the lowest precedence, which
--- saves a pair of brackets round the long list.
-titleArt :: Picture
-titleArt = bake $ Pictures
-  [ headland
-  , tower
-  , labels
-  ]
+-- | Everything that holds still, drawn once: the tower on its headland, and the
+-- words over it.
+-- Separate top-level values share their baked geometry across frames, while
+-- OrdersScreen can reuse the tower without the title lettering. Baking merges
+-- adjacent shapes of one colour after applying their transforms.
+towerArt, labelArt :: Picture
+towerArt = bake (Pictures [headland, tower])
+labelArt = bake labels
 
 -- | Height of the horizon, in canvas units (below the centre of the screen): where
 -- the sky stops and the sea begins, and the base the clouds and waves are placed
@@ -267,16 +263,34 @@ labels = Pictures
 --
 -- @clock@ is the ambient tick count (60 a second) as a Float, from "Render". The
 -- layers, back to front: the baked sky and sea, the beam, the baked headland, tower
--- and words (so the tower stands in front of the root of its own beam), the rain,
+-- (so the tower hides the root of its own beam), the rain, the baked words,
 -- and the prompt. Only the beam, the rain and the prompt are built each frame; the
 -- rest are top-level values made once.
 titleScreen :: Float -> Picture
 titleScreen clock = Pictures
+  [ titleBackground clock
+  , labelArt
+  , prompt
+  ]
+  where
+    -- The prompt breathes from alpha 0.44 to 1 over roughly 90 ticks.
+    glowK = 0.72 + 0.28 * sin (clock * 0.07)
+    -- A 300 by 42-unit plate around a 19-unit baseline near the canvas foot.
+    prompt = Translate 0 (-350) (Pictures
+      [ Color (hexA 0x000000 0.45) (rectC 300 42 `shift` 6)
+      , Color (fade glowK (hex 0xFFE2A8)) (Translate 0 0 (textC 19 "Press Enter to begin"))
+      ])
+    -- Used infix to raise the plate six canvas units around its text.
+    shift pic dy = Translate 0 dy pic
+
+-- | The title without its words: the split sky and sea, the turning beam, the
+-- tower and the rain. The orders are laid out over it.
+titleBackground :: Float -> Picture
+titleBackground clock = Pictures
   [ backdrop
   , beam
-  , titleArt
+  , towerArt
   , rain
-  , prompt
   ]
   where
     -- How far the beam is turned from pointing straight left, in degrees: it swings
@@ -310,19 +324,6 @@ titleScreen clock = Pictures
     -- ('mod' is for whole numbers). It works for negative v too, since 'floor'
     -- rounds down, not towards zero.
     wrapTo size v = v - size * fromIntegral (floor (v / size) :: Int)
-    -- The prompt's brightness breathes between 0.44 and 1, once every 2 pi / 0.07,
-    -- about 90 ticks or one and a half seconds.
-    glowK = 0.72 + 0.28 * sin (clock * 0.07)
-    -- "Press Enter to begin", 19 units tall, centred near the bottom of the screen
-    -- (baseline at y = -350) on a dark, half-clear plate 300 by 42, raised 6 so it
-    -- sits round the letters, which stand on the baseline.
-    prompt = Translate 0 (-350) (Pictures
-      [ Color (hexA 0x000000 0.45) (rectC 300 42 `shift` 6)
-      , Color (fade glowK (hex 0xFFE2A8)) (Translate 0 0 (textC 19 "Press Enter to begin"))
-      ])
-    -- shift pic dy raises a picture by dy. Above it is written between backticks,
-    -- rectC 300 42 `shift` 6, which uses an ordinary function as an infix operator.
-    shift pic dy = Translate 0 dy pic
 
 -- | The instructions, over the title while they are open: a grey-blue veil across
 -- the whole canvas, a dark panel 700 by 440 in the middle with a cream outline

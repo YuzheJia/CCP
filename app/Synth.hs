@@ -48,8 +48,9 @@ data Sound
     -- ^ Rewind, fresh attempt, room crossing, pause and resume.
   -- The title and the hall
   | MenuMove | MenuEnter | MenuBack -- ^ Selection, acceptance and return cues.
-  -- The courier's talk
-  | TalkBlip | TalkOpen | TalkClose -- ^ Typed letter and panel arrival/departure.
+  -- The courier's talk, and her orders
+  | TalkBlip | TalkOpen | TalkClose | Print | TearBit | Tear
+    -- ^ Typed letter, panel arrival/departure, ticket printing, notch and tear.
   -- The ending
   | Flare | LampDies | LightGoes | WallBreak | RushBegins | Barrier | BarrierPassed
     -- ^ Rising lamp, its failure, departing light, rubble, rush and obstacle cues.
@@ -550,6 +551,19 @@ oneShot s = case s of
     , gain 0.7 (thump 160 70 0.07)
     , gain 0.3 (env (perc 0.001 0.02) (lowpass (const 3500) (pink 41 0.05))) ])
   TalkClose -> room (gain 0.5 (env (perc 0.002 0.05) (lowpass (const 5000) (osc square (\t -> 900 - 3000 * t) 0.12))))
+  -- Her orders. A ticket printer: a row of dots hammered out over the feed's hum.
+  Print -> Shot 0.6 0.06 0.1 (mix
+    [ gain 0.5 (mix [ after (0.012 * fromIntegral i) (env (perc 0.0005 0.006) (bandpass 4 (const 3200) (noise (60 + i) 0.02))) | i <- [0 .. 5 :: Int] ])
+    , gain 0.25 (env (\t -> sin (pi * min 1 (t / 0.09))) (lowpass (const 900) (tone square 140 0.09))) ])
+  -- Paper giving along the perforation: a dry crackle.
+  TearBit -> Shot 0.6 0.05 0.08 (mix
+    [ gain 0.7 (env (perc 0.001 0.02) (bandpass 2.5 (const 2600) (pink 71 0.05)))
+    , gain 0.4 (after 0.018 (env (perc 0.001 0.012) (bandpass 3 (const 4200) (noise 72 0.03)))) ])
+  -- Torn off: a long rip that brightens as it goes, and a soft flap.
+  Tear -> room (mix
+    [ env (\t -> min 1 (t / 0.02) * (if t < 0.32 then 1 else exp (negate (t - 0.32) / 0.03)) * (0.7 + 0.3 * sin (t * 2 * pi * 47)))
+        (bandpass 1.6 (\t -> 1400 + 3200 * t) (pink 73 0.45))
+    , gain 0.45 (after 0.3 (thump 140 60 0.08)) ])
 
   -- The ending.
   -- The flare: everything rising to the white, cut at its height.

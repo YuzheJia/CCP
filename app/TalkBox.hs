@@ -13,7 +13,10 @@
 -- instead count pixels right/down; patch converts them into canvas coordinates.
 module TalkBox
   ( talkLayer
+  , askLayer
   , introScreen
+  , pixelPoly
+  , px
   ) where
 
 import Data.Char (isAlpha, isUpper)
@@ -184,7 +187,21 @@ typedLine shown s = Pictures (go 0 (runs (zip (take shown s) (colours s))))
 
 -- | The box and everything on it, popped up by @k@ (0 to 1) and at opacity @a@.
 box :: Float -> Float -> Talk -> Int -> Picture
-box k a t clock = Pictures
+box k a t clock = boxWith k a (lnText (currentLine t)) (typedChars t) corner
+  where
+    corner = Pictures
+      ( [ next | lineTyped t ]
+      ++ [ Translate 573 (-226) (Color (hex muted) (pixelTextC 2 (show (tkLine t + 1) ++ "/" ++ show (length (tkLines t))))) ] )
+    -- One-pixel prompt bob every 14 ticks, shown only after the line is typed.
+    bob = if (clock `div` 14) `mod` 2 == 0 then 0 else -px
+    next = Translate 0 bob (Pictures
+      [ Color (hex sun) (pixelPoly [(552, -345), (576, -345), (564, -360)])
+      , Color (hex muted) (Translate 474 (-345) (pixelText 2 "ENTER"))
+      ])
+
+-- | The box with a line, @typed@ letters of it shown, and something in its corner.
+boxWith :: Float -> Float -> String -> Int -> Picture -> Picture
+boxWith k a said typed corner = Pictures
   [ Color (fade a (hex sun)) (pixelPoly (moved (12, -12) (shape rimShape)))
   , Color (fade a (hex rim)) (pixelPoly (shape rimShape))
   , Color (fade a (hex rim)) (pixelPoly (shape tailRim))
@@ -196,22 +213,14 @@ box k a t clock = Pictures
     -- k changes geometry about boxCentre, while a changes alpha. Delay the text
     -- until the panel is nearly full size, keeping the glyphs on their own grid.
     shape = scaled (0.72 + 0.28 * k) boxCentre
-    said = currentLine t
-    rows = pixelWrap textWidth (lnText said)
+    rows = pixelWrap textWidth said
     -- Letters shown on each row, counting the one space each row break took.
     shownRows = snd (foldl' (\(left, acc) r -> (max 0 (left - length r - 1), acc ++ [min (length r) left]))
-                             (typedChars t, []) rows)
+                             (typed, []) rows)
     body = Pictures $
       [ Translate textLeft (textTop - fromIntegral (i * pixelLineH) * px) (typedLine n r)
       | (i, (r, n)) <- zip [0 :: Int ..] (zip rows shownRows) ]
-      ++ [ next | lineTyped t ]
-      ++ [ Translate 573 (-226) (Color (hex muted) (pixelTextC 2 (show (tkLine t + 1) ++ "/" ++ show (length (tkLines t))))) ]
-    -- The next-line prompt moves by one pixel every 14 ticks, only after typing.
-    bob = if (clock `div` 14) `mod` 2 == 0 then 0 else -px
-    next = Translate 0 bob (Pictures
-      [ Color (hex sun) (pixelPoly [(552, -345), (576, -345), (564, -360)])
-      , Color (hex muted) (Translate 474 (-345) (pixelText 2 "ENTER"))
-      ])
+      ++ [ corner ]
 
 -- | The name tag over the box's corner.
 tag :: Float -> Picture
@@ -226,23 +235,25 @@ tag a = fadePicture a (Pictures
 -- using Talk's typing age and a global tick clock for mouth, bob and blink.
 -- The bitmap scales once; patches are already expressed in canvas units.
 portrait :: Float -> Talk -> Int -> Picture
-portrait slide t clock = Translate (fst portraitAt - snap (slide * 150)) (snd portraitAt + bob) (Pictures
+portrait slide t = face slide (not (lineTyped t)) (tkAge t) (drop (max 0 (typedChars t - 1)) (lnText (currentLine t)))
+
+-- | Her face, slid off to the left by @slide@: talking while @typing@, @age@ ticks
+-- into the line, @letter@ onwards being the one just typed.
+face :: Float -> Bool -> Int -> String -> Int -> Picture
+face slide typing age letter clock = Translate (fst portraitAt - snap (slide * 150)) (snd portraitAt + bob) (Pictures
   [ Scale px px portraitBitmap
   , if blinking then blinkPic else Blank
   , mouth
   ])
   where
-    typing = not (lineTyped t)
     -- A blink every few seconds, a little irregular.
     blinking = clock `mod` 233 < 7 || clock `mod` 541 < 6
-    -- The last revealed character suppresses an open mouth on spaces; patch
-    -- timing uses five-tick phases, with a gentler ten-tick vertical bob.
-    letter = drop (max 0 (typedChars t - 1)) (lnText (currentLine t))
+    -- Five-tick mouth phases skip spaces; the vertical bob uses ten ticks.
     mouth
-      | typing && (tkAge t `div` 5) `mod` 2 == 0 && take 1 letter /= " " = mouthOpenPic
+      | typing && (age `div` 5) `mod` 2 == 0 && take 1 letter /= " " = mouthOpenPic
       | typing = mouthShutPic
       | otherwise = Blank
-    bob = if typing && (tkAge t `div` 10) `mod` 2 == 1 then px else 0
+    bob = if typing && (age `div` 10) `mod` 2 == 1 then px else 0
 
 -- The marker on the board --------------------------------------------------------
 
@@ -343,6 +354,29 @@ talkLayer s f clock = case (stTalk s, stClosing s) of
   where
     -- The box stands a little off the bottom, so its yellow shadow shows.
     raised = Translate 0 15
+
+-- | Her question before an order is cancelled, in the talk's own box: @k@ (0 to 1)
+-- as it comes up, the line with @typed@ letters shown, @age@ ticks since she asked,
+-- and, in the box's corner where her talk says ENTER, how much of the hold that
+-- tears the order is done (0 to 1), filling as the film's skip bar does.
+askLayer :: Float -> String -> Int -> Int -> Float -> Int -> Picture
+askLayer k said typed age heldK clock
+  | k <= 0.01 = Blank
+  | otherwise = Pictures
+      [ face (1 - k) typing age (drop (max 0 (typed - 1)) said) clock
+      , raised (boxWith (min 1.04 (k * 1.04) - (if k >= 1 then 0.04 else 0)) (min 1 (k * 1.5)) said typed corner)
+      , raised (tag k)
+      ]
+  where
+    typing = typed < length said
+    raised = Translate 0 15
+    hint = "HOLD ENTER"
+    hintW = fromIntegral (pixelW hint) * 2
+    corner = Pictures
+      [ Color (hex (if heldK > 0 then rim else muted)) (Translate (588 - hintW) (-330) (pixelText 2 hint))
+      , Color (hexA 0xFFFFFF 0.18) (rect (588 - hintW) (-354) hintW 3)
+      , Color (hex sun) (rect (588 - hintW) (-354) (hintW * max 0 (min 1 heldK)) 3)
+      ]
 
 -- The opening film's screen ------------------------------------------------------
 

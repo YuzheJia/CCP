@@ -270,6 +270,9 @@ playCue c = case c of
   -- takes the next of the four rates.
   CueTalkBlip k -> play TalkBlip 0.14 ([1, 1.12, 0.94, 1.06] !! ((k `div` 3) `mod` 4)) 0
   CueTalkClose -> play TalkClose 0.3 1 0
+  CuePrint -> play Print 0.3 1 0
+  CueTearing k -> play TearBit 0.3 ([1, 1.1, 0.95, 1.05] !! (k `mod` 4)) 0
+  CueTorn -> play Tear 0.5 1 0
 
 -- | The looping beds, each in its own slot of the mixer.
 --

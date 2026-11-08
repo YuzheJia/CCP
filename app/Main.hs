@@ -20,6 +20,7 @@
 --                    w a s d move, x shift, q echo, W A S D X the press alone, z undo,
 --                    T Tab held, e Enter, p pause, r restart, ! Escape,
 --                    i instructions, . one idle tick
+--                    c Delete (cancel an order), H Enter held for one tick
 --   --after=N        then run N more idle ticks
 --   --fps            print measured frames per second to stdout
 --   --trace          print the game state whenever phase, era, cell or inventory change
@@ -38,10 +39,11 @@
 --
 -- What it deliberately does not do: decide anything about the game. Which level is
 -- played and how the player moves between title, film, hall and levels is
--- 'Game.Run'; the rules of a level are 'Game.Logic'; the effects, the sounds and the
+-- 'Game.Run', wrapped by 'Game.Orders' for the three saves and their desk;
+-- the rules of a level are 'Game.Logic'; the effects, the sounds and the
 -- courier's talk are worked out purely by 'Game.Fx', 'Game.Sound' and 'Game.Story',
 -- each by comparing one tick with the one before. Turning keys into one input a tick
--- is 'Game.Input'. Drawing is 'Render', 'Lobby' and 'TalkBox'; making and playing
+-- is 'Game.Input'. Drawing is 'Render', 'Lobby', 'OrdersScreen' and 'TalkBox'; making and playing
 -- sounds is 'Audio'; the film is decoded by 'Video'; the save file is 'Save'; the
 -- dead-end search itself is 'DeadSearch' in 'Game.Solution'. Nothing imports this
 -- module: it is the program's entry point.
@@ -75,6 +77,7 @@ import Game.Fx
 import Game.Input
 import Game.Level
 import Game.Logic (initialGame)
+import Game.Orders
 import Game.Run
 import Game.Solution
 import Game.Sound
@@ -84,6 +87,7 @@ import GHC.Clock (getMonotonicTime)
 import Graphics.Gloss.Interface.Environment (getScreenSize)
 import Graphics.Gloss.Interface.IO.Game
 import qualified Lobby
+import OrdersScreen (hallOverlay, ordersScreen)
 import Platform (exitWhenWindowCloses, keepLetterKeys)
 import qualified Render
 import Save
@@ -119,7 +123,11 @@ data World = World
                              --   worked out only as far as it has been played)
   , wFrozen :: !Bool         -- ^ inspection only: no ticks at all
                              --   (and no searches: the window holds one exact moment)
-  , wSaved  :: !Progress     -- ^ last progress successfully offered to the save file
+  , wBook   :: !Book         -- ^ her orders: the saves, the one in play kept up to date
+  , wDesk   :: !Desk         -- ^ the orders screen
+  , wSaved  :: !Book         -- ^ the orders as last written to the save file
+  , wSlipAge :: !(Maybe Int) -- ^ ticks since the hall's saved slip came out, while it is out
+  , wSlipMark :: !Int        -- ^ rooms the order in play had cleared when last slipped or entered
   , wCues   :: [Cue]         -- ^ sounds the ticks of the current step started, newest
                              --   first; the step callback plays them and empties the list
   , wMuted  :: !Bool         -- ^ True while the sound is off; M flips it, and the
@@ -198,22 +206,25 @@ main = do
       -- The level asked for, counting from 1; Nothing if the flag is missing or not
       -- a number. '>>=' on 'Maybe' feeds a 'Just' on and stops at a Nothing.
       requested = flag "level" >>= readMaybe
-  -- The save, already clamped to this many levels; a missing or unreadable save is
-  -- read as a new one ('Save.loadProgress').
-  saved <- loadProgress total
-  -- The opening film, if assets/intro.blv is found; Nothing otherwise, and then a new
-  -- save goes from the title straight into level 1.
+  -- Read and normalise all three orders, migrating the old single save if needed.
+  book0 <- loadBook total
+  -- The optional opening film is played when an order starts its first delivery.
   video <- loadVideo
   -- A decoder for the film, if there is one. 'traverse' runs 'newPlayer' inside the
   -- 'Maybe': Nothing gives Nothing, and Just v gives Just the new player.
   player <- traverse newPlayer video
-  -- The level to open on, as an index from 0: the one asked for, or the one selected
-  -- when the game was last saved (saved from 0, so 1 is added to undo the shared
-  -- subtraction), clamped into the list.
-  let startAt = max 0 (min (total - 1) (fromMaybe (savedSelected saved + 1) requested - 1))
-      -- With --level=N the levels before N count as cleared, so the hall lets the
-      -- player choose N. 'persistWorld' writes that to the save like any progress.
-      completedAtStart = max (savedCompleted saved) (if isJust requested then startAt else 0)
+  -- Restore progress from the active order; an empty book starts at level zero.
+  let savedC = maybe 0 odCompleted (activeOrder book0)
+      savedS = maybe 0 odSelected (activeOrder book0)
+      -- Command-line level numbers start at one; clamp the converted index.
+      startAt = max 0 (min (total - 1) (fromMaybe (savedS + 1) requested - 1))
+      -- An explicit level unlocks those before it in this active order.
+      completedAtStart = max savedC (if isJust requested then startAt else 0)
+      -- Opening on a level or on the film plays an order, so there must be one.
+      book1
+        | isJust requested = withProgress completedAtStart startAt book0
+        | watchFilm = ensureActive book0
+        | otherwise = book0
       -- The run as it opens: the saved place may be clamped back into the hall.
       -- The if-expression chooses the function, which is then given the three
       -- arguments. 'startRunAt' opens a secret level asked for by number straight
@@ -264,7 +275,11 @@ main = do
               Nothing -> demoInputs (maybe 0 read (flag "pace")) (drop (runIndex start0) levels)
             else []
         , wFrozen = False
-        , wSaved = saved
+        , wBook = book1
+        , wDesk = closedDesk
+        , wSaved = book0
+        , wSlipAge = Nothing
+        , wSlipMark = savedC
         -- Opening inside the film skips the change from the title into it, which is
         -- what starts the film's soundtrack ('cues'), so its cue is queued here.
         -- '[ x | c ]' is a list comprehension with only a condition: [x] when @c@
@@ -386,6 +401,8 @@ main = do
           -- and for that phase 'Render' draws the title screen (and the
           -- instructions, while they are open) instead of the board.
           Title -> pure (Render.render deadEnd (scenes !! i) (levels !! i) g (wFx w) (wWindow w))
+          -- Three order tickets, drawn over the shared title background.
+          Orders -> pure (Render.fitted (wWindow w) (ordersScreen levels (wBook w) (wDesk w) (fxClock (wFx w))))
           -- The film: decode the picture for this tick, if there is a film, and
           -- frame it, with the bar that says how to skip it. With no film the
           -- opening ends on the tick it starts ('oneTick'), so it is never drawn, and
@@ -394,7 +411,12 @@ main = do
             frame <- traverse (`frameAt` age) player
             pure (Render.fitted (wWindow w) (introScreen (maybe 2 videoScale video) frame age held))
           -- The hall; its selected card pulses with the effects clock, in ticks.
-          Lobby -> pure (Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w))
+          Lobby ->
+            let order = fromMaybe newOrder (activeOrder (wBook w))
+                saved = durableKey (wSaved w) == durableKey (wBook w)
+                slip = fmap (\age -> (age, saved, order)) (wSlipAge w)
+                over = hallOverlay levels (bkActive (wBook w) + 1) slip
+            in pure (Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) over (wWindow w))
           -- A level, as 'shown', with the talk over it.
           InLevel -> pure (Render.renderWith talk deadEnd (scenes !! i) (levels !! i) shown (wFx w) (wWindow w))
           -- The won level's ending, and the card naming the level beyond.
@@ -566,18 +588,24 @@ finishShownSearch w = do
   searches <- evaluate (IntMap.adjust finishDeadSearch (runIndex (wRun w)) (wDead w))
   pure w { wDead = searches }
 
--- | Write the run's progress (how many levels are cleared, and which is selected)
--- to the save file, when it differs from what was last written. Called after every
--- step, so it costs a comparison almost always. If the write fails, 'wSaved' is
--- left as it was, so the next step tries again; the game plays on either way.
+-- | Write the orders when what they hold changes: at once for progress, a new or
+-- cancelled order, or a change of order; for the time on the road, every ten
+-- seconds of it, and whenever the run is back at the title or the orders. Each
+-- write stamps the order in play with the time. A write that fails is tried again.
 persistWorld :: World -> IO World
 persistWorld world
-  | progress == wSaved world = pure world
+  | not due = pure world
   | otherwise = do
-      saved <- saveProgress progress
-      pure (if saved then world { wSaved = progress } else world)
-  -- 'where' names a value for the whole definition, so both guards share it.
-  where progress = progressOf (wRun world)
+      now <- nowStamp
+      let book = stampActive now (wBook world)
+      written <- saveBook book
+      pure (if written then world { wBook = book, wSaved = book } else world)
+  where
+    ticksOf = maybe 0 odTicks . activeOrder
+    gap = abs (ticksOf (wBook world) - ticksOf (wSaved world))
+    resting = runMode (wRun world) `elem` [Title, Orders]
+    due = durableKey (wBook world) /= durableKey (wSaved world)
+          || gap >= 10 * ticksPerSecond || (resting && gap > 0)
 
 -- | The solver playing each level through the same keys a player would press.
 --
@@ -598,15 +626,13 @@ demoInputs pace levels = concat (zipWith3 play starts levels (map Just (drop 1 l
     pauseTicks = replicate 60 noInput
     -- One move's ticks, then the extra wait.
     paced action = actionInputs action ++ replicate pace noInput
-    -- The first level is started from the title; one after an ending starts itself;
-    -- any other is started from the last one's won plate.
-    -- Element k + 1 of 'starts' is made from level k but belongs to level k + 1. On
-    -- the title, Enter goes to the hall and a second Enter starts the selected
-    -- level; on a new save the first Enter goes through the film (which lasts no
-    -- ticks in the demo) into level 1, where the second does nothing. A won plate
-    -- is left for 150 ticks (two and a half seconds) before Enter. Nothing means no
-    -- keys are needed.
-    starts = Just [press, noInput, press]
+    -- The first level is started from the title, through the orders and the hall
+    -- when there are any; one after an ending starts itself; any other is started
+    -- from the last one's won plate.
+    -- Three fresh Enter presses cover title, orders and hall; on a new order
+    -- the film is skipped by the demo and later presses do nothing in play.
+    -- Later won plates wait 150 ticks before Enter; an ending starts itself.
+    starts = Just [press, noInput, press, noInput, press]
            : [ if null (lvPassage l) then Just (replicate 150 noInput ++ [press]) else Nothing | l <- levels ]
     -- One level's inputs: its start, a pause, the route, one idle tick on which the
     -- last move completes, and the ending if it has one and a level waits beyond.
@@ -642,13 +668,15 @@ demoInputs pace levels = concat (zipWith3 play starts levels (map Just (drop 1 l
       (_, Just (_, actions)) -> actions
       _ -> []
 
--- | One tick of the run and its effects together, for a tick the run is free to
+-- | One tick of the campaign and its effects together, for a tick the run is free to
 -- take (no talk is holding it). The effects are derived from the level's game before
--- and after the tick, as 'stepFx' always is. Takes and returns the run and effects
+-- and after the tick, as 'stepFx' always is. Takes and returns the campaign and effects
 -- as a pair.
-tickBoth :: [Level] -> (Run, Fx) -> TickInput -> (Run, Fx)
-tickBoth levels (r, fx) input =
-  let r' = stepRun levels input r
+tickBoth :: [Level] -> (Campaign, Fx) -> TickInput -> (Campaign, Fx)
+tickBoth levels (cp, fx) input =
+  let cp' = stepCampaign levels input cp
+      r = cpRun cp
+      r' = cpRun cp'
       fx' = stepFx (runGame r) (runGame r') fx
       -- Coming into a level, from the hall or the level before, introduces it
       -- again; restarting the same level does not.
@@ -658,7 +686,7 @@ tickBoth levels (r, fx) input =
       inLevel x = case runMode x of
         InLevel -> True
         _ -> False
-  in (r', if entered then fx' { fxFocus = 0 } else fx')
+  in (cp', if entered then fx' { fxFocus = 0 } else fx')
 
 -- | Fixed ticks from real time. A long stall is dropped rather than replayed,
 -- so the game never fast-forwards through input the player did not see land.
@@ -710,10 +738,12 @@ oneTick levels w =
       -- A held run does not step, but 'holdRun' remembers this tick's keys, so they
       -- need a fresh press once the talk closes; the effects still step, so the
       -- board's ambient animation goes on behind the talk.
-      (r0, fx0)
-        | free = tickBoth levels (wRun w, wFx w) input
+      before = Campaign (wBook w) (wDesk w) (wRun w)
+      (after0, fx0)
+        | free = tickBoth levels (before, wFx w) input
         | otherwise = let held = holdRun input (wRun w)
-                      in (held, stepFx (runGame (wRun w)) (runGame held) (wFx w))
+                      in (before { cpRun = held }, stepFx (runGame (wRun w)) (runGame held) (wFx w))
+      r0 = cpRun after0
       -- The film ends the run's opening once it has run its length, and is not
       -- shown again this session. With no film, the opening ends at once.
       -- The first level then begins, introduced from the start ('fxFocus' 0).
@@ -728,19 +758,35 @@ oneTick levels w =
       story
         | wTalks w = notice levels (wRun w) r story0
         | otherwise = story0
-      -- The sounds this tick started, worked out by comparing it with the one
-      -- before: the run's and effects' ('cues'), then the talk's ('storyCues').
+      book = tally (wRun w) r (cpBook after0)
+      desk = cpDesk after0
+      -- Run, dialogue and order-desk transitions each contribute their cues.
       heard = cues levels (wRun w, wFx w) (r, fx) ++ storyCues (wStory w) story
+              ++ deskCues levels book (wDesk w) desk
+      -- The hall prints a slip when it is reached with a room cleared since the
+      -- last one, or since the order was taken up.
+      cleared = maybe 0 odCompleted (activeOrder book)
+      menu m = m `elem` [Title, Orders]
+      (slip, mark)
+        | menu (runMode (wRun w)) && not (menu (runMode r)) = (Nothing, cleared)
+        | runMode r == Lobby && playing (runMode (wRun w)) && cleared > wSlipMark w = (Just 0, cleared)
+        | runMode r == Lobby = (fmap (+ 1) (wSlipAge w), wSlipMark w)
+        | otherwise = (Nothing, wSlipMark w)
   -- The new world. 'wCues' is kept newest first, so this tick's sounds go on the
   -- front, reversed; adding to the front of a list is cheap, adding to its end is
   -- not. 'afterTick' forgets the taps this tick has now seen.
   in w { wRun = r, wFx = fx, wScript = script, wKeys = afterTick (wKeys w)
        , wCues = reverse heard ++ wCues w, wStory = story
-       , wIntroLen = if filmOver then 0 else wIntroLen w }
+       , wIntroLen = if filmOver then 0 else wIntroLen w
+       , wBook = book, wDesk = desk, wSlipAge = slip, wSlipMark = mark }
   where
     -- Whether a mode is the opening film, whatever its ticks.
     isIntro m = case m of
       Intro _ _ -> True
+      _ -> False
+    playing m = case m of
+      InLevel -> True
+      Ending _ -> True
       _ -> False
 
 -- | Record one window event in the world. Equations are tried from the top: a
@@ -799,6 +845,8 @@ gameKey key = case key of
   SpecialKey KeyPad0 -> Just KSpace
   SpecialKey KeyTab   -> Just KPeek
   SpecialKey KeyEsc   -> Just KLobby
+  SpecialKey KeyDelete -> Just KCancel
+  SpecialKey KeyBackspace -> Just KCancel
   SpecialKey KeyEnter -> Just KEnter
   -- GLFW names the keypad's keys apart from the main ones; GLUT gave the same keys.
   SpecialKey KeyPadEnter -> Just KEnter
@@ -841,19 +889,20 @@ scriptInputs = concatMap one
       'r' -> [noInput { tiRestart = True }, noInput]
       'z' -> [noInput { tiUndo = True }, noInput]
       '!' -> [noInput { tiLobby = True }, noInput]  -- Escape: skips the film, leaves a level
+      'c' -> [noInput { tiCancel = True }, noInput]  -- Delete: asks to cancel the chosen order
+      'H' -> [noInput { tiEnter = True }]  -- Enter held for this tick, to tear an order
       'i' -> [noInput { tiInstructions = True }, noInput]  -- I: the instructions on the title
       '.' -> [noInput]
       _   -> []
 
 -- | The solver plays one level from the title, but stops @n@ moves short of the
 -- end and leaves the rest, and whatever follows, to the keyboard.
--- @pace@ is the idle ticks after each move, as for 'demoInputs'. Enter, a tick of
--- nothing and Enter again start the selected level from the title (through the hall,
--- or through the film, which lasts no ticks in the demo), and a second passes before
--- the first move.
+-- @pace@ is the idle ticks after each move, as for 'demoInputs'. Three Enter presses,
+-- with an idle tick between them, cover the title, orders desk and hall. The film
+-- lasts no ticks in the demo, and a second passes before the first move.
 handOver :: Int -> Int -> Level -> [TickInput]
 handOver pace n level =
-  [press, noInput, press] ++ replicate 60 noInput
+  [press, noInput, press, noInput, press] ++ replicate 60 noInput
   ++ concatMap (\a -> actionInputs a ++ replicate pace noInput) (take (length route - n) route)
   -- The tick on which the last move completes.
   ++ [noInput]

@@ -171,7 +171,8 @@ data TickInput = TickInput
   ,tiInstructions :: Bool  -- ^ I: show or hide the instructions on the title screen
   , tiLobby   :: !Bool          -- ^ leave a level and return to level select
                                 --   (Escape; from the hall it goes back to the
-                                --   title, and it also skips the opening film)
+                                --   orders, and it also skips the opening film)
+  , tiCancel  :: !Bool          -- ^ Delete or Backspace: cancel the chosen order
   , tiDirRevealed :: !Bool     -- ^ no direction went down this tick, so if 'tiDir'
                                --   changed, a newer key was let go of, not a press
                                --   ('noInput' leaves it False, so an input written
@@ -195,7 +196,7 @@ data TickInput = TickInput
 -- declared above ('tiDir', then ten 'Bool's up to 'tiDirRevealed', then each
 -- keeper's direction and flag), so a new field has to be added here in its place.
 noInput :: TickInput
-noInput = TickInput Nothing False False False False False False False False False False
+noInput = TickInput Nothing False False False False False False False False False False False
                     Nothing False Nothing False
 
 -- | The player does exactly one of these at a time. Being a sum type, "walking

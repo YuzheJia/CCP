@@ -130,6 +130,10 @@ data Cue
                               --   Counted from 1; only every third letter (1, 4,
                               --   7, ...) that is not a space blips ('Game.Story')
   | CueTalkClose              -- ^ the talk box goes
+    -- Her orders: the saves.
+  | CuePrint                  -- ^ a row of a new order printed
+  | CueTearing !Int           -- ^ a little more of an order torn, while Enter is held
+  | CueTorn                   -- ^ and torn off: the order is cancelled
   deriving (Eq, Show)
 
 -- | In a level for two: the yellow keeper (W A S D, and the only one in any other
@@ -153,8 +157,13 @@ cues :: [Level] -> (Run, Fx) -> (Run, Fx) -> [Cue]
 cues levels (r, fx) (r', fx') = case (runMode r, runMode r') of
   -- Enter on the title, once a level has been cleared, opens the hall.
   (Title, Lobby) -> [CueMenuEnter]
-  -- Enter on the title of a new save starts the opening film: the menu's own sound
-  -- and the film's soundtrack together.
+  -- The order desk selects an existing delivery or starts a new one via Intro.
+  (Title, Orders) -> [CueMenuEnter]
+  (Orders, Title) -> [CueMenuBack]
+  (Orders, Lobby) -> [CueMenuEnter]
+  (Orders, Intro _ _) -> [CueMenuEnter, CueIntro]
+  (Lobby, Orders) -> [CueMenuBack]
+  -- Direct title-to-film transitions remain useful for core-only simulations.
   (Title, Intro _ _) -> [CueMenuEnter, CueIntro]
   -- The film is over, skipped (Escape, or Enter held) or played to its end, and
   -- level 1 begins: its soundtrack fades out.
@@ -456,6 +465,7 @@ beds levels r = case runMode r of
   -- The weather of the game behind the title. That is always a level's first state,
   -- which is in the present, so it is the storm, at half its level in play.
   Title -> weather 0.5
+  Orders -> weather 0.45
   -- The film brings its own rain.
   Intro _ _ -> silence
   -- The hall holds a level's first state too: the storm, quieter still.
