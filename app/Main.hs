@@ -8,12 +8,13 @@
 --   borrowed-light --level=N       select level N in the lobby, counting from 1; a secret
 --                                  level, which the lobby never lists, is opened directly
 --   --mute                         start with the sound off; M turns it on and off
+--   --intro                        open on the opening film, whatever the save, to watch it again
 --
 -- Development flags, used to inspect exact moments of the game:
 --   --dump-sounds=DIR  write every sound to DIR as a WAV file, and exit
 --   --script=KEYS    run these keys instantly at startup, then hold the result:
 --                    w a s d move, x shift, q echo, W A S D X the press alone, z undo,
---                    T Tab held, e Enter, p pause, r restart, . one idle tick
+--                    T Tab held, e Enter, p pause, r restart, ! Escape, . one idle tick
 --   --after=N        then run N more idle ticks
 --   --fps            print measured frames per second to stdout
 --   --trace          print the game state whenever phase, era, cell or inventory change
@@ -22,14 +23,16 @@ module Main (main) where
 import Audio
 import Control.Monad (forM_, when)
 import Data.IORef
-import Data.List (foldl', stripPrefix)
+import Data.List (stripPrefix)
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
 import Game.Fx
 import Game.Input
 import Game.Level
+import Game.Logic (initialGame)
 import Game.Run
 import Game.Solution
 import Game.Sound
+import Game.Story
 import Game.Types
 import GHC.Clock (getMonotonicTime)
 import Graphics.Gloss.Interface.Environment (getScreenSize)
@@ -38,6 +41,8 @@ import qualified Lobby
 import Platform (exitWhenWindowCloses)
 import qualified Render
 import Save
+import TalkBox (introScreen, talkLayer)
+import Video (frameAt, loadVideo, newPlayer, vdAudio, vdAudioRate, videoScale, videoTicks)
 import System.Environment (getArgs)
 import System.Exit (die, exitSuccess)
 import System.IO (hFlush, stdout)
@@ -54,6 +59,10 @@ data World = World
   , wSaved  :: !Progress     -- ^ last progress successfully offered to the save file
   , wCues   :: [Cue]         -- ^ sounds the ticks since the last frame started, newest first
   , wMuted  :: !Bool
+  , wStory  :: !Story        -- ^ the courier's talk
+  , wTalks  :: !Bool         -- ^ off for the demo, whose keys would only be taken by it
+  , wIntroLen :: !Int        -- ^ ticks the opening film runs; 0 with no film, or once
+                             --   it has been shown, so it plays once a session
   }
 
 -- | The 1280 x 800 the art is composed for, shrunk to fit a smaller display.
@@ -80,12 +89,17 @@ main = do
       total = length levels
       requested = flag "level" >>= readMaybe
   saved <- loadProgress total
+  video <- loadVideo
+  player <- traverse newPlayer video
   let startAt = max 0 (min (total - 1) (fromMaybe (savedSelected saved + 1) requested - 1))
       completedAtStart = max (savedCompleted saved) (if isJust requested then startAt else 0)
       -- The run as it opens: the saved place may be clamped back into the hall.
-      start0 = (if isJust requested then startRunAt else startRunWithProgress) levels startAt completedAtStart
-      (run0, fx0) = foldl' (tickBoth levels) (start0, initialFx)
-                    (maybe [] id prepared ++ replicate after noInput)
+      start1 = (if isJust requested then startRunAt else startRunWithProgress) levels startAt completedAtStart
+      watchFilm = "--intro" `elem` args && isJust video
+      start0
+        | watchFilm = start1 { runIndex = 0, runMode = Intro 0 0, runGame = initialGame (levels !! 0) }
+        | otherwise = start1
+      demo = "--demo" `elem` args
       scenes =
         [ Render.mkScene (place i l, lvName l) (i + 1 < shownTotal) (teaches i l) l
         | (i, l) <- zip [0 ..] levels ]
@@ -101,21 +115,35 @@ main = do
         | i + 1 < total = (show (i + 2), lvName (levels !! (i + 1)))
         | otherwise = ("", "")
       world0 = World
-        { wRun = run0, wFx = fx0, wKeys = noKeys, wWindow = windowSize, wBank = 0
-        , wScript = if "--demo" `elem` args
+        { wRun = start0, wFx = initialFx, wKeys = noKeys, wWindow = windowSize, wBank = 0
+        , wScript = if demo
             then case flag "leave" >>= readMaybe of
               Just n -> handOver (maybe 0 read (flag "pace")) n (levels !! runIndex start0)
               Nothing -> demoInputs (maybe 0 read (flag "pace")) (drop (runIndex start0) levels)
             else []
-        , wFrozen = inspect
+        , wFrozen = False
         , wSaved = saved
-        , wCues = []
+        , wCues = [ CueIntro | watchFilm ]
         , wMuted = "--mute" `elem` args
+        , wStory = noStory
+        , wTalks = not demo
+        , wIntroLen = if demo then 0 else maybe 0 videoTicks video
         }
+      -- An inspection script is played instantly through the same ticks as the
+      -- keyboard, talk and film included, and then the world holds still.
+      world1 = case prepared of
+        Nothing -> world0
+        Just keys ->
+          let inputs = keys ++ replicate after noInput
+          in (iterate (oneTick levels) world0 { wScript = inputs } !! length inputs)
+               { wFrozen = True, wCues = [] }
   -- Every sound is made here, before the window opens.
   sound <- if inspect then pure False else startAudio
-  when ("--trace" `elem` args) $
-    putStrLn (if sound then "sound on" else "sound off: no output device, or not Windows") >> hFlush stdout
+  when sound $ forM_ video (\v -> loadClip (vdAudioRate v) (vdAudio v))
+  when ("--trace" `elem` args) $ do
+    putStrLn (if sound then "sound on" else "sound off: no output device, or not Windows")
+    putStrLn (maybe "no opening film: assets/intro.blv not found" (\v -> "opening film: " ++ show (videoTicks v) ++ " ticks") video)
+    hFlush stdout
   start <- getMonotonicTime
   counter <- newIORef (start, 0 :: Int)
   firstFrame <- newIORef True
@@ -132,19 +160,28 @@ main = do
     (InWindow "Borrowed Light" windowSize (40, 40))
     black
     60
-    (start, world0)
+    (start, world1)
     (\(_, w) -> do
         first <- readIORef firstFrame
         when first (writeIORef firstFrame False >> exitWhenWindowCloses)
         countFrame
         let run = wRun w
             i = runIndex run
-            picture = case runMode run of
-              Title -> Render.render (scenes !! i) (levels !! i) (runGame run) (wFx w) (wWindow w)
-              Lobby -> Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w)
-              InLevel -> Render.render (scenes !! i) (levels !! i) (runGame run) (wFx w) (wWindow w)
-              Ending f -> Render.renderEnding (scenes !! i) (levels !! i) (beyond i) f (runGame run) (wFx w) (wWindow w)
-        pure picture)
+            g = runGame run
+            -- While she talks about something in the other era, the board shows
+            -- that era, as if Tab were held.
+            shown = case lookNow (wStory w) of
+              Just lk | lkEra lk /= gEra g -> g { gPrev = (gPrev g) { tiPeek = True } }
+              _ -> g
+            talk f = talkLayer (wStory w) f (fxClock (wFx w))
+        case runMode run of
+          Title -> pure (Render.render (scenes !! i) (levels !! i) g (wFx w) (wWindow w))
+          Intro age held -> do
+            frame <- traverse (`frameAt` age) player
+            pure (Render.fitted (wWindow w) (introScreen (maybe 2 videoScale video) frame age held))
+          Lobby -> pure (Lobby.renderLobby levels run (fromIntegral (fxClock (wFx w))) (wWindow w))
+          InLevel -> pure (Render.renderWith talk (scenes !! i) (levels !! i) shown (wFx w) (wWindow w))
+          Ending f -> pure (Render.renderEnding (scenes !! i) (levels !! i) (beyond i) f g (wFx w) (wWindow w)))
     (\event (t, w) -> pure (t, onEvent event w))
     (\_ (t, w) -> do
         now <- getMonotonicTime
@@ -157,7 +194,7 @@ main = do
           setBeds (beds levels (wRun w'))
         w'' <- persistWorld w' { wCues = [] }
         let game = runGame (wRun w'')
-        when ("--trace" `elem` args && (stateKey game /= stateKey (runGame (wRun w)) || runIndex (wRun w'') /= runIndex (wRun w) || runMode (wRun w'') /= runMode (wRun w))) $ do
+        when ("--trace" `elem` args && (stateKey game /= stateKey (runGame (wRun w)) || runIndex (wRun w'') /= runIndex (wRun w) || filmless (runMode (wRun w'')) /= filmless (runMode (wRun w)))) $ do
           putStrLn ("mode=" ++ show (runMode (wRun w'')) ++ " level=" ++ show (runIndex (wRun w'') + 1) ++ " " ++ show (stateKey game) ++ " remaining=" ++ show (gRemaining game))
           hFlush stdout
         pure (now, w''))
@@ -235,10 +272,31 @@ oneTick levels w =
   let (input, script) = case wScript w of
         (i : rest) -> (i, rest)
         []         -> (tickInput (wKeys w), [])
-      (r, fx) = tickBoth levels (wRun w, wFx w) input
-      heard = cues levels (wRun w, wFx w) (r, fx)
+      -- An open talk takes the keys, and the board waits for it.
+      (story0, free)
+        | wTalks w = talkTick input (wRun w) (wStory w)
+        | otherwise = (wStory w, True)
+      (r0, fx0)
+        | free = tickBoth levels (wRun w, wFx w) input
+        | otherwise = let held = holdRun input (wRun w)
+                      in (held, stepFx (runGame (wRun w)) (runGame held) (wFx w))
+      -- The film ends the run's opening once it has run its length, and is not
+      -- shown again this session. With no film, the opening ends at once.
+      (r, fx) = case runMode r0 of
+        Intro age _ | age >= wIntroLen w -> (finishIntro levels r0, fx0 { fxFocus = 0 })
+        _ -> (r0, fx0)
+      filmOver = isIntro (runMode (wRun w)) && not (isIntro (runMode r))
+      story
+        | wTalks w = notice levels (wRun w) r story0
+        | otherwise = story0
+      heard = cues levels (wRun w, wFx w) (r, fx) ++ storyCues (wStory w) story
   in w { wRun = r, wFx = fx, wScript = script, wKeys = afterTick (wKeys w)
-       , wCues = reverse heard ++ wCues w }
+       , wCues = reverse heard ++ wCues w, wStory = story
+       , wIntroLen = if filmOver then 0 else wIntroLen w }
+  where
+    isIntro m = case m of
+      Intro _ _ -> True
+      _ -> False
 
 onEvent :: Event -> World -> World
 onEvent (EventResize size) w = w { wWindow = size }
@@ -313,6 +371,7 @@ scriptInputs = concatMap one
       'p' -> [noInput { tiPause = True }, noInput]
       'r' -> [noInput { tiRestart = True }, noInput]
       'z' -> [noInput { tiUndo = True }, noInput]
+      '!' -> [noInput { tiLobby = True }, noInput]  -- Escape: skips the film, leaves a level
       '.' -> [noInput]
       _   -> []
 
@@ -329,3 +388,10 @@ handOver pace n level =
       (Just actions, _) -> actions
       (_, Just (_, actions)) -> actions
       _ -> []
+
+-- | A mode with the opening film's ticks forgotten, so the trace notes the film
+-- starting and ending, not every tick of it.
+filmless :: RunMode -> RunMode
+filmless m = case m of
+  Intro _ _ -> Intro 0 0
+  _ -> m

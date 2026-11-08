@@ -23,6 +23,7 @@ library
                     Game.Solution
                     Game.Run
                     Game.Sound
+                    Game.Story
   build-depends:    base >=4.18 && <5, containers >=0.6 && <0.8
 
 executable borrowed-light
@@ -35,12 +36,16 @@ executable borrowed-light
                     Font
                     Hud
                     Lobby
+                    PixelFont
                     Platform
+                    Portrait
                     Render
                     Save
                     Station
                     Synth
+                    TalkBox
                     Title
+                    Video
   build-depends:    base >=4.18 && <5, array, borrowed-light, bytestring, containers, directory, filepath, gloss ==1.13.*
   ghc-options:      "-with-rtsopts=-A32m"
   -- The sound mixer. It plays through winmm on Windows and is silent elsewhere.

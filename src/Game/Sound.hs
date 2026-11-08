@@ -55,6 +55,13 @@ data Cue
   | CueThunder
   | CueArrival                -- ^ the real lighthouse
   | CueCard                   -- ^ the level beyond names itself
+    -- The opening film and the courier's talk.
+  | CueIntro                  -- ^ the opening film's soundtrack starts
+  | CueIntroEnd               -- ^ and stops, skipped or over
+  | CueTalkOpen               -- ^ the talk box pops up
+  | CueTalkNext               -- ^ on to the next line
+  | CueTalkBlip !Int          -- ^ a letter typed out: the how-manyth, for its pitch
+  | CueTalkClose              -- ^ the talk box goes
   deriving (Eq, Show)
 
 -- | In a level for two: the yellow keeper (W A S D, and the only one in any other
@@ -66,6 +73,8 @@ data Keeper = Yellow | Red
 cues :: [Level] -> (Run, Fx) -> (Run, Fx) -> [Cue]
 cues levels (r, fx) (r', fx') = case (runMode r, runMode r') of
   (Title, Lobby) -> [CueMenuEnter]
+  (Title, Intro _ _) -> [CueMenuEnter, CueIntro]
+  (Intro _ _, InLevel) -> [CueIntroEnd]
   (Lobby, Title) -> [CueMenuBack]
   (Lobby, Lobby) -> [ CueMenuMove | runIndex r /= runIndex r' ]
   (Lobby, InLevel) -> [CueMenuEnter]
@@ -202,6 +211,8 @@ silence = Beds 0 0 0 0 0 1 0 1
 beds :: [Level] -> Run -> Beds
 beds levels r = case runMode r of
   Title -> weather 0.5
+  -- The film brings its own rain.
+  Intro _ _ -> silence
   Lobby -> weather 0.35
   InLevel
     | gPhase g == Paused -> weather 0.4

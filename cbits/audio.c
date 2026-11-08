@@ -30,7 +30,7 @@ int bl_audio_rate(void) { return BL_RATE; }
 
 /* A sound has a left and a right side; a mono one shares one array for both. */
 typedef struct { float *left, *right; int len; } Sound;
-typedef struct { int active, sound; double pos; float rate, left, right; } Voice;
+typedef struct { int active, sound; double pos; float rate, left, right, fade; } Voice;
 typedef struct { int sound; double pos; float gain, rate, wantGain, wantRate; } Bed;
 
 static Sound sounds[BL_SOUNDS];
@@ -79,10 +79,15 @@ static void mix(short *out)
     if (!vc->active) continue;
     s = &sounds[vc->sound];
     for (n = 0; n < BL_FRAMES; n++) {
-      float x;
+      float k = 1;
       if (vc->pos >= s->len - 1) { vc->active = 0; break; }
-      left[n] += sampleAt(s, s->left, vc->pos, 0) * vc->left;
-      right[n] += sampleAt(s, s->right, vc->pos, 0) * vc->right;
+      if (vc->fade > 0) {
+        vc->fade *= 0.99965f;
+        if (vc->fade < 0.001f) { vc->active = 0; break; }
+        k = vc->fade;
+      }
+      left[n] += sampleAt(s, s->left, vc->pos, 0) * vc->left * k;
+      right[n] += sampleAt(s, s->right, vc->pos, 0) * vc->right * k;
       vc->pos += vc->rate;
     }
   }
@@ -209,6 +214,7 @@ void bl_audio_play(int id, float gain, float rate, float pan)
   voices[slot].sound = id;
   voices[slot].pos = 0;
   voices[slot].rate = rate;
+  voices[slot].fade = 0;
   /* Balance: centred, both sides play in full; panned, the far side fades. */
   voices[slot].left = gain * (pan > 0 ? 1 - pan : 1);
   voices[slot].right = gain * (pan < 0 ? 1 + pan : 1);
@@ -230,6 +236,17 @@ void bl_audio_bed(int slot, int id, float gain, float rate)
   LeaveCriticalSection(&lock);
 }
 
+/* Every voice playing this sound fades out, over about half a second. */
+void bl_audio_stop(int id)
+{
+  int v;
+  if (!running) return;
+  EnterCriticalSection(&lock);
+  for (v = 0; v < BL_VOICES; v++)
+    if (voices[v].active && voices[v].sound == id && voices[v].fade == 0) voices[v].fade = 1;
+  LeaveCriticalSection(&lock);
+}
+
 void bl_audio_mute(int on) { InterlockedExchange(&muted, on ? 1 : 0); }
 
 #else
@@ -238,6 +255,7 @@ int bl_audio_init(void) { return 0; }
 void bl_audio_load(int id, const float *left, const float *right, int len) { (void)id; (void)left; (void)right; (void)len; }
 void bl_audio_play(int id, float gain, float rate, float pan) { (void)id; (void)gain; (void)rate; (void)pan; }
 void bl_audio_bed(int slot, int id, float gain, float rate) { (void)slot; (void)id; (void)gain; (void)rate; }
+void bl_audio_stop(int id) { (void)id; }
 void bl_audio_mute(int on) { (void)on; }
 
 #endif

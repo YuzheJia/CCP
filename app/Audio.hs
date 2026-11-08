@@ -8,6 +8,7 @@ module Audio
   , playCue
   , setBeds
   , setMuted
+  , loadClip
   , dumpSounds
   ) where
 
@@ -20,9 +21,9 @@ import qualified Data.ByteString.Builder as B
 import Data.Int (Int16)
 import Foreign.C.Types (CFloat (..), CInt (..))
 import Data.Array.Base (unsafeAt)
-import Data.Array.Unboxed (elems)
+import Data.Array.Unboxed (UArray, bounds, elems, (!))
 import Foreign.Marshal.Array (allocaArray)
-import Foreign.Ptr (Ptr)
+import Foreign.Ptr (Ptr, nullPtr)
 import Foreign.Storable (pokeElemOff)
 import Game.Sound
 import Game.Types (Era (..), stepTicks)
@@ -36,6 +37,7 @@ foreign import ccall safe "bl_audio_load" c_load :: CInt -> Ptr CFloat -> Ptr CF
 foreign import ccall unsafe "bl_audio_play" c_play :: CInt -> CFloat -> CFloat -> CFloat -> IO ()
 foreign import ccall unsafe "bl_audio_bed" c_bed :: CInt -> CInt -> CFloat -> CFloat -> IO ()
 foreign import ccall unsafe "bl_audio_mute" c_mute :: CInt -> IO ()
+foreign import ccall unsafe "bl_audio_stop" c_stop :: CInt -> IO ()
 
 -- | Open the output and make the sounds of the title, the hall and the levels.
 -- False, and silent, if there is no output. The ending's sounds, which take longer
@@ -114,6 +116,14 @@ playCue c = case c of
   CueThunder -> play Thunder 0.5 1 0
   CueArrival -> play Arrival 1 1 0
   CueCard -> play Card 0.55 1 0
+  -- The opening film's own soundtrack, in the slot after every made sound.
+  CueIntro -> c_play clipSlot 0.9 1 0
+  CueIntroEnd -> c_stop clipSlot
+  CueTalkOpen -> play TalkOpen 0.42 1 0
+  CueTalkNext -> play MenuMove 0.16 1.25 0
+  -- Letters blip at a few nearby pitches, so a line does not drone.
+  CueTalkBlip k -> play TalkBlip 0.14 ([1, 1.12, 0.94, 1.06] !! ((k `div` 3) `mod` 4)) 0
+  CueTalkClose -> play TalkClose 0.3 1 0
 
 -- | The looping beds, each in its own slot of the mixer.
 setBeds :: Beds -> IO ()
@@ -158,3 +168,25 @@ wav ls rs = mconcat
     frames = min (length ls) (length rs)
     bytes = fromIntegral (frames * 4)
     sample x = B.int16LE (fromIntegral (round (max (-1) (min 1 x) * 32000) :: Int) :: Int16)
+
+-- | The mixer's slot for a clip loaded from a file: the opening film's soundtrack.
+-- The made sounds take the slots from 0 up, by their order in 'Sound'.
+clipSlot :: CInt
+clipSlot = 63
+
+-- | Hand a mono clip to the mixer, resampled from @rate@ to the mixer's own.
+loadClip :: Int -> UArray Int Float -> IO ()
+loadClip rate clip = do
+  let (lo, hi) = bounds clip
+      n0 = hi - lo + 1
+      step = fromIntegral rate / fromIntegral sampleRate :: Double
+      n = if n0 <= 0 then 0 else floor (fromIntegral (n0 - 1) / step) + 1
+      at i = let p = fromIntegral i * step
+                 j = floor p :: Int
+                 k = realToFrac (p - fromIntegral j) :: Float
+                 a = clip ! (lo + min (n0 - 1) j)
+                 b = clip ! (lo + min (n0 - 1) (j + 1))
+             in a + (b - a) * k
+  when (n > 1) $ allocaArray n $ \p -> do
+    forM_ [0 .. n - 1] $ \i -> pokeElemOff p i (realToFrac (at i))
+    c_load clipSlot p nullPtr (fromIntegral n)

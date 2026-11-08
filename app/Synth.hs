@@ -32,6 +32,8 @@ data Sound
   | Undo | Restart | Room | PauseOn | PauseOff
   -- The title and the hall
   | MenuMove | MenuEnter | MenuBack
+  -- The courier's talk
+  | TalkBlip | TalkOpen | TalkClose
   -- The ending
   | Flare | LampDies | LightGoes | WallBreak | RushBegins | Barrier | BarrierPassed
   | Caught | LampCatch | Thunder | Arrival | Card
@@ -98,6 +100,10 @@ osc wave freq d = runSTUArray $ do
 sine, tri :: Float -> Float
 sine p = sin (2 * pi * p)
 tri p = 4 * abs (p - 0.5) - 1
+
+-- | A plain square wave, for the talk's pixel-era blips. Kept under a low-pass.
+square :: Float -> Float
+square p = if p < 0.5 then 1 else -1
 
 tone :: (Float -> Float) -> Float -> Float -> Signal
 tone wave f = osc wave (const f)
@@ -432,6 +438,15 @@ oneShot s = case s of
   MenuMove -> Shot 0.7 0.1 0.2 (env (perc 0.001 0.03) (mix [ tone sine 1500 0.1, gain 0.3 (tone tri 1500 0.1) ]))
   MenuEnter -> hall 0.8 0.28 0.7 (mix [ gain 0.8 (bell 880 0.6), after 0.08 (bell 1318.5 0.8) ])
   MenuBack -> room (mix [ gain 0.8 (bell 1318.5 0.4), after 0.07 (gain 0.8 (bell 880 0.5)) ])
+  -- The talk: a square-wave blip for a letter, like an old handheld's; the box
+  -- slaps up on a rising chirp over a knock, and drops away on a falling one.
+  TalkBlip -> Shot 0.6 0.05 0.08 (env (perc 0.001 0.022) (mix
+    [ gain 0.55 (lowpass (const 5000) (tone square 620 0.05)), gain 0.3 (tone tri 1240 0.05) ]))
+  TalkOpen -> room (mix
+    [ gain 0.6 (env (perc 0.002 0.05) (lowpass (const 6000) (osc square (\t -> 420 + 5200 * t) 0.13)))
+    , gain 0.7 (thump 160 70 0.07)
+    , gain 0.3 (env (perc 0.001 0.02) (lowpass (const 3500) (pink 41 0.05))) ])
+  TalkClose -> room (gain 0.5 (env (perc 0.002 0.05) (lowpass (const 5000) (osc square (\t -> 900 - 3000 * t) 0.12))))
 
   -- The ending.
   -- The flare: everything rising to the white, cut at its height.

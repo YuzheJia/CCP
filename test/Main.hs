@@ -3,6 +3,7 @@ module Main (main) where
 
 import Control.Monad (forM, unless)
 import Data.List (foldl', isInfixOf, sort)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Game.Fx
@@ -12,6 +13,7 @@ import Game.Logic
 import Game.Run
 import Game.Solution
 import Game.Sound
+import Game.Story
 import Game.Types
 import System.Exit (exitFailure)
 
@@ -135,6 +137,8 @@ allChecks level = concat
   , cornerChecks
   , twoKeepersChecks
   , soundChecks level
+  , introChecks
+  , storyChecks
   ]
 
 -- 1. ---------------------------------------------------------------------------
@@ -1009,8 +1013,7 @@ campaignChecks = case campaign of
              && gPhase (runGame r) == Menu
              && gRemaining (runGame r) == lvBudget (levels !! 2)
       , check "run: the lobby cannot select a locked level" $
-          let title = startRun levels 0
-              lobby = stepRun levels enter title
+          let lobby = (startRun levels 0) { runMode = Lobby }
               released = stepRun levels noInput lobby
               r = stepRun levels (press DirDown) released
           in runIndex r == 0 && runUnlocked r == 0 && runMode r == Lobby
@@ -2135,3 +2138,138 @@ reportDuo = case secretLevels of
                   ++ show (drStates r) ++ " states")
         putStrLn ("level:  " ++ concatMap duoLabel route)
   _ -> pure ()
+
+-- The opening film --------------------------------------------------------------
+
+introChecks :: [Check]
+introChecks = case levelHall of
+  Left err -> [check ("intro: the levels parse: " ++ err) False]
+  Right levels ->
+    let fresh = startRun levels 0
+        opening = stepRun levels enter fresh
+        released = stepRun levels noInput opening
+        steps r inputs = foldl' (flip (stepRun levels)) r inputs
+        isIntro r = case runMode r of
+          Intro _ _ -> True
+          _ -> False
+    in
+    [ check "intro: a new campaign's Enter at the title plays the opening film" $
+        runMode opening == Intro 0 0 && runIndex opening == 0
+    , check "intro: with a level cleared, Enter at the title opens the hall" $
+        runMode (stepRun levels enter (startRunWithProgress levels 0 1)) == Lobby
+    , check "intro: the film counts its ticks" $
+        runMode (steps released (replicate 9 noInput)) == Intro 10 0
+    , check "intro: Escape skips straight into level 1, playing" $
+        let r = stepRun levels lobbyKey released
+        in runMode r == InLevel && runIndex r == 0 && gPhase (runGame r) == Playing
+    , check "intro: holding Enter skips it; a tap does not" $
+        let held = steps released (replicate introSkipTicks enter)
+            tapped = steps released ([enter, noInput] ++ replicate 30 noInput)
+        in runMode held == InLevel && runIndex held == 0 && isIntro tapped
+    , check "intro: the Enter still down from the title does not count towards a skip" $
+        isIntro (steps opening (replicate (introSkipTicks + 20) enter))
+    , check "intro: when the film ends, level 1 begins, and held keys need a fresh press" $
+        let held = stepRun levels space released
+            r = finishIntro levels held
+        in runMode r == InLevel && runIndex r == 0 && gPhase (runGame r) == Playing
+           && tiShift (gPrev (runGame r))
+           && gEra (runGame (stepRun levels space r)) == gEra (runGame r)
+    , check "intro: finishIntro leaves anything else alone" $
+        finishIntro levels fresh == fresh
+    , check "intro: its soundtrack starts with it and stops when it ends; no weather under it" $
+        CueIntro `elem` cues levels (fresh, initialFx) (opening, initialFx)
+        && CueIntroEnd `elem` cues levels (released, initialFx) (stepRun levels lobbyKey released, initialFx)
+        && beds levels opening == silence
+    ]
+
+-- The courier's talk --------------------------------------------------------------
+
+-- | One tick as the game runs it: an open talk takes the keys and holds the run.
+storyTick :: [Level] -> (Story, Run) -> TickInput -> (Story, Run)
+storyTick levels (s, r) input =
+  let (s0, free) = talkTick input r s
+      r' = if free then stepRun levels input r else holdRun input r
+  in (notice levels r r' s0, r')
+
+storyChecks :: [Check]
+storyChecks = case levelHall of
+  Right levels@(first : second : _) ->
+    let play = foldl' (storyTick levels)
+        lobby = (startRun levels 0) { runMode = Lobby }
+        entered = play (noStory, lobby) [enter]
+        talking = play entered (replicate (arrivalWait + 2) noInput)
+        -- Press a key, let go, again, until she is done.
+        through key st = case stTalk (fst st) of
+          Nothing -> st
+          Just _ -> through key (play st [key, noInput])
+        done = through enter talking
+        looks b = [ lk | Line _ (Just lk) <- beatLines first (runGame (snd entered)) b ]
+        playing = (runGame (snd done)) { gPrev = noInput }
+        inLevel = Run 0 0 0 InLevel playing
+        withCell = inLevel { runGame = playing { gHasCell = True } }
+        rustedRun = inLevel { runGame = playing { gFeedback = Just (Feedback CrateRusted hintFeedbackTicks) } }
+        trace0 st n = map fst (scanl (storyTick levels) st (replicate n noInput))
+        heardOver ss = concat (zipWith storyCues ss (drop 1 ss))
+    in
+    [ check "story: entering level 1 for the first time opens its talk, after the fade-in" $
+        case stTalk (fst entered) of
+          Just t -> tkBeat t == ArriveFirst && tkWait t == arrivalWait && not (talkShown t)
+          Nothing -> False
+    , check "story: level 1's talk points at the wick in the past and the lamp in the present" $
+        Look (lvPowerCell first) Past TheWick `elem` looks ArriveFirst
+        && Look (lvGoal first) Present TheLamp `elem` looks ArriveFirst
+    , check "story: while she talks the board waits, and keys spend nothing" $
+        let pressed = play talking (concat (replicate 5 [press DirRight, noInput]))
+            g = runGame (snd pressed)
+            g0 = runGame (snd talking)
+        in gCell g == gCell g0 && gRemaining g == gRemaining g0 && gEra g == gEra g0
+    , check "story: Enter finishes a line, then moves on, and the last one closes the talk" $
+        case stTalk (fst talking) of
+          Just t ->
+            let typed = play talking [enter]
+                nextLine = play typed [noInput, enter]
+            in not (lineTyped t)
+               && maybe False lineTyped (stTalk (fst typed))
+               && fmap tkLine (stTalk (fst nextLine)) == Just 1
+               && stTalk (fst done) == Nothing && runMode (snd done) == InLevel
+          Nothing -> False
+    , check "story: the Space that closes the talk does not shift; a fresh one does" $
+        let closed = through space talking
+            -- On to the last line, typed out; then Space closes the talk and is held.
+            lastLine st = case stTalk (fst st) of
+              Just t | tkLine t + 1 == length (tkLines t) && lineTyped t -> st
+              Just _ -> lastLine (play st [space, noInput])
+              Nothing -> st
+            held = play (lastLine talking) [space, space, space]
+            again = play held [noInput, space]
+        in stTalk (fst closed) == Nothing
+           && isJust (stTalk (fst (lastLine talking)))
+           && stTalk (fst held) == Nothing
+           && gEra (runGame (snd held)) == Present
+           && gEra (runGame (snd again)) == Past
+    , check "story: a level already cleared tells nothing" $
+        stTalk (fst (play (noStory, lobby { runCompleted = 1, runUnlocked = 1 }) [enter])) == Nothing
+    , check "story: taking the wick in level 1 opens a talk pointing at the lamp" $
+        case stTalk (notice levels inLevel withCell noStory) of
+          Just t -> tkBeat t == WickFirst && fmap lkThing (lnLook (currentLine t)) == Just TheLamp
+          Nothing -> False
+    , check "story: walking into the rusted crate opens a talk, once a visit" $
+        let s1 = notice levels inLevel rustedRun noStory
+            s2 = notice levels inLevel rustedRun s1 { stTalk = Nothing }
+        in fmap tkBeat (stTalk s1) == Just RustedCrate && stTalk s2 == Nothing
+    , check "story: level 2's talk points at a mirror on a sled, which can move" $
+        let g2 = runGame (stepRun levels enter (Run 1 1 1 Lobby (initialGame second)))
+            sleds = [ lk | Line _ (Just lk) <- beatLines second g2 ArriveSecond, lkThing lk == TheSled ]
+        in not (null sleds)
+           && all (\lk -> maybe False mMovable (Map.lookup (lkCell lk) (lvMirrors second))) sleds
+    , check "story: Escape still leaves a level mid-talk, and the talk with it" $
+        let left = play talking [lobbyKey]
+        in runMode (snd left) == Lobby && stTalk (fst left) == Nothing
+    , check "story: the box pops up with a sound, and letters blip as they type" $
+        let waiting = play entered (replicate (arrivalWait - 1) noInput)
+            shown = play waiting [noInput]
+            heard = heardOver (trace0 shown 20)
+        in storyCues (fst waiting) (fst shown) == [CueTalkOpen]
+           && not (null [ () | CueTalkBlip _ <- heard ])
+    ]
+  _ -> [check "story: the campaign has two levels" False]

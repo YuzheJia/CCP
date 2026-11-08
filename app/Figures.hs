@@ -18,6 +18,8 @@ module Figures
   , bendMirrorArt
   , beamLight
   , jumpArrow
+  , pushHint
+  , doorwayHint
   , blockedLanding
   , screenDir
   , cellIcon
@@ -341,6 +343,42 @@ jumpArrow d clock = rot (faceAngle d) (Translate 0 (46 + 3 * sin (clock * 0.2)) 
   [ Color (hexA 0x0A2A33 0.6) (Polygon [(-11, -3), (0, 9), (11, -3)])
   , Color (hexA 0xE6FAFF 0.95) (Polygon [(-9, -2), (0, 7), (9, -2)])
   ]))
+
+-- | Beside a movable mirror's back or side: where a push would slide its sled.
+-- Its outline waits on that cell, and two chevrons keep running the way it would go,
+-- warm, so they are not taken for the cool arrow of a jump.
+pushHint :: Dir -> Float -> Picture
+pushHint d clock = Pictures
+  [ Color (hexA 0xFFC45C (0.1 + 0.05 * sin (clock * 0.12))) (rectC 58 58)
+  , Color (hexA 0xFFD27A (0.6 + 0.25 * sin (clock * 0.12)))
+      (Pictures [ rot a (segs 3.5 [(-28, -14), (-28, -28), (-14, -28)]) | a <- [0, 90, 180, 270] ])
+  , rot (faceAngle d) (Pictures (concat
+      [ [ Color (hexA 0x2A1A08 (0.55 * k)) (segs 8 [(-17, y - 9), (0, y + 6), (17, y - 9)])
+        , Color (hexA 0xFFD98C k) (segs 5 [(-16, y - 8), (0, y + 6), (16, y - 8)]) ]
+      | i <- [0, 1 :: Int]
+      , let t = snd (properFraction ((clock + fromIntegral i * 20) / 40) :: (Int, Float))
+            y = -20 + 32 * t
+            k = sin (pi * t) ]))
+  ]
+
+-- | A way on into another room, on the doorway's cell: light from the room beyond
+-- spilling in over its outer edge, and chevrons drifting out through it, the way
+-- @d@. @k@ is how strongly, 0 to 1; the light is the era's own, warm in the past and
+-- cold in the present.
+doorwayHint :: Era -> Dir -> Float -> Float -> Picture
+doorwayHint era d k clock = rot (faceAngle d) (Pictures (wash ++ edge ++ chevrons))
+  where
+    tint = if era == Past then 0xFFE2A8 else 0xD8EEF6
+    breath = 0.75 + 0.25 * sin (clock * 0.05)
+    wash = [ Color (hexA tint (k * breath * 0.3 * (1 - fromIntegral i / 7)))
+                   (rect (-33) (half - 6 * fromIntegral (i + 1)) 66 6)
+           | i <- [0 .. 6 :: Int] ]
+    edge = [ Color (hexA tint (k * breath * 0.6)) (rect (-30) (half - 3) 60 3) ]
+    chevrons =
+      [ Color (hexA tint (k * 0.8 * sin (pi * t))) (segs 3 [(-11, y - 7), (0, y + 2), (11, y - 7)])
+      | i <- [0, 1 :: Int]
+      , let t = snd (properFraction ((clock + fromIntegral i * 35) / 70) :: (Int, Float))
+            y = -16 + 40 * t ]
 
 -- | Where a reflection would land, but cannot: crossed out.
 blockedLanding :: Picture

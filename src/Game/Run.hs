@@ -8,6 +8,9 @@ module Game.Run
   , startRunAt
   , stepRun
   , lastVisible
+    -- * The opening
+  , introSkipTicks
+  , finishIntro
     -- * The way on
   , Stage (..)
   , Finale (..)
@@ -45,8 +48,10 @@ import Game.Fx (roomCols, roomRows, roomOf)
 import Game.Logic
 import Game.Types
 
--- | Where the run is: the title, the level hall, a level, or a level's ending.
-data RunMode = Title | Lobby | InLevel | Ending !Finale
+-- | Where the run is: the title, the opening film, the level hall, a level, or a
+-- level's ending. The opening counts ticks since it began, and how long Enter (or
+-- Space) has been held down to skip it.
+data RunMode = Title | Intro !Int !Int | Lobby | InLevel | Ending !Finale
   deriving (Eq, Ord, Show)
 
 -- | @runCompleted@ is the number of campaign levels cleared. @runUnlocked@ is
@@ -89,12 +94,15 @@ startRunAt levels i completed
   where c = clamp 0 (length levels) completed
 
 -- | One fixed tick. Enter moves from the title into the lobby, where Escape goes
--- back to the title. Escape from a level returns to the lobby. Winning unlocks the
--- next room immediately, and Enter continues there. A level with a passage does not
--- wait for Enter: its ending runs, and leads into the secret level after it.
+-- back to the title; a campaign with nothing cleared yet plays the opening film
+-- instead, and goes from it straight into the first level. Escape from a level
+-- returns to the lobby. Winning unlocks the next room immediately, and Enter
+-- continues there. A level with a passage does not wait for Enter: its ending runs,
+-- and leads into the secret level after it.
 stepRun :: [Level] -> TickInput -> Run -> Run
 stepRun levels input run = case runMode run of
   Title    -> stepTitle
+  Intro age held -> stepIntro age held
   Lobby    -> stepLobby
   InLevel  -> stepLevel
   Ending f -> stepEnding f
@@ -128,8 +136,23 @@ stepRun levels input run = case runMode run of
       { gAttempt = gAttempt g + 1, gPrev = input })
 
     stepTitle
+      | freshEnter && c == 0 = Run 0 u c (Intro 0 0) ((initialGame (levels !! 0))
+          { gAttempt = gAttempt g + 1, gPrev = input })
       | freshEnter = toLobby
       | otherwise  = run { runGame = g { gPrev = input } }
+
+    -- Escape skips the film at once; Enter or Space skips it once held down for
+    -- 'introSkipTicks', so a tap meant for something else cannot. Only a hold that
+    -- starts during the film counts, not the Enter still down from the title.
+    stepIntro age held
+      | freshLobby || held' >= introSkipTicks = Run 0 u c InLevel (begin (levels !! 0))
+      | otherwise = run { runMode = Intro (age + 1) held', runGame = g { gPrev = input } }
+      where
+        freshShift = tiShift input && not (tiShift prev)
+        holding = tiEnter input || tiShift input
+        held'
+          | holding && (held > 0 || freshEnter || freshShift) = held + 1
+          | otherwise = 0
 
     stepLobby
       | freshLobby = toTitle
@@ -159,6 +182,26 @@ stepRun levels input run = case runMode run of
 
 clamp :: Ord a => a -> a -> a -> a
 clamp lo hi = max lo . min hi
+
+-- The opening ---------------------------------------------------------------------
+--
+-- The film itself belongs to the app, which knows how long it is; the run only
+-- counts its ticks and takes the keys that skip it.
+
+-- | How long Enter or Space must be held to skip the opening film.
+introSkipTicks :: Int
+introSkipTicks = 40
+
+-- | The opening film has ended: the first level begins. Keys held as it ends need a
+-- fresh press. Anything other than the opening is left as it is.
+finishIntro :: [Level] -> Run -> Run
+finishIntro levels run = case runMode run of
+  Intro _ _ ->
+    let g = runGame run
+    in run { runIndex = 0, runMode = InLevel
+           , runGame = (initialGame (levels !! 0))
+               { gPhase = Playing, gAttempt = gAttempt g + 1, gPrev = gPrev g } }
+  _ -> run
 
 -- The way on --------------------------------------------------------------------
 --

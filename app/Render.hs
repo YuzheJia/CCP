@@ -1,5 +1,5 @@
 -- | Composes one frame from the game, the effects and the prebuilt art.
-module Render (Scene, mkScene, render, renderEnding) where
+module Render (Scene, mkScene, render, renderWith, renderEnding, fitted) where
 
 import Control.Monad (mfilter)
 import Data.Maybe (isJust)
@@ -159,6 +159,12 @@ captionOf s Present = scPresentCaption s
 render :: Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
 render scene level g fx size = fitted size (frame scene level g fx)
 
+-- | As 'render', with more drawn over the frame in canvas units: @ is given the
+-- board's stand, 0 while the level is introduced and 1 once closed in.
+renderWith :: (Float -> Picture) -> Scene -> Level -> Game -> Fx -> (Int, Int) -> Picture
+renderWith over scene level g fx size =
+  fitted size (Pictures [frame scene level g fx, over (focusOf Nothing fx)])
+
 -- | A frame of a level's ending. @next@ is the number and name of the level that it
 -- leads into, for the card at the end.
 renderEnding :: Scene -> Level -> (String, String) -> Finale -> Game -> Fx -> (Int, Int) -> Picture
@@ -282,6 +288,7 @@ onTheBoard finale scene level g fx = Pictures
       , beams
       , mirrors
       , crossingMarks
+      , exits
       , footprints
       , crates
       , winBeneath
@@ -294,6 +301,7 @@ onTheBoard finale scene level g fx = Pictures
       [ blockedOutline
       , echo
       , reflections
+      , pushes
       , jumpFlash
       , actors
       , burst
@@ -477,6 +485,38 @@ onTheBoard finale scene level g fx = Pictures
               else at (cellPos (jTarget j)) blockedLanding
           | (gg, _) <- keepers, gMotion gg == Settled
           , d <- [minBound .. maxBound], Just j <- [mirrorAhead level gg d], visible (jTarget j) ]
+    -- A level shown a room at a time: each doorway on to another room glows with the
+    -- light of the room beyond, chevrons running out through it, so a way on never
+    -- passes for a dead end. Strongest towards a room not yet seen; faint where the
+    -- way is open only in the other era. Worked out from the board, so a crate in a
+    -- doorway puts its light out until it is moved.
+    exits
+      | not roomed || scRooms scene == (1, 1) || gPhase g /= Playing || isJust finale = Blank
+      | otherwise = Pictures
+          [ at (cellPos c) (doorwayHint era d (strength * fadeIn) (clock + fromIntegral (fst c * 17)))
+          | c <- [ (x, y) | y <- [roomY * roomRows .. roomY * roomRows + roomRows - 1]
+                          , x <- [roomX * roomCols .. roomX * roomCols + roomCols - 1] ]
+          , d <- [minBound .. maxBound]
+          , let n = stepCell d c
+          , roomOf n /= shownRoom
+          , let openIn e = openCell level g e c && openCell level g e n
+          , openIn Past || openIn Present
+          , let unseen = roomOf n `notElem` fxVisited fx
+                strength = (if unseen then 1 else 0.35) * (if openIn era then 1 else 0.4) ]
+    fadeIn = 1 - roomFadeDark fx
+
+    -- Beside a movable mirror's back or side: where a push would slide it, worked
+    -- out by the push rule itself, so the hint cannot promise what a key will not do.
+    pushes
+      | gPhase g /= Playing || peeking g fx = Blank
+      | otherwise = Pictures
+          [ at (cellPos to) (pushHint d clock)
+          | (gg, _) <- keepers, gMotion gg == Settled
+          , d <- [minBound .. maxBound]
+          , Just m <- [mirrorAt gg (gEra gg) (stepCell d (gCell gg))], mMovable m
+          , let pushed = tryStep level True d gg
+          , gMirrors pushed /= gMirrors gg
+          , Just to <- [gPushing pushed], visible to ]
     jumpFlash = Pictures
       [ Pictures
           [ at (cellPos (gCell gg)) (Color (hexA 0xE6FAFF (0.7 * (1 - p))) (ring 28 (20 + 30 * p) 3 1))

@@ -26,7 +26,9 @@ cabal run borrowed-light
 
 `cabal run borrowed-light -- --demo` has the solver play every level, then hands you the keyboard. Add `--level=N` to select level N in the hall (and unlock it for development); `--level=4` opens the secret level directly. Add `--pace=N` to wait N ticks (60 a second) after each of the demo's moves.
 
-The game opens on its title screen. Enter opens the **Level Hall**; Escape from the
+The game opens on its title screen. On a new save, Enter plays the **opening film**
+and goes from it straight into level 1 (see "The courier" below). Once a level is
+cleared, Enter opens the **Level Hall** instead; Escape from the
 hall returns to the title. Use W/S or the arrow keys to choose an unlocked lesson
 and Enter to play it. Escape returns to the hall from any point in a level.
 Clearing a room unlocks the next one. Completed rooms and the selected room are saved
@@ -43,10 +45,76 @@ starts fresh when it is entered again.
 | Tab | Hold to look at the other era, for free |
 | P | Pause / resume |
 | R | Restart |
-| Enter | Start / retry |
-| Escape | Return to the Level Hall |
+| Enter | Start / retry; on with the courier's talk (Space too) |
+| Enter, held | Skip the opening film |
+| Escape | Return to the Level Hall; skip the opening film |
 | M | Sound off / on |
 | Window close button | Exit |
+
+### The courier
+
+The keeper is a delivery rider, Mei, with an odd order: pick up a lamp wick and
+deliver it to the top floor of Cape Lighthouse. The wick is the power cell, which only
+the lighthouse's past still has; the top floor is the lamp, in the present.
+
+**The opening film** ([assets/intro.blv](assets/intro.blv), ten seconds, five shots:
+the order coming in, the ride out along the causeway, the delivery note at the door)
+plays on a new save between the title and level 1, with its own soundtrack. Holding
+Enter (or Space) for two thirds of a second skips it, and so does Escape; a tap does
+not, and neither does the Enter still held from the title. It plays once a session.
+If the file is missing, the title goes straight into level 1.
+
+**Her talk** is a box in the style of a comic-book speech panel: her portrait rising
+from the bottom left, a tilted black box with a white rim and a yellow shadow, a name
+tag, and the line typing out in a pixel font, words in capitals in yellow, a blip
+every few letters. Box, letters and portrait share one pixel grid, three canvas units
+to a pixel. Enter or Space finishes a line, then moves on. While she talks the board
+waits: keys move nothing and cost nothing, the key that closes the talk does nothing
+in play, and Escape still leaves the level. When she talks about something, the board
+dims around it, brackets close on its cell and a tag over it names it and its era;
+if it is in the other era, the board shows that era, as Tab would.
+
+What she says, and when, is [src/Game/Story.hs](src/Game/Story.hs), pure and tested,
+and only in a level not yet cleared:
+
+| Level | When | What she points at |
+|---|---|---|
+| 1 | On arrival | The wick, in its cradle in the past; the lamp, in the present; then Space and the clock |
+| 1 | Walking into the rusted crate | The crate: it would slide in the past |
+| 1 | Taking the wick | The lamp |
+| 2 | On arrival | The wick, shut in its alcove; the mirror on a sled (it slides when shoved from the back or sides, and its light carries her through); the lamp |
+| 2 | Taking the wick | The lamp |
+
+**The push hint.** Players did not find out that a movable mirror can be pushed, so
+the board shows it, the way a jump shows its landing: standing beside a movable
+mirror's back or side, its outline waits on the cell it would slide to, with warm
+chevrons running that way. It is worked out by the push rule itself (`tryStep`), so
+it never offers a push that would not happen, and it appears in every level.
+
+**Doorways.** In a level shown a room at a time, a way on into another room could
+pass for a dead end, so each doorway glows with the light of the room beyond, warm in
+the past and cold in the present, with chevrons drifting out through it. It is
+strongest towards a room not yet seen, faint back towards one already seen, and
+fainter still where the way is open only in the other era. It is worked out from the
+board (`openCell` on both sides), so a crate standing in a doorway, like the shortcut
+home in level 3, puts its light out until it is moved.
+
+Regenerating the assets needs Blender, for its FFmpeg and numpy:
+
+```bash
+blender -b --factory-startup --python tools/encode-intro.py -- FILM.mp4 assets/intro.blv
+```
+
+```bash
+blender -b --factory-startup --python tools/make-portrait.py -- assets/source/courier.webp app/Portrait.hs
+```
+
+The film format is described at the top of [app/Video.hs](app/Video.hs): a
+256-colour palette per shot, and each frame coded against the one before. The film
+in the game comes from a 1920 by 1080 source, shrunk to 1280 by 720, one pixel to a
+canvas unit, so it fills the screen across. An optional last argument to the script
+sets another width (640 makes a file a quarter the size, but soft on a large
+screen), and the game scales whatever width it finds to fill the screen.
 
 ### Time
 
@@ -252,7 +320,8 @@ With a Chinese input method in Chinese mode, Windows swallows the letter keys be
 ### Sound
 
 Every sound is synthesised in code at startup, from oscillators, noise and filters in
-[app/Synth.hs](app/Synth.hs). Nothing is loaded from a file, as with the art. Each
+[app/Synth.hs](app/Synth.hs). Nothing is loaded from a file, as with the art, but
+the opening film's soundtrack, which comes with the film. Each
 sound is heard in a stereo hall (small for footsteps, large for the lamp and the
 ending); breath, air and water are soft pink or brown noise rather than white noise,
 which hisses; and saw waves are band-limited, so they do not buzz.
@@ -267,6 +336,7 @@ which hisses; and saw waves are band-limited, so they do not buzz.
 | The lamp | A warm chord swelling, a bell over it |
 | Refused, undone, out of time | A bump, a dull double buzz, a tape run backwards, three falling notes |
 | Behind it all | Quietly, in wide stereo: a calm sea in the past; wind moaning, a distant roll and rain in the present |
+| The courier's talk | The box slapping up on a rising chirp, a square-wave blip every third letter at a few nearby pitches, a falling chirp as it goes |
 
 Level 3's ending is scored to its picture, tick for tick: the chord of the lit lamp;
 a surge climbing into the white of the flare, cut by the blow and breaking glass as
@@ -292,7 +362,9 @@ as a WAV file and exits, to listen to them outside the game.
 
 ### Development flags
 
-`--script=KEYS --after=N` runs keys instantly at startup and then freezes, to inspect an exact moment. `--trace` prints state changes, and whether sound is on, and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
+`--intro` opens on the opening film whatever the save says, to watch it again. `--script=KEYS --after=N` runs keys instantly at startup, through the same ticks as the keyboard (talk and film included), and then freezes, to inspect an exact moment; `!` in it is Escape. `--trace` prints state changes, and whether sound is on and the film was found, and `--fps` prints frame rate. Full list at the top of [app/Main.hs](app/Main.hs).
+
+To try the first-time flow without touching your own save, point `XDG_DATA_HOME` at an empty folder for that run: the save lives under it.
 
 ## How it fits together
 
@@ -304,11 +376,16 @@ src/Game/   pure core: no Gloss, no IO, compiled without a graphics dependency
   Input     key events into one TickInput per tick
   Fx        decorative state, derived by comparing successive games
   Solution  the intended route, and cheapest-first search over real stepGame
-  Run       which level is being played, and moving between them
+  Run       which level is being played, and moving between them, the opening film too
   Sound     which sounds a tick starts, and how loud each bed is
+  Story     when the courier talks, what she says and what the board points at
 app/        Gloss only: Main (IO), Render, Station, Figures, Hud, Title, Font, Draw, Platform;
-            Synth (making the sounds) and Audio (playing them)
+            Synth (making the sounds) and Audio (playing them);
+            Video (the film's decoder), TalkBox (her talk and the film's screen),
+            PixelFont, Portrait (generated)
 cbits/      audio.c: the mixer and Windows sound output
+assets/     intro.blv, the opening film; source/, the portrait it was made from
+tools/      Blender scripts that make the film and the portrait
 test/       plain assertions over the core
 ```
 
@@ -349,7 +426,7 @@ Walls and crates are bright and raised, and walkable cells are dark and flat. A 
 
 **The shift** is the centrepiece: tiles flip edge-on, one by one, in order of distance from the player, behind a thin expanding ring. A refused shift outlines and hatches the cell and says why, with only a small shudder on the keeper. **Victory** moves the keeper aside, relights the tower, turns long beams through the scene and soaks warm light outward.
 
-Everything is procedural geometry, with no external assets. Glows are layered transparency, an approximation rather than real bloom. Lettering is a custom stroke font in [app/Font.hs](app/Font.hs), because Gloss's built-in text is one pixel wide.
+Everything is procedural geometry, with no external assets but the opening film and the courier's portrait, both pixel art, kept to their own pixel grid. Glows are layered transparency, an approximation rather than real bloom. Lettering is a custom stroke font in [app/Font.hs](app/Font.hs), because Gloss's built-in text is one pixel wide.
 
 ## Solution walkthrough
 
